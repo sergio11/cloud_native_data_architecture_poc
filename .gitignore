@@ -203,7 +203,7 @@ minio-data/
 $DAGSTER_HOME/
 .dagster/
 dagster_home/
-storage/
+/storage/
 
 # -----------------------------------------------------------------------------
 # Node / npm (if any web tooling is added)
@@ -230,3 +230,4 @@ scratch/
 *.tmp
 *.bak
 *.swp
+srs.txt

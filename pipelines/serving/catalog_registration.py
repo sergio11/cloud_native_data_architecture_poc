@@ -25,8 +25,7 @@ import logging
 import os
 import sys
 import time
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +52,9 @@ HTTP_TIMEOUT = 30
 # All Iceberg namespaces to register
 NAMESPACES = ["sales", "marketing", "finance", "stream"]
 
-# Gold Iceberg tables to register in Polaris
+# Gold Iceberg tables to register in Polaris.
+# Only tables actually produced by the core use cases are listed:
+#   AggregateGoldUseCase -> gold.sales.daily_metrics, gold.sales.customers.
 GOLD_TABLES: list[dict[str, Any]] = [
     {
         "namespace": "sales",
@@ -69,8 +70,8 @@ GOLD_TABLES: list[dict[str, Any]] = [
     },
     {
         "namespace": "sales",
-        "name": "dim_customers",
-        "location": "s3://datalake/warehouse/gold/sales/dim_customers",
+        "name": "customers",
+        "location": "s3://datalake/warehouse/gold/sales/customers",
         "schema": [
             {"name": "customer_id", "type": "int", "required": True},
             {"name": "name_masked", "type": "string", "required": False},
@@ -82,48 +83,12 @@ GOLD_TABLES: list[dict[str, Any]] = [
             {"name": "is_active", "type": "boolean", "required": False},
         ],
     },
-    {
-        "namespace": "marketing",
-        "name": "daily_funnel",
-        "location": "s3://datalake/warehouse/gold/marketing/daily_funnel",
-        "schema": [
-            {"name": "event_date", "type": "date", "required": True},
-            {"name": "cnt_view", "type": "long", "required": False},
-            {"name": "cnt_click", "type": "long", "required": False},
-            {"name": "cnt_add_to_cart", "type": "long", "required": False},
-            {"name": "cnt_checkout", "type": "long", "required": False},
-            {"name": "cnt_purchase", "type": "long", "required": False},
-        ],
-    },
-    {
-        "namespace": "marketing",
-        "name": "dim_campaigns",
-        "location": "s3://datalake/warehouse/gold/marketing/dim_campaigns",
-        "schema": [
-            {"name": "campaign_id", "type": "string", "required": True},
-            {"name": "channel", "type": "string", "required": False},
-            {"name": "budget", "type": "double", "required": False},
-            {"name": "start_date", "type": "date", "required": False},
-            {"name": "end_date", "type": "date", "required": False},
-        ],
-    },
-    {
-        "namespace": "finance",
-        "name": "financial_closings",
-        "location": "s3://datalake/warehouse/gold/finance/financial_closings",
-        "schema": [
-            {"name": "closure_id", "type": "string", "required": True},
-            {"name": "fiscal_year", "type": "int", "required": True},
-            {"name": "fiscal_period", "type": "int", "required": True},
-            {"name": "gross_revenue", "type": "double", "required": False},
-            {"name": "net_revenue", "type": "double", "required": False},
-            {"name": "total_orders", "type": "long", "required": False},
-            {"name": "status", "type": "string", "required": False},
-        ],
-    },
 ]
 
-# Stream Iceberg tables to register in Polaris
+# Stream Iceberg tables to register in Polaris.
+# Only tables actually written by the streaming drivers are listed:
+#   flink_orders_stream     -> stream.sales.orders_windowed
+#   flink_clickstream_stream -> stream.marketing.clickstream_windowed
 STREAM_TABLES: list[dict[str, Any]] = [
     {
         "namespace": "stream",
@@ -139,16 +104,15 @@ STREAM_TABLES: list[dict[str, Any]] = [
     },
     {
         "namespace": "stream",
-        "name": "marketing_funnel_metrics",
-        "location": "s3://datalake/warehouse/stream/marketing/funnel_metrics",
+        "name": "marketing_clickstream_windowed",
+        "location": "s3://datalake/warehouse/stream/marketing/clickstream_windowed",
         "schema": [
-            {"name": "window_start", "type": "timestamp", "required": True},
-            {"name": "window_end", "type": "timestamp", "required": True},
-            {"name": "cnt_view", "type": "long", "required": False},
-            {"name": "cnt_click", "type": "long", "required": False},
-            {"name": "cnt_add_to_cart", "type": "long", "required": False},
-            {"name": "cnt_checkout", "type": "long", "required": False},
-            {"name": "cnt_purchase", "type": "long", "required": False},
+            {"name": "order_date", "type": "date", "required": True},
+            {"name": "status", "type": "string", "required": False},
+            {"name": "window_revenue", "type": "double", "required": False},
+            {"name": "window_orders", "type": "long", "required": False},
+            {"name": "avg_order_value", "type": "double", "required": False},
+            {"name": "source_tier", "type": "string", "required": False},
         ],
     },
 ]
@@ -168,9 +132,12 @@ PIPELINE_JOBS: list[dict[str, Any]] = [
         "name": "flink_clickstream_stream",
         "inputs": [{"namespace": "kafka", "name": "marketing.clickstream.raw"}],
         "outputs": [
-            {"namespace": "iceberg", "name": "polaris.marketing.funnel_metrics"},
+            {"namespace": "iceberg", "name": "polaris.marketing.clickstream_windowed"},
         ],
-        "description": "PyFlink streaming job: session metrics and real-time funnel conversion rates.",
+        "description": (
+            "PyFlink streaming job: tumbling window aggregation over the clickstream topic "
+            "(funnel metrics out of POC scope, SRS 1.2)."
+        ),
         "location": "pipelines/stream/flink_clickstream_stream.py",
     },
     {
@@ -179,20 +146,9 @@ PIPELINE_JOBS: list[dict[str, Any]] = [
         "inputs": [{"namespace": "iceberg", "name": "bronze.sales.orders"}],
         "outputs": [
             {"namespace": "iceberg", "name": "gold.sales.daily_metrics"},
-            {"namespace": "iceberg", "name": "gold.sales.dim_customers"},
+            {"namespace": "iceberg", "name": "gold.sales.customers"},
         ],
         "description": "Daily Spark batch ETL: bronze -> silver -> gold for sales domain.",
-        "location": "pipelines/medallion/gold_aggregation.py",
-    },
-    {
-        "namespace": "spark",
-        "name": "spark_marketing_gold_etl",
-        "inputs": [{"namespace": "iceberg", "name": "bronze.marketing.campaigns"}],
-        "outputs": [
-            {"namespace": "iceberg", "name": "gold.marketing.daily_funnel"},
-            {"namespace": "iceberg", "name": "gold.marketing.dim_campaigns"},
-        ],
-        "description": "Daily Spark batch ETL: bronze -> gold for marketing domain.",
         "location": "pipelines/medallion/gold_aggregation.py",
     },
     {
@@ -200,18 +156,18 @@ PIPELINE_JOBS: list[dict[str, Any]] = [
         "name": "unified_serving_views",
         "inputs": [
             {"namespace": "iceberg", "name": "gold.sales.daily_metrics"},
-            {"namespace": "iceberg", "name": "gold.sales.dim_customers"},
-            {"namespace": "iceberg", "name": "gold.marketing.daily_funnel"},
-            {"namespace": "iceberg", "name": "gold.marketing.dim_campaigns"},
+            {"namespace": "iceberg", "name": "gold.sales.customers"},
             {"namespace": "iceberg", "name": "stream.sales.orders_windowed"},
-            {"namespace": "iceberg", "name": "stream.marketing.funnel_metrics"},
+            {"namespace": "iceberg", "name": "stream.marketing.clickstream_windowed"},
         ],
         "outputs": [
             {"namespace": "trino", "name": "serving.sales.unified_revenue"},
-            {"namespace": "trino", "name": "serving.marketing.unified_campaign_performance"},
-            {"namespace": "trino", "name": "serving.finance.unified_pl_summary"},
         ],
-        "description": "Serving layer views unified query interface (RF-11).",
+        "description": (
+            "Serving layer unified query interface (RF-11). Only tables actually "
+            "produced by a pipeline in this POC are listed as inputs/outputs; "
+            "marketing/finance analytical views are PLANNED, not produced."
+        ),
         "location": "pipelines/serving/unified_view.sql",
     },
 ]
@@ -564,7 +520,7 @@ class MarquezClient:
             "runId": run_id,
             "passRate": pass_rate,
             "stats": stats,
-            "checkedAt": datetime.now(timezone.utc).isoformat(),
+            "checkedAt": datetime.now(UTC).isoformat(),
         }
         self._request(
             "POST",
@@ -606,17 +562,26 @@ class ManifestUpdater:
     def _scan(self) -> None:
         """Walk ``manifests_dir`` and index all ``product.yaml`` files.
 
-        The index key is ``(domain, product)`` derived from the relative path:
-        ``<manifests_dir>/<domain>/<product>/product.yaml``.
+        The index key is ``(domain, product)`` matching the real repository
+        layout ``domains/<domain>/data-products/<product>/product.yaml`` (the
+        root itself may be the repo root, the ``domains`` directory, or any
+        ancestor of the ``data-products`` folder).  For flat
+        ``<domain>/<product>/product.yaml`` trees the first path component is
+        used as the domain.
         """
         count = 0
         for yaml_path in self.manifests_dir.rglob("product.yaml"):
             parts = yaml_path.relative_to(self.manifests_dir).parts
-            if len(parts) >= 2:
+            if len(parts) < 2:
+                continue
+            product = parts[-2]
+            if "data-products" in parts:
+                idx = parts.index("data-products")
+                domain = parts[idx - 1] if idx > 0 else self.manifests_dir.name
+            else:
                 domain = parts[0]
-                product = parts[1]
-                self._manifest_map[(domain, product)] = yaml_path
-                count += 1
+            self._manifest_map[(domain, product)] = yaml_path
+            count += 1
         logger.info("ManifestUpdater: indexed %d product.yaml files.", count)
 
     def _load(self, path: Path) -> dict[str, Any]:
@@ -652,14 +617,18 @@ class ManifestUpdater:
     ) -> None:
         """Update the ``path`` field of a named asset inside a product manifest.
 
-        Locates the asset by name within the ``assets`` list and sets its
-        ``path`` key to ``actual_path``.  If the asset is not found it is
-        appended as a new entry.
+        Manifests keep their assets under ``spec.assets`` (see
+        ``domains/sales/data-products/orders/product.yaml``), so the asset list
+        is read from and written back to ``data["spec"]["assets"]``; any
+        top-level ``assets`` key is left untouched.  Locates the asset by name
+        within the list and sets its ``path`` key to ``actual_path``, preserving
+        all other fields.  If the asset is not found it is appended as a new
+        entry.
 
         Args:
             domain: Domain name used to locate the manifest.
             product: Product name used to locate the manifest.
-            asset_name: Name of the asset entry inside the YAML ``assets`` list.
+            asset_name: Name of the asset entry inside the YAML ``spec.assets`` list.
             actual_path: New physical path (e.g. S3 URI) to write.
         """
         key = (domain, product)
@@ -672,9 +641,16 @@ class ManifestUpdater:
             return
         yaml_path = self._manifest_map[key]
         data = self._load(yaml_path)
-        assets: list[dict] = data.setdefault("assets", [])
+        spec = data.get("spec")
+        if not isinstance(spec, dict):
+            spec = {}
+            data["spec"] = spec
+        assets: list[dict] = spec.setdefault("assets", [])
+        if not isinstance(assets, list):
+            assets = []
+            spec["assets"] = assets
         for asset in assets:
-            if asset.get("name") == asset_name:
+            if isinstance(asset, dict) and asset.get("name") == asset_name:
                 asset["path"] = actual_path
                 logger.info(
                     "Updated asset '%s' path in %s → %s", asset_name, yaml_path, actual_path
@@ -918,7 +894,7 @@ def _update_manifests(updater: ManifestUpdater) -> None:
         updater: Initialised ManifestUpdater.
     """
     logger.info("--- Updating product.yaml manifests ---")
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     # Domain→product→asset→path mapping derived from table definitions
     asset_path_map: dict[str, dict[str, list[tuple[str, str]]]] = {
@@ -928,7 +904,7 @@ def _update_manifests(updater: ManifestUpdater) -> None:
                 ("orders_windowed", "s3://datalake/warehouse/stream/sales/orders_windowed"),
             ],
             "customers": [
-                ("dim_customers", "s3://datalake/warehouse/gold/sales/dim_customers"),
+                ("customers", "s3://datalake/warehouse/gold/sales/customers"),
                 ("customer_metrics", "s3://datalake/warehouse/gold/sales/customer_metrics"),
             ],
         },
@@ -968,7 +944,7 @@ def _print_summary(
     print("\n" + "=" * 70)
     print("  CATALOG REGISTRATION SUMMARY")
     print("=" * 70)
-    print(f"  Timestamp : {datetime.now(timezone.utc).isoformat()}")
+    print(f"  Timestamp : {datetime.now(UTC).isoformat()}")
     print(f"  Polaris   : {polaris_client.base_url}")
     print()
 

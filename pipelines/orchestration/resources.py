@@ -3,10 +3,11 @@ Dagster custom resources for the Modern Data Architecture POC.
 Provides connectors to Apache Spark, Apache Flink, Marquez/OpenLineage, and Great Expectations.
 """
 
-import os
 import logging
+import os
+
 import requests
-from dagster import ConfigurableResource, resource
+from dagster import ConfigurableResource
 
 logger = logging.getLogger("dagster.resources")
 
@@ -47,9 +48,64 @@ class MarquezResource(ConfigurableResource):
 
 
 class GreatExpectationsResource(ConfigurableResource):
-    """Resource to execute data quality suites."""
+    """Resource to execute data quality suites via the hexagonal core quality gate."""
     suites_dir: str = "quality/expectations"
 
-    def run_suite(self, suite_name: str, table_ref: str) -> bool:
-        logger.info("Executing Great Expectations suite %s against %s", suite_name, table_ref)
-        return True
+    @staticmethod
+    def _execute_quality_gate(table_name: str, suite_path: str, threshold: float):
+        # Lazy import so Dagster only pays for the container when a gate actually runs.
+        from src.container import container
+
+        return container.run_quality_gate.execute(
+            table_name=table_name,
+            suite_path=suite_path,
+            threshold=threshold,
+        )
+
+    def run_suite(self, suite_name: str, table_ref: str, threshold: float = 0.95) -> bool:
+        """Run an expectation suite against a table and return the gate verdict.
+
+        Args:
+            suite_name: Suite file name (resolved against ``suites_dir``) or a
+                path containing a directory component (used as-is).
+            table_ref: Fully qualified table name (e.g. ``silver.sales.orders``).
+            threshold: Minimum pass rate required for approval.
+
+        Returns:
+            ``True`` only when the core quality gate approved the data.
+            ``False`` when the gate failed or could not be executed (the
+            failure is logged so Dagster assets can surface it).
+        """
+        from src.domain.exceptions import SuiteNotFoundError
+
+        suite_path = (
+            suite_name
+            if os.path.dirname(suite_name)
+            else os.path.join(self.suites_dir, suite_name)
+        )
+        logger.info("Executing quality gate suite '%s' against '%s'", suite_path, table_ref)
+        try:
+            evaluation = self._execute_quality_gate(
+                table_name=table_ref,
+                suite_path=suite_path,
+                threshold=threshold,
+            )
+            verdict = bool(evaluation.passed)
+        except SuiteNotFoundError as exc:
+            logger.error("Quality suite missing for table '%s': %s", table_ref, exc)
+            return False
+        except Exception as exc:
+            logger.error(
+                "Quality gate execution failed for suite '%s' on table '%s': %s",
+                suite_path,
+                table_ref,
+                exc,
+            )
+            return False
+        logger.info(
+            "Quality gate verdict for '%s' via '%s': %s",
+            table_ref,
+            suite_path,
+            "PASS" if verdict else "FAIL",
+        )
+        return verdict

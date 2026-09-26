@@ -1,0 +1,53 @@
+# Modern Data Architecture POC — project metadata and tooling configuration.
+#
+# NOTE on packaging: the codebase uses the "repo-root on sys.path" layout
+# (`from src.x import y`, see pytest `pythonpath`), so this file is
+# CONFIG-ONLY: no [build-system] and no declared packages. `pip install`
+# is not required to run the POC — install only the runtime deps below.
+
+[project]
+name = "poc-data-engineering"
+version = "0.1.0"
+description = "Modern Data Architecture POC: Data Mesh, Data Fabric, Medallion Lakehouse, Lambda/Kappa, Serving Layer (100% open source, local-first)"
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+    "requests>=2.31",
+    "click>=8.1",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+# Governance JSON-schema validation (used opportunistically; structural checks run without it)
+contracts = ["jsonschema>=4.0"]
+# Infrastructure-backed adapters (PostgreSQL source, Trino serving, Kafka broker)
+integrations = ["psycopg2-binary>=2.9", "trino>=0.330", "confluent-kafka>=2.3"]
+# Orchestration assets
+orchestration = ["dagster>=1.6"]
+# Dev toolchain: tests + lint + types
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.5", "mypy>=1.10"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E501 is covered by line-length; per-file ignores only where justified below.
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+exclude = "__pycache__"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["src"]

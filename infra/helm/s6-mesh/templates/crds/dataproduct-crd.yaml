@@ -33,7 +33,7 @@ spec:
                   type: string
                 classification:
                   type: string
-                  enum: ["public", "internal", "confidential", "restricted"]
+                  enum: ["public", "internal", "confidential", "restricted", "pii"]
                 sla:
                   type: object
                   properties:

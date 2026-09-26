@@ -20,8 +20,10 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 1. **Data Mesh**: Domain-oriented decentralized data ownership and self-serve infrastructure.
 2. **Data Fabric**: Active metadata management, automated pipeline lineage harvesting, and dynamic quality enforcement.
 3. **Data Products & Declarative Contracts**: Analytical datasets packaged as versioned products bounded by formal contracts adhering to the Bitol Open Data Contract Standard (ODCS).
-4. **Medallion Lakehouse**: Open multi-tier curation (Bronze raw, Silver conformed, Gold aggregated) utilizing Apache Iceberg on MinIO object storage governed by the Apache Polaris REST catalog.
-5. **Hybrid Lambda / Kappa Processing**: Distributed batch transformations (Apache Spark) for historical depth combined with stateful event stream processing (Apache Flink) for real-time responsiveness, unified seamlessly at query time via Trino.
+4. **Medallion Lakehouse**: Multi-tier curation (Bronze raw, Silver conformed, Gold aggregated) with ACID semantics, schema evolution, and time travel — implemented locally over embedded SQLite adapters, targeting Apache Iceberg on MinIO (Polaris catalog) in the K8s profile.
+5. **Hybrid Lambda / Kappa Processing**: Full-recomputation batch layer for historical depth combined with event-log stream processing (real 5-minute tumbling windows + full replay), unified at query time by a single anti-join SQL.
+
+> **Two execution profiles** share the same hexagonal core (`src/`): the **local profile** (default — pure Python + SQLite, verified by `rake demo` / `rake test`) and the **K8s profile** (`infra/helm`, `infra/profiles` — deployment target). See [`docs/architecture/overview.md`](docs/architecture/overview.md) and the honest RF-by-RF report [`docs/traceability-status.md`](docs/traceability-status.md).
 
 ### Strategic Objectives
 - **Pedagogical Reference**: Provide a clear, hands-on demonstration showing how theoretical data architecture concepts translate into production-grade open-source code.
@@ -38,8 +40,9 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 |                                                                                        |
 |   +-----------------------+     +-----------------------+    +-----------------------+ |
 |   | Domain: Sales         |     | Domain: Marketing     |    | Domain: Finance       | |
-|   | - Product: customers  |     | - Product: campaigns  |    | - Product: revenue    | |
-|   | - Product: orders     |     | - Product: leads      |    | - Product: c360_gold  | |
+|   | - Product: customers  |     | - Product: campaigns  |    | - Product: budgets    | |
+|   | - Product: orders     |     | - Product: leads      |    | - Product: budgets    | |
+|   |                       |     |                       |    | - Product: closings   | |
 |   | - Contract: v1.2.0    |     | - Contract: v1.0.0    |    | - Contract: v1.0.0    | |
 |   +-----------------------+     +-----------------------+    +-----------------------+ |
 |               \                             |                            /             |
@@ -112,11 +115,11 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 +--------------------------+----------------------------+---------------------------+
 | Sales                    | Marketing                  | Finance                   |
 +--------------------------+----------------------------+---------------------------+
-| - Customers              | - Campaigns                | - Revenue Recognition     |
-| - Orders                 | - Leads & Conversions      | - Gross Margin Modeling   |
-| - Order Items            | - Clickstream Events       | - Cross-Domain P&L        |
-| - Fulfillment Lifecycle  | - Funnel Drop-off Analysis | - Budget Allocation       |
-| Contract: v1.2.0         | Contract: v1.0.0           | Consumes Sales+Marketing  |
+| - Customers              | - Campaigns                | - Budgets                 |
+| - Orders                 | - Leads                    | - Financial Closings      |
+| - Gold: daily_metrics,   | - Clickstream Events       | - (consumer domain)       |
+|   masked customers       |   (windowed, no funnel)    |                           |
+| Contracts: BACKWARD      | Contracts: BACKWARD        | Consumes Sales+Marketing  |
 +--------------------------+----------------------------+---------------------------+
 ```
 
@@ -136,43 +139,48 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 
 ## Subsystems Summary (S1 to S8)
 
-- **S1: Source & Ingestion**: PostgreSQL 16 (1,000 customers, 50,000 orders seed) + Apache Kafka 3.7 event bus with token-bucket rate limiting.
-- **S2: Lakehouse Storage & Catalog**: MinIO S3 object store + Apache Iceberg open table format + Apache Polaris REST catalog.
-- **S3: Batch Processing Engine**: Apache Spark 3.5 executing Bronze snapshotting, Silver deduplication, and Gold dimensional aggregation.
-- **S4: Stream Processing Engine**: Apache Flink 1.18 executing 5-minute tumbling event-time windows over Kafka streams.
-- **S5: Serving Layer**: Trino distributed SQL query engine exposing unified batch + stream views (`unified_view.sql`).
-- **S6: Data Mesh & Data Products**: Standardized product manifests (`product.yaml`) and Bitol ODCS Data Contracts (`contract.yaml`).
-- **S7: Data Fabric & Governance**: OpenLineage metadata emission to Marquez + Great Expectations automated quality gates + GDPR PII masking.
-- **S8: Orchestration & Observability**: Dagster asset-based orchestration + Prometheus metrics collection + Grafana monitoring dashboards.
+- **S1: Source & Ingestion**: PostgreSQL when `PGPASSWORD` is set, otherwise a loud synthetic fallback + SQLite WAL event log (local); PostgreSQL + Kafka 3.7 KRaft in K8s (`s1-ingestion`, `s4-stream`).
+- **S2: Lakehouse Storage & Catalog**: SQLite adapter with append-only idempotent Bronze, row-version time travel, schema evolution (local); MinIO + Iceberg + Polaris in K8s (`s2-lakehouse`).
+- **S3: Batch Processing Engine**: Pure-Python Medallion drivers over the hexagonal core — Bronze snapshotting, Silver dedup + fail-closed gate, Gold full recomputation (local); Spark Operator in K8s (`s3-batch`).
+- **S4: Stream Processing Engine**: Real 5-minute tumbling windows over the event log with consumer cursors + full replay (local); Flink Operator + Kafka in K8s (`s4-stream`).
+- **S5: Serving Layer**: One anti-join SQL fusing batch Gold + stream windows, no double counting — Trino if `TRINO_HOST`, else embedded SQLite (`unified_view.sql` mirrors the semantics for Trino).
+- **S6: Data Mesh & Data Products**: Standardized product manifests (`product.yaml`) and Bitol ODCS Data Contracts (`contract.yaml`) with real BACKWARD validation; CRDs + quotas in K8s (`s6-mesh`).
+- **S7: Data Fabric & Governance**: OpenLineage emission to local audit trail (+ Marquez if reachable), fail-closed quality engine over GE-format suites, GDPR PII masking in Gold.
+- **S8: Orchestration & Observability**: `rake` tasks + Dagster asset definitions locally; Marquez + alert service + Prometheus/Grafana assets in K8s (`s7-fabric`, `s8-ops` values only).
 
 ---
 
 ## Quickstart Guide & Startup Profiles
 
-To adhere strictly to **Constraint RC-02 (8 GB RAM maximum footprint)**, the platform utilizes modular Docker Compose startup profiles.
+The **default way to run and verify** the POC is the local profile: plain Python + SQLite, no containers required. (K8s profiles via `infra/helm` + `infra/profiles/*.yaml` are the deployment target; see `docs/architecture/overview.md`.)
 
 ### Prerequisites
-- Docker Engine 24.0+ and Docker Compose 2.20+
-- Host machine with at least 8 GB RAM allocated to Docker
-- Python 3.10+ (for running client utilities)
+- Python 3.11+ (`python --version`)
+- Ruby + Rake for the task runner (`rake --version`) — or run the `python ...` commands directly
+- Optional dev tools: `ruff`, `mypy`, `pytest`, `pytest-cov` (`pip install ruff mypy pytest pytest-cov` — network required once; pinned ranges in `pyproject.toml` `[project.optional-dependencies] dev`)
 
-### Execution Profiles
+### Local execution (default)
 
 ```bash
-# Profile 1: Core Platform (PostgreSQL, Kafka, MinIO, Polaris, Marquez, Trino, Dagster) - 4.4 GB RAM
-docker compose --profile platform up -d
+# RF-24 end-to-end demo: contracts -> bronze -> silver -> gold -> stream -> serving -> tests
+rake demo
+# (equivalently: ./scripts/demo.sh on Git Bash / WSL2 / Linux / macOS)
 
-# Profile 2: Streaming Pipeline (Platform + Flink JobManager/TaskManager + Event Producer) - 6.0 GB RAM
-docker compose --profile stream up -d
-
-# Profile 3: Batch Pipeline (Platform + Spark Batch Processing) - 7.4 GB RAM
-docker compose --profile batch up -d
-
-# Profile 4: Automated End-to-End Demo (Sequential execution under 8 GB RAM)
-./scripts/demo.sh
+# Layer-by-layer tasks
+rake governance:validate          # RF-15 contract validation
+rake medallion:all                # RF-01..RF-07 (bronze -> silver -> gold)
+rake stream:orders                # RF-09 speed layer (auto-seeds demo events if log empty)
+rake stream:replay                # RF-10 full Kappa replay
+rake serving:query                # RF-11 unified query
+rake test                         # unit + integration (64 tests)
+rake test:coverage                # with coverage report
+rake lint                         # ruff
+rake typecheck                    # mypy on src/
 ```
 
-### Web Interfaces & Port Reference
+State lives in `data/` (git-ignored SQLite + lineage audit log). Reset with `rm -f data/*.db data/*.jsonl` (PowerShell: `Remove-Item data/*.db, data/*.jsonl -ErrorAction SilentlyContinue`).
+
+### Web Interfaces & Port Reference (K8s profile only)
 
 | Service | Port | Description | Credentials (if applicable) |
 | :--- | :--- | :--- | :--- |

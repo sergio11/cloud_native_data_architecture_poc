@@ -37,7 +37,7 @@ We implement a **modular operational profiling strategy** using Docker Compose p
 
 4. **`demo` Profile (Automated Sequential End-to-End Orchestrator)**:
    - Managed automatically by `./scripts/demo.sh`.
-   - Boots platform services, triggers synthetic OLTP generation, runs Spark batch processing to Gold, starts Kafka streaming, runs Flink windowing, runs Great Expectations quality gates, and executes verification queries in Trino.
+   - Runs contracts validation, the pure-Python Medallion chain to Gold, event-log streaming with tumbling windows, fail-closed quality gates, the unified serving query, and the automated test suite (local profile; K8s engines are the deployment target, not the executor).
 
 ```
 +-----------------------------------------------------------------------------------------+

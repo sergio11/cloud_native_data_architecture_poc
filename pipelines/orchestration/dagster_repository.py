@@ -6,18 +6,19 @@ All asset names, tables, and job definitions are in English.
 """
 
 from dagster import (
+    AssetIn,
+    AssetSelection,
+    Definitions,
+    ScheduleDefinition,
     asset,
     define_asset_job,
-    ScheduleDefinition,
-    Definitions,
-    AssetSelection,
-    AssetIn
 )
+
 from pipelines.orchestration.resources import (
-    SparkResource,
     FlinkResource,
+    GreatExpectationsResource,
     MarquezResource,
-    GreatExpectationsResource
+    SparkResource,
 )
 
 # -------------------------------------------------------------------------
@@ -43,7 +44,12 @@ def bronze_customers(spark: SparkResource) -> dict:
 )
 def silver_orders(bronze_orders, spark: SparkResource, ge: GreatExpectationsResource) -> dict:
     spark.submit_job("pipelines/medallion/silver_transform.py", ["--entity", "orders"])
-    ge.run_suite("silver_orders_suite.json", "silver.sales.orders")
+    passed = ge.run_suite("quality/expectations/silver_orders_suite.json", "silver.sales.orders")
+    if not passed:
+        raise ValueError(
+            "Quality gate FAILED for silver.sales.orders "
+            "(suite quality/expectations/silver_orders_suite.json); asset not promoted."
+        )
     return {"table": "silver.sales.orders", "status": "validated"}
 
 
@@ -54,7 +60,12 @@ def silver_orders(bronze_orders, spark: SparkResource, ge: GreatExpectationsReso
 )
 def silver_customers(bronze_customers, spark: SparkResource, ge: GreatExpectationsResource) -> dict:
     spark.submit_job("pipelines/medallion/silver_transform.py", ["--entity", "customers"])
-    ge.run_suite("silver_customers_suite.json", "silver.sales.customers")
+    passed = ge.run_suite("quality/expectations/silver_customers_suite.json", "silver.sales.customers")
+    if not passed:
+        raise ValueError(
+            "Quality gate FAILED for silver.sales.customers "
+            "(suite quality/expectations/silver_customers_suite.json); asset not promoted."
+        )
     return {"table": "silver.sales.customers", "status": "validated"}
 
 

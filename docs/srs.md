@@ -94,7 +94,7 @@ The system encompasses:
 - Real-time stream processing with tumbling and sliding windows via Apache Flink.
 - Unified federated serving via Trino merging historical batch datasets with streaming buffers.
 - Decentralized Data Product manifests and declarative Data Contracts with programmatic backward-compatibility validation.
-- Automated Data Fabric governance utilizing OpenLineage for active metadata harvesting, Marquez for visual lineage graphs, and Great Expectations for threshold-based quality gates.
+- Automated Data Fabric governance utilizing OpenLineage for active metadata harvesting, Marquez for visual lineage graphs, and fail-closed quality gates evaluating Great-Expectations-format suites with the built-in evaluation engine.
 - Resource-optimized deployment supporting an aggressive **8 GB total system RAM footprint** through orchestrated execution profiles.
 
 ### 1.3 Definitions, Acronyms, and Abbreviations
@@ -136,7 +136,7 @@ The system encompasses:
 The Modern Data Architecture POC operates as a self-contained, microservices-based data ecosystem. It operates across three distinct architectural planes:
 1. **Organization Plane**: Decentralized domain ownership, Data Product manifests, and versioned Data Contracts.
 2. **Processing Plane**: Dual-engine compute infrastructure (Apache Spark for distributed batch ETL; Apache Flink for real-time stream processing; Trino for interactive federated serving).
-3. **Operations Plane**: Active metadata fabric (OpenLineage, Marquez), automated data quality validation (Great Expectations), workflow orchestration (Dagster), and infrastructure telemetry (Prometheus, Grafana).
+3. **Operations Plane**: Active metadata fabric (OpenLineage, Marquez), automated data quality validation (built-in evaluator over GE-format suites), workflow orchestration (Dagster), and infrastructure telemetry (Prometheus, Grafana).
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -154,7 +154,7 @@ The Modern Data Architecture POC operates as a self-contained, microservices-bas
 +-----------------------------------------------------------------------------------+
 |                              OPERATIONS PLANE                                     |
 |   Active Fabric: OpenLineage Event Bus -> Marquez Lineage Graph                   |
-|   Quality Gates: Great Expectations Pre-flight & Post-flight Table Verification   |
+|   Quality Gates: GE-format Suite Evaluation (built-in fail-closed engine)         |
 |   Orchestration: Dagster Asset Graph & Execution Profiles                         |
 |   Telemetry: Prometheus Exporters + Grafana Dashboards                            |
 +-----------------------------------------------------------------------------------+
@@ -238,7 +238,7 @@ The system architecture separates enterprise data concerns across three orthogon
 |    [Spark/Flink Run] --(OpenLineage Events)--> [Marquez Lineage & Catalog Service]|
 |                                                                                   |
 |  Quality Gates:                                                                   |
-|    [Great Expectations Suite] --(Validation Report & Threshold Check)------------>|
+|    [GE-format Suite] --(Built-in Engine: Validation & Threshold Check)----------->|
 |    (If Pass -> Commit Iceberg Snapshot; If Fail -> Alert & Block Pipeline)        |
 |                                                                                   |
 |  Orchestration & Telemetry:                                                       |
@@ -295,7 +295,7 @@ The system architecture separates enterprise data concerns across three orthogon
 - **Purpose**: Provides automated metadata harvesting, cross-pipeline lineage visualization, and declarative data quality enforcement.
 - **Components**:
   - **Active Lineage**: OpenLineage Spark listener and Flink OpenLineage reporter publishing dataset dependencies and run states to Marquez on port `5000`.
-  - **Quality Gates (`run_quality_gate.py`)**: Executes Great Expectations suites (`silver_pedidos_suite.json`, `silver_clientes_suite.json`) before committing data to subsequent tiers. Halts pipeline progression upon quality breaches.
+  - **Quality Gates (`run_quality_gate.py`)**: Evaluates Great-Expectations-format suites (`silver_orders_suite.json`, `silver_customers_suite.json`) with the built-in fail-closed engine before committing data to subsequent tiers. Halts pipeline progression upon quality breaches.
   - **Policy Enforcement**: Declarative policy rules (Kyverno / OPA) verifying container security contexts and schema contract compliance.
 
 #### S8: Orchestration & Observability Subsystem
@@ -325,10 +325,10 @@ The system architecture separates enterprise data concerns across three orthogon
 
 - **Flow F1 (OLTP to Bronze Ingestion)**: Scheduled or manual trigger initiates `bronze_ingestion.py`. Spark connects to PostgreSQL via JDBC, captures an immutable snapshot of `pedidos`, `clientes`, and `campanas`, appends ingestion timestamps (`_ingested_at`), and appends to Iceberg Bronze tables on MinIO. Emits OpenLineage START/COMPLETE events to Marquez.
 - **Flow F2 (Streaming Ingestion & Aggregation)**: `event_producer.py` publishes JSON messages to Kafka. `flink_pedidos_stream.py` consumes records using event-time timestamps, extracts windowed totals (5-minute tumbling windows), and sinks results to Iceberg `stream.ventas.pedidos_windowed`.
-- **Flow F3 (Medallion Progression)**: Spark executes `silver_transform.py`, reading new Bronze records, filtering corrupt rows, verifying foreign keys, and writing to Silver. `run_quality_gate.py` runs Great Expectations. Upon passage (score >= 0.95), `gold_aggregation.py` reads Silver, computes dimensional KPIs, hashes PII columns using SHA-256, and writes to Iceberg Gold tables.
+- **Flow F3 (Medallion Progression)**: `silver_transform.py` runs (thin driver over the core use case), reading Bronze, filtering corrupt rows, deduplicating by primary key, and writing to Silver. `run_quality_gate.py` evaluates the GE-format suite with the built-in fail-closed engine. Upon passage (score >= 0.95), `gold_aggregation.py` reads Silver, computes dimensional KPIs, hashes PII columns using SHA-256, and writes to Gold tables (a **full recomputation from Silver on every run**).
 - **Flow F4 (Unified Serving Query)**: A business analyst issues `SELECT * FROM serving.ventas.revenue_unified` to Trino. Trino evaluates the view definition: historical data prior to `CURRENT_DATE - INTERVAL '2' DAY` is read from `gold.ventas.metricas_diarias`, while recent data is read from `stream.ventas.pedidos_windowed`. The query returns unified results without manual reconciliation.
 - **Flow F5 (Lineage & Quality Enforcement)**: During every pipeline step, dataset names, input/output schemas, row counts, and execution run UUIDs are transmitted over HTTP to Marquez. If `run_quality_gate.py` detects a critical check breach (e.g., null primary keys), it exits with code `1`, halting the DAG, emitting an OpenLineage FAILED event, and firing a notification webhook.
-- **Flow F6 (Kappa Reprocessing / Historical Replay)**: Upon algorithm revision or backfill request, the operator passes `--replay` to `gold_aggregation.py` or resets Kafka consumer group offsets to `earliest` in Flink. The streaming and batch logic re-evaluates historical data through the exact same transformation paths, updating downstream tables idempotently.
+- **Flow F6 (Kappa Reprocessing / Historical Replay)**: Upon algorithm revision or backfill request, the operator triggers a **full stream log replay** (`flink_orders_stream.py --start-offset earliest` / `--replay`, or `rake stream:replay`) or resets consumer offsets to `earliest`. The batch side needs no flag: every `gold_aggregation.py` run is already a **full recomputation** of the historical aggregates from Silver. Both paths re-evaluate historical data idempotently without mutating raw Bronze history.
 
 ---
 
@@ -358,7 +358,7 @@ The system architecture separates enterprise data concerns across three orthogon
 | **S5** | Distributed Query Engine | Trino | 442+ | Apache 2.0 | `8080` (UI/API) |
 | **S6** | Data Contract Spec | Bitol / Open Data Contract | ODCS v2 | Apache 2.0 / CC-BY-4.0 | File-based YAML |
 | **S7** | Active Metadata & Lineage| OpenLineage & Marquez | OL 1.9 / Mqz 0.42 | Apache 2.0 | `5000` (API), `3001` (UI) |
-| **S7** | Quality Assurance Gate | Great Expectations | 0.18.x | Apache 2.0 | Embedded CLI |
+| **S7** | Quality Assurance Gate | Built-in fail-closed evaluator over GE-format suites (Great Expectations *library* not required) | n/a (in-repo) | MIT (this repo) | Embedded CLI |
 | **S7** | Kubernetes Policy Engine | Kyverno | 1.11+ | Apache 2.0 | K8s Admission Webhook |
 | **S8** | Workflow Orchestration | Dagster | 1.6+ | Apache 2.0 | `3000` (Web UI) |
 | **S8** | Platform Telemetry | Prometheus & Grafana | Prom 2.50 / Graf 10.3| Apache 2.0 / AGPLv3 | `9090` (Prom), `3000` (Graf) |
@@ -389,13 +389,13 @@ The system architecture separates enterprise data concerns across three orthogon
 
 - **RF-05 [M] Bronze Raw Preservation**: The system shall maintain an immutable, append-only history of raw ingested data in Bronze Iceberg tables. No deduplication, business filtering, or data mutation shall be performed in this tier.
 - **RF-06 [M] Silver Data Cleansing & Deduplication**: The system shall process Bronze records into Silver tables (`silver.ventas.pedidos`, `silver.ventas.clientes`) by performing whitespace trimming, casting to contractual datatypes, eliminating exact and primary-key duplicates via window deduplication, and validating foreign key relationships.
-- **RF-07 [M] Gold Aggregation & Dimensional Modeling**: The system shall aggregate Silver data into high-value business KPI tables (`gold.ventas.metricas_diarias`, `gold.marketing.rendimiento_campanas`). Aggregations shall include daily GMV, order volume, cancellation rates, and customer lifetime value.
+- **RF-07 [M] Gold Aggregation & Dimensional Modeling**: The system shall aggregate Silver data into high-value business KPI tables (`gold.ventas.metricas_diarias`, `gold.marketing.rendimiento_campanas`). Aggregations shall include daily GMV, order volume, cancellation rates, and customer lifetime value. *(Implementation note: sales Gold — `gold.sales.daily_metrics`, `gold.sales.customers` — is delivered and verified; marketing/finance Gold tables are PLANNED, not produced in this POC — see `docs/traceability-status.md`.)*
 - **RF-08 [M] ACID Operations & Time Travel**: The system shall support snapshot isolation, atomic commits, schema evolution, and time-travel queries across all Iceberg tables, verifiable via Spark and Trino metadata tables (e.g., `silver.ventas.pedidos$snapshots`).
 - **RF-09 [M] Centralized REST Catalog Registration**: All Iceberg namespaces and tables must be registered in Apache Polaris REST catalog, ensuring a single source of metadata truth across Spark, Flink, and Trino.
 
 ### 5.3 Processing & Serving Layer
 
-- **RF-10 [S] Kappa-Style Historical Reprocessing**: The stream processing and batch aggregation pipelines shall provide an idempotent replay capability (via `--replay` CLI flags or Kafka offset resets) allowing complete recomputation of derived tables without mutating raw Bronze history.
+- **RF-10 [S] Kappa-Style Historical Reprocessing**: The stream processing and batch aggregation pipelines shall provide an idempotent replay capability (stream: `--start-offset earliest` / `--replay` CLI flags or broker offset resets; batch: full recomputation of derived tables on every run) allowing complete recomputation of derived tables without mutating raw Bronze history.
 - **RF-11 [M] Unified Batch + Stream Serving**: The system shall provide unified analytical views in Trino (`serving.ventas.revenue_unified`, `serving.marketing.funnel_unified`) that seamlessly execute a `UNION ALL` between historical Gold batch tables and active streaming buffers, applying partition filters to ensure zero data duplication.
 - **RF-12 [S] Interactive Cross-Domain SQL Querying**: Trino shall execute ad-hoc analytical queries joining assets across disparate domains (e.g., joining `ventas.pedidos` with `marketing.campanas` and `finanzas` budgets) with sub-3-second P99 query latency.
 
@@ -409,7 +409,7 @@ The system architecture separates enterprise data concerns across three orthogon
 ### 5.5 Data Fabric & Automated Governance
 
 - **RF-17 [M] Automated Metadata & Lineage Harvesting**: Every pipeline job (Spark, Flink, Trino scripts) must emit OpenLineage-compliant lifecycle events to the Marquez API, tracking dataset inputs, outputs, schemas, and execution run states.
-- **RF-18 [M] Automated Quality Gates**: Data pipeline execution must invoke Great Expectations validation suites (`run_quality_gate.py`) against Silver and Gold datasets. If the validation success ratio falls below the contractual threshold (e.g., 95%), the script must exit with a non-zero code, blocking downstream table commits.
+- **RF-18 [M] Automated Quality Gates**: Data pipeline execution must evaluate GE-format validation suites (`run_quality_gate.py`, built-in fail-closed engine — the Great Expectations library is not invoked) against Silver and Gold datasets. If the validation success ratio falls below the contractual threshold (e.g., 95%), the script must exit with a non-zero code, blocking downstream table commits.
 - **RF-19 [M] Automated PII Masking (GDPR Compliance)**: Customer PII fields (email, full name, registration date) must be pseudonymized or masked in Silver-to-Gold transformations. Emails must be hashed with SHA-256; names must be truncated to initials; registration dates must be truncated to year-only.
 - **RF-20 [S] Policy-as-Code Governance**: Kubernetes manifests and container deployments must comply with declarative security policies (Kyverno / OPA) preventing privilege escalation, enforcing read-only root filesystems where applicable, and disallowing root user execution.
 
@@ -436,7 +436,7 @@ The system architecture separates enterprise data concerns across three orthogon
 
 ### 6.3 Reliability & Fault Tolerance (RNF-03)
 - Flink streaming jobs must enable RocksDB state backend checkpointing at 30-second intervals to allow seamless recovery from container restarts without data loss.
-- Spark batch jobs must utilize idempotent partition overwrite strategies (`overwrite` mode) ensuring that retrying failed executions does not produce duplicate records.
+- Bronze ingestion must be append-only with content-hash idempotency (retrying a failed execution never duplicates records and never rewrites Bronze history); derived layers (Silver/Gold) may use idempotent supersede-mode rewrites (`overwrite` mode, prior rows marked not deleted) so retries are equally duplicate-free.
 
 ### 6.4 Security & Compliance (RNF-04)
 - **GDPR Article 25 & 32 Compliance**: Customer PII must be protected via pseudonymization and one-way SHA-256 cryptographic hashing prior to storage in Gold analytical tables.
@@ -631,7 +631,7 @@ The system architecture separates enterprise data concerns across three orthogon
 
 #### Scenario AC-02: Quality Gate Enforces Business SLA & Contract (RF-18, RF-15)
 - **Given** a populated `silver.ventas.pedidos` Iceberg table,
-- **When** `run_quality_gate.py` executes against `silver_pedidos_suite.json`,
+- **When** `run_quality_gate.py` executes against `silver_orders_suite.json`,
 - **Then** the validation suite must verify that 100% of `id` values are unique, completeness across required fields meets or exceeds 0.98, all order amounts exceed 0.01, and the script exits with code `0`.
 - **When** synthetic corrupt rows (e.g., negative order amounts or null primary keys) are injected into the dataset,
 - **Then** `run_quality_gate.py` must halt pipeline progression, output a failure report, and return exit code `1`.
@@ -666,7 +666,7 @@ The system architecture separates enterprise data concerns across three orthogon
 | **RF-07** | S2, S3 | `pipelines/medallion/gold_aggregation.py` | KPI query verification in Trino |
 | **RF-08** | S2 | Apache Iceberg + MinIO | Snapshot inspection via `$snapshots` |
 | **RF-09** | S2 | `pipelines/serving/catalog_registration.py` | Polaris REST API endpoint query |
-| **RF-10** | S3, S4 | `gold_aggregation.py --replay` / Flink | Historical re-run idempotency test |
+| **RF-10** | S3, S4 | Full recomputation in `gold_aggregation.py` / `rake stream:replay` (log replay) | Historical re-run idempotency test |
 | **RF-11** | S5 | `pipelines/serving/unified_view.sql` | Trino SQL `UNION ALL` query check |
 | **RF-12** | S5 | Trino Engine | Cross-domain multi-table join test |
 | **RF-13** | S6 | `domains/ventas`, `domains/marketing` | Directory structure & autonomy audit |
@@ -674,7 +674,7 @@ The system architecture separates enterprise data concerns across three orthogon
 | **RF-15** | S6 | `domains/*/data-products/*/contract.yaml` | Bitol ODCS compliance validation |
 | **RF-16** | S6 | `quality/gates/run_quality_gate.py` | Backward compatibility test |
 | **RF-17** | S7 | Spark/Flink OpenLineage -> Marquez | Marquez API GET lineage graph check |
-| **RF-18** | S7 | `quality/gates/run_quality_gate.py` | Great Expectations exit code check |
+| **RF-18** | S7 | `quality/gates/run_quality_gate.py` | Quality-gate exit code check (0 pass / 1 blocked / 2 error) |
 | **RF-19** | S3, S7 | `pipelines/medallion/gold_aggregation.py` | Regex audit for SHA-256 in Gold |
 | **RF-20** | S7 | Kyverno / Kubernetes manifests | Admission control test |
 | **RF-21** | S8 | Dagster SDA Definitions | Dagster UI asset materialization |
@@ -693,7 +693,7 @@ The system architecture separates enterprise data concerns across three orthogon
 | **RSK-02** | Kafka producer swamps Flink streaming job causing memory buffer overflow. | High | Medium | Implement token-bucket rate limiting in `event_producer.py` and configure Flink RocksDB state backend with bounded memory. |
 | **RSK-03** | Schema changes deployed by producer domain break downstream consumer SQL queries. | High | Medium | Enforce declarative Data Contracts (`contract.yaml`) with automated CI compatibility validation before merging schema pull requests. |
 | **RSK-04** | REST catalog connectivity loss between compute engines and Apache Polaris. | Medium | Low | Implement exponential backoff retry policies in `SparkSessionBuilder`, Flink sink connectors, and Trino catalog clients. |
-| **RSK-05** | PII data leaks into unmasked Gold analytical views or dashboards. | High | Low | Enforce automated PII hashing during Silver-to-Gold transformations and run Great Expectations regex assertions blocking unmasked data. |
+| **RSK-05** | PII data leaks into unmasked Gold analytical views or dashboards. | High | Low | Enforce automated PII hashing during Silver-to-Gold transformations and run quality-suite assertions blocking unmasked data. |
 
 ---
 

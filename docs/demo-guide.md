@@ -6,14 +6,26 @@
 
 This guide provides a comprehensive, step-by-step walkthrough for executing and verifying the **Modern Data Architecture Proof of Concept (POC)**. The demonstration validates **Requirement RF-24**: an automated, end-to-end operational execution covering all three architectural planes (Organization, Processing, Operations) in under 10 minutes.
 
+> **Execution profile note.** The automated demo below runs the **local profile**:
+> the hexagonal Python core with SQLite-backed adapters (no cluster required).
+> Steps that mention Trino/Marquez/Dagster/MinIO UIs describe the **K8s profile**
+> (`infra/helm`, `infra/profiles`) and are labelled as such where applicable.
+
 ### What the Demo Validates
-1. **Infrastructure Initialization**: Zero-downtime bootstrap of PostgreSQL, Apache Kafka, MinIO, Apache Polaris, Marquez, Trino, Dagster, and Prometheus/Grafana under an 8 GB RAM footprint.
-2. **Synthetic Data Generation**: Seeding 1,000 customers, 50,000 orders, and 200,000 line items in PostgreSQL; streaming live clickstream events into Kafka.
-3. **Medallion Lakehouse Execution**: Spark batch ingestion to Iceberg Bronze, cleansing/deduplication to Silver, and aggregated modeling with GDPR PII masking to Gold.
-4. **Real-Time Stream Processing**: Flink tumbling-window ingestion from Kafka to Iceberg stream buffers.
-5. **Unified Serving Layer**: Trino ANSI SQL queries seamlessly merging historical batch data with real-time stream buffers via `UNION ALL`.
-6. **Data Mesh & Contracts**: Validating Bitol ODCS contracts and schema backward compatibility.
-7. **Active Governance & Quality Gates**: Great Expectations validation suites halting bad data; OpenLineage emitting runtime metadata to Marquez.
+1. **Data Products & Contracts**: validating Bitol ODCS manifests and real schema
+   backward compatibility (`governance/contract_validator.py` → core use case).
+2. **Medallion Lakehouse Execution**: idempotent append ingestion to Bronze with
+   audit columns, fail-closed cleansing/deduplication to Silver, and aggregated
+   modeling with GDPR PII masking to Gold.
+3. **Real-Time Stream Processing**: 5-minute tumbling windows over the event log
+   with persistent consumer cursors (no duplicates) and full-log replay.
+4. **Unified Serving Layer**: one SQL statement merging exact batch Gold with
+   recent stream windows via anti-join — no double counting.
+5. **Active Governance & Quality Gates**: fail-closed expectation suites halt bad
+   data; OpenLineage events are emitted to Marquez when reachable and always
+   recorded in the local audit trail.
+6. **Automated Test Suite**: unit + integration tests covering the RF acceptance
+   scenarios.
 
 ---
 
@@ -52,21 +64,23 @@ chmod +x scripts/demo.sh
 ```bash
 ./scripts/demo.sh
 ```
-*(On Windows PowerShell, you can run `./scripts/demo.ps1` or run the commands sequentially within WSL2).*
+*(On Windows the same steps are available cross-platform via the Rakefile:
+`rake demo`. There is no `demo.ps1`; use `rake` or Git Bash/WSL2 for the
+shell script.)*
 
 ### Expected Script Output Progression
-The script prints structured, color-coded status checkpoints:
+The script prints structured, color-coded status checkpoints (local profile —
+pure Python + SQLite, no cluster services are started):
 ```text
-[INFO] [1/8] Bootstrapping Core Platform Profile (PostgreSQL, Kafka, MinIO, Polaris, Marquez)...
-[INFO] [2/8] Generating Synthetic OLTP Data (1,000 clients, 50,000 orders)...
-[INFO] [3/8] Launching Spark Medallion Batch Pipeline (Bronze -> Silver -> Gold)...
-[INFO] [4/8] Running Great Expectations Data Quality Gates...
-[PASS] Quality Gate Passed! Silver Orders score: 1.00 (Threshold: 0.95)
-[INFO] [5/8] Starting Real-Time Event Producer and Flink Stream Windowing...
-[INFO] [6/8] Registering Polaris Catalogs and Unified Serving Views in Trino...
-[INFO] [7/8] Executing Verification Queries in Trino...
-[INFO] [8/8] Harvesting OpenLineage Traces from Marquez API...
-[SUCCESS] End-to-End Modern Data Architecture Demo Completed Successfully!
+[Step 1/8] Pre-flight Environment Checks...              -> Python runtime detected.
+[Step 2/8] Validating Data Products & Contracts ...      -> verified (RF-15, exit 0).
+[Step 3/8] Running Medallion Architecture: Bronze ...    -> raw ingestion with audit metadata.
+[Step 4/8] Running Silver Layer: Deduplication & ...    -> validated and promoted (RF-06 gate).
+[Step 5/8] Running Gold Layer: Business Aggregation ... -> models + GDPR masking published.
+[Step 6/8] Producing Stream Events & Computing ...       -> speed buffer updated (RF-09/10).
+[Step 7/8] Executing Live Unified Serving Query ...      -> batch + stream merged (RF-11).
+[Step 8/8] Executing Automated Test Suite ...            -> unit + integration tests pass.
+DEMO COMPLETED SUCCESSFULLY! ALL PARADIGMS VERIFIED.
 ```
 
 ---
@@ -82,49 +96,56 @@ trino --server http://localhost:8080 --catalog iceberg --schema serving
 ```
 
 #### Query 1.1: Verify Unified Batch + Stream Revenue (RF-11)
-```sql
-SELECT 
-    order_date,
-    status,
-    total_amount,
-    num_orders,
-    source_type
-FROM serving.sales.unified_revenue
-ORDER BY order_date DESC, status
-LIMIT 10;
+Run the unified serving query through the hexagonal core (same semantics are
+also expressed as SQL in `pipelines/serving/unified_view.sql` for Trino):
+```bash
+python pipelines/serving/run_serving_query.py --limit 10
 ```
-*Expected Result*: Returns rows where recent dates (last 2 days) have `source_type = 'stream'` (from Flink) and older dates have `source_type = 'batch'` (from Spark Gold). Zero duplicate dates.
+It executes a single query that merges `gold.sales.daily_metrics` (exact batch)
+with `stream.sales.orders_windowed` (speed layer) using an anti-join on
+`(order_date, status)`: the batch value wins on collision and stream rows only
+fill keys absent from batch — so no key is ever counted twice.
+*Expected Result*: rows labelled `source_tier = 'batch_historical'` (exact,
+older) and `source_tier = 'stream_speed'` (recent windows). Zero duplicate
+`(order_date, status)` keys.
 
-#### Query 1.2: Verify GDPR PII Masking in Gold (RF-19)
+#### Query 1.2: Verify GDPR PII Masking in Gold (RF-05, RNF-07)
+Query the customer dimension materialised by `AggregateGoldUseCase`
+(`src/domain/privacy.py` enforces the masking policy):
 ```sql
-SELECT 
+SELECT
     id,
-    masked_name,
+    name_masked,
     email_hash,
-    segment,
-    registration_year
-FROM gold.sales.dim_customers
+    segment
+FROM gold.sales.customers
 LIMIT 5;
 ```
 *Expected Result*:
-- `masked_name` displays only initials: `"Alice S."`, `"John M."`.
-- `email_hash` contains a 64-character SHA-256 hexadecimal string: `"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"`.
-- Plaintext email and phone numbers are absent.
+- `name_masked` displays only first name + initial: `"Alice S."`, `"John M."`.
+- `email_hash` contains a 64-character SHA-256 hexadecimal string of the
+  normalised email.
+- Plaintext `name` and `email` columns are absent from the Gold table.
 
-#### Query 1.3: Cross-Domain Analytical Join (RF-12)
+#### Query 1.3: Pseudonymised Customer × Orders Join (RNF-07)
+Demonstrates that analytics still work on masked data — join the pseudonymised
+Gold customer dimension with Silver orders:
 ```sql
-SELECT 
-    c.name AS campaign_name,
-    c.channel,
-    c.budget,
-    SUM(p.total_amount) AS total_attributed_revenue,
-    ROUND(SUM(p.total_amount) / NULLIF(c.budget, 0), 2) AS roas
-FROM gold.marketing.dim_campaigns c
-JOIN silver.sales.orders p ON p.channel = c.channel
-GROUP BY c.name, c.channel, c.budget
-ORDER BY roas DESC;
+SELECT
+    c.id AS customer_id,
+    c.name_masked,
+    c.segment,
+    COUNT(o.id) AS total_orders,
+    ROUND(SUM(CAST(o.total_amount AS REAL)), 2) AS total_spent
+FROM gold.sales.customers c
+JOIN silver.sales.orders o ON o.customer_id = c.id
+GROUP BY c.id, c.name_masked, c.segment
+ORDER BY total_spent DESC
+LIMIT 10;
 ```
-*Expected Result*: Aggregates sales by marketing channel in under 2 seconds.
+*Expected Result*: per-customer order counts and spend computed without ever
+exposing a plaintext email or full name. (Marketing/Finance cross-domain Gold
+tables are PLANNED, not produced in this POC.)
 
 ---
 
@@ -183,36 +204,35 @@ python quality/gates/run_quality_gate.py \
 
 ---
 
-### Verification 4: Orchestration & Telemetry Dashboards
+### Verification 4: Orchestration & Telemetry Dashboards (K8s profile)
+
+> The UIs below exist only when the K8s profile is deployed
+> (`infra/helm`, `infra/profiles`). The local-profile demo produces the same
+> functional evidence via the CLI steps and `data/lineage_audit.jsonl`.
 
 #### Dagster UI (`http://localhost:3000`)
 - Navigate to **Assets** -> View the Software-Defined Asset (SDA) dependency graph.
-- Inspect the latest run timeline and materialization logs for `bronze_orders`, `silver_orders`, and `gold_daily_metrics`.
+- Inspect the latest run timeline and materialization logs for the medallion assets.
 
 #### MinIO Storage Console (`http://localhost:9001`)
-- Login with credentials (`minioadmin` / `minioadmin`).
-- Browse bucket `lakehouse`.
-- Inspect the Iceberg directory structure:
-  - `lakehouse/silver/sales/orders/metadata/`: Inspect `.metadata.json` and Avro manifest files.
-  - `lakehouse/silver/sales/orders/data/`: Inspect snappy-compressed Parquet files.
+- Browse bucket `lakehouse` and inspect the Iceberg table metadata/data layout.
 
 #### Grafana Telemetry Dashboard (`http://localhost:3002`)
-- Login (`admin` / `admin`).
-- View the pre-configured **Modern Data Architecture Overview** dashboard:
-  - **Memory Gauge**: Confirms total active memory remains strictly `< 8,192 MB`.
-  - **Kafka Ingestion Rate**: Shows continuous 10–50 events/sec.
-  - **Flink Processing Latency**: Verifies sub-second event latency.
-  - **Quality Gate Success Rate**: Tracks recent validation pass/fail ratios.
+- View the **Modern Data Architecture Overview** dashboard (memory, ingestion
+  rate, processing latency, quality-gate pass/fail ratios).
 
 ---
 
 ## 5. Teardown and Cleanup
 
-To stop the platform and release all allocated resources:
+Local profile: the demo writes only to `data/` (git-ignored SQLite files and the
+lineage audit log). To reset to a clean state:
 ```bash
-# Stop all containers and remove networks
-docker compose --profile platform --profile stream --profile batch down
+# Windows PowerShell
+Remove-Item data/*.db, data/*.jsonl -ErrorAction SilentlyContinue
 
-# Optional: To remove persistent volumes and reset all data to a clean state
-docker compose --profile platform --profile stream --profile batch down -v
+# Linux / macOS / WSL2
+rm -f data/*.db data/*.jsonl
 ```
+K8s profile: stop the deployed stack with the profile scripts
+(`scripts/profile-down.sh`) or your cluster teardown of choice.

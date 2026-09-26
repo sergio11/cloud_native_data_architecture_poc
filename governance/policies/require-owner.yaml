@@ -21,7 +21,9 @@ spec:
                 - DataProduct
       validate:
         message: "DataProduct must specify a valid owner email address in spec.owner or metadata.annotations['dataplatform.io/owner']."
-        pattern:
-          =(metadata):
-            =(annotations):
-              =(dataplatform.io/owner): "?*@?*.?*"
+        anyPattern:
+          - metadata:
+              owner: "?*@?*.?*"
+          - metadata:
+              annotations:
+                =(dataplatform.io/owner): "?*@?*.?*"

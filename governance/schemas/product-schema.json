@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/governance/product-schema.json",
+  "title": "DataProductManifestSchema",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": { "type": "string" },
+    "kind": { "type": "string", "const": "DataProduct" },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "domain", "owner", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "domain": { "type": "string" },
+        "owner": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["description", "classification", "sla", "assets", "quality", "contract"],
+      "properties": {
+        "description": { "type": "string" },
+        "classification": {
+          "type": "string",
+          "enum": ["public", "internal", "confidential", "pii"]
+        },
+        "sla": { "type": "object" },
+        "assets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "type", "path"],
+            "properties": {
+              "name": { "type": "string" },
+              "type": { "type": "string" },
+              "path": { "type": "string" }
+            }
+          }
+        },
+        "quality": { "type": "object" },
+        "contract": { "type": "string" }
+      }
+    }
+  }
+}

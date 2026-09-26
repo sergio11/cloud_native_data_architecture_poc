@@ -1,0 +1,15 @@
+apiVersion: v2
+name: s3-batch
+description: Subsystem S3 - Batch Processing Layer (Apache Spark on Kubernetes Operator & Medallion Pipeline Templates)
+type: application
+version: 1.0.0
+appVersion: "3.5.1"
+keywords:
+  - spark
+  - batch
+  - iceberg
+  - medallion
+  - operator
+maintainers:
+  - name: Data Engineering Platform Team
+    email: data-platform@poc.local

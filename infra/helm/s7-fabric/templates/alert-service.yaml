@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lineage-alert-service
+  namespace: platform
+  labels:
+    app: lineage-alert-service
+    subsystem: s7-fabric
+spec:
+  replicas: {{ .Values.alertService.replicaCount }}
+  selector:
+    matchLabels:
+      app: lineage-alert-service
+  template:
+    metadata:
+      labels:
+        app: lineage-alert-service
+    spec:
+      containers:
+        - name: alert-service
+          image: "{{ .Values.alertService.image.repository }}:{{ .Values.alertService.image.tag }}"
+          command: ["python", "-c", "import http.server, socketserver; handler = http.server.SimpleHTTPRequestHandler; socketserver.TCPServer(('', 8000), handler).serve_forever()"]
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            {{- toYaml .Values.alertService.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lineage-alert-service
+  namespace: platform
+spec:
+  type: {{ .Values.alertService.service.type }}
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: lineage-alert-service

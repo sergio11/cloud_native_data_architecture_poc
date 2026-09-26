@@ -1,0 +1,15 @@
+apiVersion: v2
+name: s4-stream
+description: Subsystem S4 - Stream Processing Layer (Apache Kafka Messaging & Apache Flink Kubernetes Operator)
+type: application
+version: 1.0.0
+appVersion: "3.7.0"
+keywords:
+  - kafka
+  - flink
+  - streaming
+  - strimzi
+  - operator
+maintainers:
+  - name: Data Engineering Platform Team
+    email: data-platform@poc.local

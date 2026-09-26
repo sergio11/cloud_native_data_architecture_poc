@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/marketing/campaigns.json",
+  "title": "CampaignsDataProductSchema",
+  "description": "Schema definition for marketing campaigns data product asset",
+  "type": "object",
+  "required": ["id", "channel", "budget", "start_date", "end_date"],
+  "properties": {
+    "id": { "type": "integer", "minimum": 1 },
+    "channel": {
+      "type": "string",
+      "enum": ["email", "sms", "display", "social", "search"]
+    },
+    "budget": { "type": "number", "minimum": 0.01 },
+    "start_date": { "type": "string", "format": "date" },
+    "end_date": { "type": "string", "format": "date" }
+  },
+  "additionalProperties": false
+}

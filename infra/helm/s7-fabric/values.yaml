@@ -1,0 +1,36 @@
+marquez:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: marquezproject/marquez
+    tag: 0.45.0
+    pullPolicy: IfNotPresent
+  service:
+    type: NodePort
+    apiPort: 5000
+    webPort: 3000
+    nodePortApi: 30002
+  resources:
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+
+alertService:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: python
+    tag: 3.11-slim
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    limits:
+      cpu: "300m"
+      memory: "256Mi"
+    requests:
+      cpu: "50m"
+      memory: "64Mi"

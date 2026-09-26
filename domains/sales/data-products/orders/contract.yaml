@@ -1,0 +1,61 @@
+apiVersion: datacontract.com/v1alpha1
+kind: DataContract
+metadata:
+  name: orders-contract
+  version: "1.2.0"
+  status: active
+  domain: sales
+  data_product: orders
+  owner: sales-data-team@company.internal
+spec:
+  description: "Binding contract between Sales domain and consumers for confirmed orders."
+  compatibility_mode: BACKWARD
+  sla:
+    freshness: "1h"
+    availability: "99%"
+    response_time_ms: 3000
+  schema:
+    format: iceberg
+    primary_key: ["id"]
+    fields:
+      - name: id
+        type: integer
+        required: true
+        description: "Unique surrogate key for the order"
+      - name: customer_id
+        type: integer
+        required: true
+        description: "Foreign key referencing customers.id"
+      - name: total_amount
+        type: decimal(12,2)
+        required: true
+        description: "Gross order financial total in EUR"
+      - name: status
+        type: string
+        required: true
+        description: "Order lifecycle state: confirmed, pending, shipped, cancelled"
+      - name: order_date
+        type: date
+        required: true
+        description: "Date when transaction occurred (partition key)"
+      - name: created_at
+        type: timestamp
+        required: true
+        description: "Audit timestamp of record creation"
+  quality:
+    thresholds:
+      completeness: 0.98
+      uniqueness: 1.00
+      validity: 0.99
+    assertions:
+      - rule: "total_amount >= 0"
+        description: "Order total amount must be non-negative"
+      - rule: "status IN ('confirmed', 'pending', 'shipped', 'cancelled')"
+        description: "Order status must adhere to canonical lifecycle enum"
+  consumers:
+    - name: finance-team
+      contact: finance-analytics@company.internal
+      purpose: "Period revenue recognition"
+    - name: marketing-team
+      contact: marketing-growth@company.internal
+      purpose: "Ad spend ROI attribution"

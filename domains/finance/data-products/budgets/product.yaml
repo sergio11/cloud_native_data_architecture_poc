@@ -1,0 +1,39 @@
+apiVersion: dataplatform.io/v1alpha1
+kind: DataProduct
+metadata:
+  name: budgets
+  domain: finance
+  owner: fp-and-a@company.internal
+  version: "1.1.0"
+  created_at: "2024-02-10"
+  updated_at: "2024-09-26"
+spec:
+  description: "Annual and quarterly departmental budget allocations, actual expenditure tracking, and burn variance."
+  classification: internal
+  sla:
+    freshness: "12h"
+    availability: "99.5%"
+    latency_p99: "3s"
+  assets:
+    - name: gold_budgets
+      type: iceberg_table
+      path: "s3a://gold/finance/budgets/"
+      format: parquet
+      partitioned_by: ["fiscal_year", "cost_center"]
+      description: "Aggregated department budgets and actual spend metrics"
+      access_tier: internal
+  quality:
+    completeness: 0.99
+    uniqueness: 1.00
+    timeliness: 0.98
+    validity: 0.99
+  contract: "./contract.yaml"
+  schema: "./schema.json"
+  consumers:
+    - name: marketing-growth
+      contact: marketing-leaders@company.internal
+      use_case: "Campaign budget headroom checks"
+  tags:
+    - finance
+    - budgeting
+    - planning

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/marketing/leads.json",
+  "title": "LeadsDataProductSchema",
+  "description": "Schema definition for marketing leads and navigation events",
+  "type": "object",
+  "required": ["session_id", "page_url", "event_type", "event_timestamp"],
+  "properties": {
+    "session_id": { "type": "string" },
+    "customer_id": { "type": ["integer", "null"] },
+    "page_url": { "type": "string" },
+    "event_type": {
+      "type": "string",
+      "enum": ["view", "click", "add_to_cart", "checkout", "purchase"]
+    },
+    "event_timestamp": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

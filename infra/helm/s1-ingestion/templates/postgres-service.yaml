@@ -1,0 +1,19 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-oltp
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: postgres-oltp
+    {{- include "s1-ingestion.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.postgresql.service.type }}
+  ports:
+    - name: postgres
+      port: {{ .Values.postgresql.service.port }}
+      targetPort: 5432
+      protocol: TCP
+  selector:
+    app: postgres-oltp
+{{- end }}

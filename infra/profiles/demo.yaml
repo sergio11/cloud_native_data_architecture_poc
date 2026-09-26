@@ -1,0 +1,208 @@
+# ==============================================================================
+# Modern Data Architecture POC - Startup Profile: Demo (RF-24 Full Suite)
+# File: infra/profiles/demo.yaml
+# Description: Comprehensive demonstration profile activating all subsystems
+#              (S1 through S8) in lightweight, single-replica mode carefully
+#              tuned to execute simultaneously within a strict 7.5 GB RAM ceiling.
+# Target RAM Footprint: ~7.2 GB RAM (Strict < 7.5 GB Ceiling)
+# ==============================================================================
+profile:
+  name: "demo"
+  description: "RF-24 Full Architecture Demo - All subsystems active within 7.5GB RAM ceiling"
+  targetRamMb: 7424
+  targetCpuCores: 6.0
+
+subsystems:
+  # S1: OLTP Demo Ingestion Source
+  s1-ingestion:
+    enabled: true
+    replicas: 1
+    resources:
+      postgresql:
+        requests:
+          cpu: "100m"
+          memory: "192Mi"
+        limits:
+          cpu: "400m"
+          memory: "384Mi"
+      ingestionRunner:
+        enabled: true
+        requests:
+          cpu: "50m"
+          memory: "96Mi"
+        limits:
+          cpu: "250m"
+          memory: "192Mi"
+
+  # S2: Lakehouse Storage and Iceberg Catalog
+  s2-lakehouse:
+    enabled: true
+    replicas: 1
+    resources:
+      minio:
+        requests:
+          cpu: "100m"
+          memory: "192Mi"
+        limits:
+          cpu: "400m"
+          memory: "384Mi"
+      polaris:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+
+  # S3: Batch Processing Engine (Spark Operator)
+  s3-batch:
+    enabled: true
+    replicas: 1
+    resources:
+      sparkOperator:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "250m"
+          memory: "256Mi"
+      sparkDriver:
+        memory: "512m"
+        cpu: 0.5
+      sparkExecutor:
+        memory: "640m"
+        cpu: 0.5
+        instances: 1
+
+  # S4: Stream Processing Engine (Kafka KRaft + Flink)
+  s4-stream:
+    enabled: true
+    replicas: 1
+    resources:
+      kafka:
+        requests:
+          cpu: "200m"
+          memory: "384Mi"
+        limits:
+          cpu: "600m"
+          memory: "768Mi"
+      kafkaUi:
+        requests:
+          cpu: "50m"
+          memory: "96Mi"
+        limits:
+          cpu: "150m"
+          memory: "192Mi"
+      flinkOperator:
+        enabled: true
+        replicas: 1
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+      flinkJobs:
+        pedidosStream:
+          enabled: true
+          jobmanager:
+            memory: "256m"
+            cpu: 0.3
+          taskmanager:
+            memory: "384m"
+            cpu: 0.4
+            replicas: 1
+
+  # S5: Serving Layer (Trino Distributed SQL Engine)
+  s5-serving:
+    enabled: true
+    replicas: 1
+    resources:
+      trino:
+        requests:
+          cpu: "400m"
+          memory: "896Mi"
+        limits:
+          cpu: "1200m"
+          memory: "1280Mi"
+        jvmHeap: "1024M"
+
+  # S6: Data Mesh Governance and Contracts
+  s6-mesh:
+    enabled: true
+    replicas: 1
+    resources:
+      kyverno:
+        requests:
+          cpu: "50m"
+          memory: "96Mi"
+        limits:
+          cpu: "200m"
+          memory: "192Mi"
+
+  # S7: Data Fabric & Lineage
+  s7-fabric:
+    enabled: true
+    replicas: 1
+    resources:
+      marquez:
+        requests:
+          cpu: "100m"
+          memory: "192Mi"
+        limits:
+          cpu: "350m"
+          memory: "320Mi"
+      marquezDb:
+        requests:
+          cpu: "50m"
+          memory: "96Mi"
+        limits:
+          cpu: "200m"
+          memory: "192Mi"
+
+  # S8: Operations, Orchestration & Observability
+  s8-ops:
+    enabled: true
+    replicas: 1
+    resources:
+      dagster:
+        enabled: true
+        webserver:
+          requests:
+            cpu: "100m"
+            memory: "160Mi"
+          limits:
+            cpu: "300m"
+            memory: "256Mi"
+        daemon:
+          requests:
+            cpu: "50m"
+            memory: "96Mi"
+          limits:
+            cpu: "200m"
+            memory: "192Mi"
+      prometheus:
+        enabled: true
+        requests:
+          cpu: "100m"
+          memory: "160Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+      grafana:
+        enabled: true
+        requests:
+          cpu: "50m"
+          memory: "96Mi"
+        limits:
+          cpu: "200m"
+          memory: "192Mi"
+      metabase:
+        enabled: true
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "350m"
+          memory: "384Mi"
+        javaOpts: "-Xmx320m"

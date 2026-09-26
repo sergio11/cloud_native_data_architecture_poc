@@ -1,0 +1,74 @@
+# ==============================================================================
+# Subsystem S1: Ingestion Layer - Values Configuration
+# File: infra/helm/s1-ingestion/values.yaml
+# ==============================================================================
+
+global:
+  namespace: platform
+  storageClass: "standard"
+
+# PostgreSQL OLTP Demo Source Configuration
+postgresql:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: postgres
+    tag: "16.2-alpine"
+    pullPolicy: IfNotPresent
+
+  auth:
+    database: "poc_oltp"
+    username: "postgres"
+    password: "oltp_password_secret"
+
+  service:
+    type: ClusterIP
+    port: 5432
+    nodePort: 5432
+
+  persistence:
+    enabled: true
+    storageClass: "standard"
+    accessMode: ReadWriteOnce
+    size: 2Gi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+  nodeSelector:
+    node-role.kubernetes.io/storage: "true"
+
+  tolerations: []
+  affinity: {}
+
+# Ingestion Runner / Scheduled CDC Syncer
+ingestionRunner:
+  enabled: true
+  schedule: "*/15 * * * *"  # Run every 15 minutes
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  image:
+    repository: python
+    tag: "3.11-slim"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 250m
+      memory: 192Mi
+  env:
+    JDBC_URL: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp"
+    JDBC_USER: "postgres"
+    JDBC_PASSWORD: "oltp_password_secret"
+    ICEBERG_CATALOG_URL: "http://polaris.platform.svc.cluster.local:8181"
+    MINIO_ENDPOINT: "http://minio.platform.svc.cluster.local:9000"
+    MINIO_ACCESS_KEY: "minioadmin"
+    MINIO_SECRET_KEY: "minioadmin"
+    OPENLINEAGE_URL: "http://marquez.platform.svc.cluster.local:5000"

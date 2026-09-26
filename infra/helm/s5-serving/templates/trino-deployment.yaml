@@ -1,0 +1,79 @@
+{{- if .Values.trino.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trino
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: trino
+    {{- include "s5-serving.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.trino.replicaCount }}
+  selector:
+    matchLabels:
+      app: trino
+  template:
+    metadata:
+      labels:
+        app: trino
+        {{- include "s5-serving.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.trino.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: trino-coordinator
+          image: "{{ .Values.trino.image.repository }}:{{ .Values.trino.image.tag }}"
+          imagePullPolicy: {{ .Values.trino.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.trino.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trino
+            - name: catalog
+              mountPath: /etc/trino/catalog
+            - name: data
+              mountPath: /data/trino
+          readinessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 40
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: trino-config
+            items:
+              - key: node.properties
+                path: node.properties
+              - key: jvm.config
+                path: jvm.config
+              - key: config.properties
+                path: config.properties
+        - name: catalog
+          configMap:
+            name: trino-config
+            items:
+              - key: iceberg.properties
+                path: iceberg.properties
+              - key: gold.properties
+                path: gold.properties
+              - key: stream.properties
+                path: stream.properties
+              - key: kafka.properties
+                path: kafka.properties
+        - name: data
+          emptyDir: {}
+{{- end }}

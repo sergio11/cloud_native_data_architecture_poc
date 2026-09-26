@@ -1,0 +1,166 @@
+# ==============================================================================
+# Active Metadata Alert Rules (RF-20)
+# ==============================================================================
+# Configuration of real-time rules evaluated by the Lineage Webhook Service
+# against incoming OpenLineage events (runs, datasets, schemas, and assertions).
+# ==============================================================================
+
+version: "1.0.0"
+service: "lineage-webhook-service"
+evaluation_interval_seconds: 10
+
+defaults:
+  environment: "production"
+  notification_channels:
+    - "webhook"
+    - "prometheus_metric"
+  throttling:
+    deduplication_window_seconds: 300
+
+rules:
+  # ----------------------------------------------------------------------------
+  # Rule 1: Schema Change Alert on Silver/Gold Tables
+  # ----------------------------------------------------------------------------
+  - id: "RF20-RULE-001"
+    name: "SchemaChangeAlert"
+    enabled: true
+    description: >
+      Detects breaking or non-breaking schema modifications (added, removed,
+      renamed, or altered column data types/nullability) on Silver and Gold
+      production lakehouse tables.
+    target:
+      namespace: ".*"
+      dataset_pattern: "^(silver|gold)\\..*"
+      event_types: ["START", "RUNNING", "COMPLETE"]
+    criteria:
+      type: "schema_drift"
+      detect_added_columns: true
+      detect_removed_columns: true
+      detect_type_changes: true
+      detect_nullability_changes: true
+      strict_mode: false # If true, any column addition is marked CRITICAL
+    severity_mapping:
+      removed_column: "CRITICAL"
+      type_altered: "CRITICAL"
+      nullability_changed: "WARNING"
+      added_column: "WARNING"
+    actions:
+      webhook:
+        endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
+        retry_count: 3
+      annotations:
+        summary: "Schema drift detected on {{ dataset_name }}"
+        description: "Dataset {{ dataset_name }} schema changed: {{ diff_summary }}"
+        runbook_url: "https://wiki.internal/runbooks/schema-drift"
+        domain: "{{ domain }}"
+
+  # ----------------------------------------------------------------------------
+  # Rule 2: Quality Threshold Breach Alert
+  # ----------------------------------------------------------------------------
+  - id: "RF20-RULE-002"
+    name: "QualityThresholdBreachAlert"
+    enabled: true
+    description: >
+      Triggers when data quality assertions or Great Expectations validation
+      suites report a pass rate below the contractual threshold (0.95), or
+      whenever any assertion marked as critical severity fails.
+    target:
+      namespace: ".*"
+      dataset_pattern: ".*"
+      event_types: ["COMPLETE", "FAIL"]
+    criteria:
+      type: "quality_assertion"
+      facet_key: "dataQualityAssertions"
+      metrics_facet_key: "dataQuality"
+      min_pass_rate: 0.95
+      fail_on_critical_assertion: true
+      critical_severities: ["critical", "high", "FATAL"]
+    severity_mapping:
+      pass_rate_below_0_90: "CRITICAL"
+      pass_rate_below_0_95: "WARNING"
+      critical_assertion_failed: "CRITICAL"
+    actions:
+      webhook:
+        endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
+        retry_count: 3
+      annotations:
+        summary: "Data quality breach on {{ dataset_name }} (pass rate: {{ pass_rate }})"
+        description: "Validation suite {{ suite_name }} failed {{ failed_count }} assertions on table {{ dataset_name }}"
+        runbook_url: "https://wiki.internal/runbooks/quality-breach"
+        domain: "{{ domain }}"
+
+  # ----------------------------------------------------------------------------
+  # Rule 3: Pipeline Failure Alert
+  # ----------------------------------------------------------------------------
+  - id: "RF20-RULE-003"
+    name: "PipelineFailureAlert"
+    enabled: true
+    description: >
+      Triggers immediately when any pipeline job emits an OpenLineage FAIL or
+      ABORT event, capturing execution stack trace, job metadata, and parent run context.
+    target:
+      namespace: ".*"
+      dataset_pattern: ".*"
+      event_types: ["FAIL", "ABORT"]
+    criteria:
+      type: "pipeline_status"
+      terminal_states: ["FAIL", "ABORT"]
+      exclude_job_patterns:
+        - "^test_.*"
+        - ".*_dry_run"
+    severity_mapping:
+      medallion_core: "CRITICAL"
+      streaming_core: "CRITICAL"
+      auxiliary: "WARNING"
+    actions:
+      webhook:
+        endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
+        retry_count: 3
+      annotations:
+        summary: "Pipeline failed: {{ job_name }} (run_id: {{ run_id }})"
+        description: "Job {{ job_name }} failed in namespace {{ namespace }} with error: {{ error_message }}"
+        runbook_url: "https://wiki.internal/runbooks/pipeline-failure"
+        domain: "{{ domain }}"
+
+  # ----------------------------------------------------------------------------
+  # Rule 4: SLA Freshness Breach Alert
+  # ----------------------------------------------------------------------------
+  - id: "RF20-RULE-004"
+    name: "SLAFreshnessBreachAlert"
+    enabled: true
+    description: >
+      Triggers when dataset output timestamps or pipeline run times exceed
+      contractual SLA freshness windows (e.g., 3600 seconds for hourly batch
+      medallion layers, 5 seconds for streaming processing).
+    target:
+      namespace: ".*"
+      dataset_pattern: ".*"
+      event_types: ["COMPLETE", "CHECK"]
+    criteria:
+      type: "sla_freshness"
+      sla_definitions:
+        - pattern: "^bronze\\..*"
+          max_staleness_seconds: 3600
+          sla_tier: "tier_2"
+        - pattern: "^silver\\..*"
+          max_staleness_seconds: 3600
+          sla_tier: "tier_1"
+        - pattern: "^gold\\..*"
+          max_staleness_seconds: 86400
+          sla_tier: "tier_1"
+        - pattern: "^stream\\..*"
+          max_staleness_seconds: 5
+          sla_tier: "real_time"
+    severity_mapping:
+      tier_1_breach: "CRITICAL"
+      tier_2_breach: "WARNING"
+      real_time_breach: "CRITICAL"
+    actions:
+      webhook:
+        endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
+        retry_count: 3
+      annotations:
+        summary: "SLA Freshness breach on {{ dataset_name }}"
+        description: "Dataset {{ dataset_name }} has staleness of {{ staleness_seconds }}s exceeding SLA of {{ max_sla_seconds }}s"
+        runbook_url: "https://wiki.internal/runbooks/sla-freshness"
+        domain: "{{ domain }}"

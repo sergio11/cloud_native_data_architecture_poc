@@ -1,0 +1,104 @@
+# ==============================================================================
+# Modern Data Architecture POC - Kind Cluster Configuration
+# File: infra/kind/cluster-config.yaml
+# Description: Multi-node Kind cluster definition (1 control-plane, 2 workers)
+#              with host port mappings for web interfaces and APIs, host path
+#              persistence under /data, and dedicated node roles.
+# ==============================================================================
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: poc-data-platform
+networking:
+  ipFamily: ipv4
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: 6443
+nodes:
+  # ----------------------------------------------------------------------------
+  # Control Plane Node
+  # Hosts Kubernetes control components and routes ingress / NodePort mappings
+  # ----------------------------------------------------------------------------
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            service-node-port-range: "1-65535"
+    extraPortMappings:
+      # Port 3000: Grafana Metrics & Observability Dashboard
+      - containerPort: 3000
+        hostPort: 3000
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 3001: Dagster Web UI (Dagit Orchestrator)
+      - containerPort: 3001
+        hostPort: 3001
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 3002: Marquez Lineage & Metadata Web UI
+      - containerPort: 3002
+        hostPort: 3002
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 3003: Metabase Business Intelligence
+      - containerPort: 3003
+        hostPort: 3003
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 8080: Trino Distributed SQL Query Coordinator
+      - containerPort: 8080
+        hostPort: 8080
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 8090: Kafka UI / AKHQ Topic Explorer
+      - containerPort: 8090
+        hostPort: 8090
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 9000: MinIO S3 API Endpoint
+      - containerPort: 9000
+        hostPort: 9000
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 9001: MinIO Console Web UI
+      - containerPort: 9001
+        hostPort: 9001
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+      # Port 8181: Apache Polaris REST Catalog API
+      - containerPort: 8181
+        hostPort: 8181
+        protocol: TCP
+        listenAddress: "0.0.0.0"
+    extraMounts:
+      - hostPath: ./data/control-plane
+        containerPath: /data
+        readOnly: false
+
+  # ----------------------------------------------------------------------------
+  # Worker Node 1: Storage Layer
+  # Hosts MinIO Object Store, PostgreSQL OLTP, Kafka Brokers, and Polaris Catalog
+  # ----------------------------------------------------------------------------
+  - role: worker
+    labels:
+      node-role.kubernetes.io/storage: "true"
+      node-role.kubernetes.io/worker: "true"
+      topology.kubernetes.io/zone: "storage"
+    extraMounts:
+      - hostPath: ./data/worker-storage
+        containerPath: /data
+        readOnly: false
+
+  # ----------------------------------------------------------------------------
+  # Worker Node 2: Compute Layer
+  # Hosts Spark Batch Drivers/Executors, Flink Stream Processors, Trino Engine
+  # ----------------------------------------------------------------------------
+  - role: worker
+    labels:
+      node-role.kubernetes.io/compute: "true"
+      node-role.kubernetes.io/worker: "true"
+      topology.kubernetes.io/zone: "compute"
+    extraMounts:
+      - hostPath: ./data/worker-compute
+        containerPath: /data
+        readOnly: false

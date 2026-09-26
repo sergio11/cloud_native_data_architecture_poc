@@ -1,0 +1,66 @@
+# ==============================================================================
+# Subsystem S6: Data Mesh Governance - Values Configuration
+# File: infra/helm/s6-mesh/values.yaml
+# ==============================================================================
+
+global:
+  namespace: platform
+
+kyverno:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/kyverno/kyverno
+    tag: "v1.11.4"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 250m
+      memory: 192Mi
+
+  nodeSelector:
+    node-role.kubernetes.io/compute: "true"
+
+crds:
+  install: true
+
+domains:
+  sales:
+    enabled: true
+    namespace: sales
+    quotas:
+      requestsCpu: "2000m"
+      requestsMemory: "4Gi"
+      limitsCpu: "4000m"
+      limitsMemory: "6Gi"
+      pods: "20"
+      persistentvolumeclaims: "10"
+  marketing:
+    enabled: true
+    namespace: marketing
+    quotas:
+      requestsCpu: "1500m"
+      requestsMemory: "3Gi"
+      limitsCpu: "3000m"
+      limitsMemory: "5Gi"
+      pods: "15"
+      persistentvolumeclaims: "8"
+  finance:
+    enabled: true
+    namespace: finance
+    quotas:
+      requestsCpu: "1000m"
+      requestsMemory: "2Gi"
+      limitsCpu: "2000m"
+      limitsMemory: "4Gi"
+      pods: "10"
+      persistentvolumeclaims: "5"
+
+policies:
+  enforceContracts: true
+  requireOwnerEmail: true
+  validateQualityThresholds: true

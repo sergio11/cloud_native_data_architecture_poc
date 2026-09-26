@@ -1,0 +1,38 @@
+{{- if and .Values.flinkOperator.enabled .Values.flinkJobs.ordersStream.enabled }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: flink-orders-stream
+  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  labels:
+    app: flink-orders-stream
+    stream: orders
+    {{- include "s4-stream.labels" . | nindent 4 }}
+spec:
+  image: {{ .Values.flinkJobs.ordersStream.image }}
+  flinkVersion: v1_18
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "2"
+    state.backend: filesystem
+    state.checkpoints.dir: "s3a://checkpoints/flink-orders"
+    s3.endpoint: "http://minio.platform.svc.cluster.local:9000"
+    s3.path.style.access: "true"
+    s3.access-key: "minioadmin"
+    s3.secret-key: "minioadmin"
+  serviceAccount: flink-service-account
+  jobManager:
+    resource:
+      memory: {{ .Values.flinkJobs.ordersStream.jobManager.memory | quote }}
+      cpu: {{ .Values.flinkJobs.ordersStream.jobManager.cpu }}
+  taskManager:
+    resource:
+      memory: {{ .Values.flinkJobs.ordersStream.taskManager.memory | quote }}
+      cpu: {{ .Values.flinkJobs.ordersStream.taskManager.cpu }}
+    replicas: {{ .Values.flinkJobs.ordersStream.taskManager.replicas }}
+  job:
+    jarURI: "local:///opt/flink/opt/flink-python_2.12-1.18.0.jar"
+    entryClass: "org.apache.flink.client.python.PythonDriver"
+    args: ["-py", "/opt/flink/pipelines/stream/flink_orders_stream.py"]
+    parallelism: 1
+    upgradeMode: stateless
+{{- end }}

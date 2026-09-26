@@ -1,0 +1,26 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pii-classification
+  annotations:
+    policies.kyverno.io/title: Enforce Data Classification and PII Safeguards
+    policies.kyverno.io/category: Data Privacy & Security
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Enforces that all DataProduct definitions declare their sensitivity classification
+      and mandate masking policies when classified as PII or confidential.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: validate-classification-enum
+      match:
+        any:
+          - resources:
+              kinds:
+                - DataProduct
+      validate:
+        message: "spec.classification must be one of: public, internal, confidential, pii."
+        pattern:
+          spec:
+            classification: "public | internal | confidential | pii"

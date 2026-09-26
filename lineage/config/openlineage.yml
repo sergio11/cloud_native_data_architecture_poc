@@ -1,0 +1,135 @@
+# ==============================================================================
+# OpenLineage Global Configuration for Modern Data Architecture POC
+# ==============================================================================
+# This configuration defines OpenLineage event generation, facet emission,
+# and transport routing for Apache Spark, Apache Flink, and custom Python
+# pipeline runtimes pointing to the Marquez metadata backend.
+#
+# References:
+#   - OpenLineage Spec 1-0-2: https://openlineage.io/spec/1-0-2/
+#   - Marquez API: http://marquez-api.lineage.svc.cluster.local:5000
+# ==============================================================================
+
+transport:
+  type: http
+  url: ${OPENLINEAGE_URL:-http://marquez-api.lineage.svc.cluster.local:5000}
+  endpoint: /api/v1/lineage
+  timeoutInMillis: 5000
+  keepAlive: true
+  auth:
+    type: api_key
+    apiKey: ${OPENLINEAGE_API_KEY:-poc-lineage-token}
+  headers:
+    Content-Type: application/json
+    User-Agent: OpenLineage-Client/1.17.0 (Platform-Data-Engineering)
+  retry:
+    maxRetries: 3
+    initialDelayMs: 500
+    maxDelayMs: 3000
+    backoffFactor: 2.0
+  compression: gzip
+
+circuitBreaker:
+  type: javaRuntime
+  memoryThreshold: 85
+  gcCpuThreshold: 80
+  checkIntervalMillis: 2000
+
+# ------------------------------------------------------------------------------
+# Default Job and Dataset Metadata Configuration
+# ------------------------------------------------------------------------------
+job:
+  namespace: ${OPENLINEAGE_NAMESPACE:-data-platform}
+  owners:
+    - name: "Data Engineering Platform Team"
+      type: MAINTAINER
+  tags:
+    - "poc-modern-data-stack"
+    - "medallion-architecture"
+    - "iceberg"
+
+# ------------------------------------------------------------------------------
+# Facet Configuration
+# ------------------------------------------------------------------------------
+facetsConfig:
+  # Schema Facet: Captures dataset field names, types, nullability, and descriptions
+  schema:
+    disabled: false
+    includeDocumentation: true
+    includeNullability: true
+    normalizeTypes: true
+    collectColumnLineage: true
+
+  # Datasource Facet: Captures authoritative physical connection endpoints
+  datasource:
+    disabled: false
+    customResolvers:
+      iceberg:
+        uriPattern: "rest://.*"
+        canonicalName: "polaris-catalog"
+      kafka:
+        uriPattern: "kafka://.*"
+        canonicalName: "kafka-cluster"
+      postgres:
+        uriPattern: "jdbc:postgresql://.*"
+        canonicalName: "postgres-oltp"
+      s3a:
+        uriPattern: "s3a://.*"
+        canonicalName: "minio-warehouse"
+
+  # Data Quality Assertions Facet: Great Expectations / validation test results
+  data_quality_assertions:
+    disabled: false
+    captureColumnStats: true
+    includeFailedRowsSample: false
+    schemaURL: "https://openlineage.io/spec/facets/1-0-0/DataQualityAssertionsFacet.json"
+
+  # Parent Job Facet: Hierarchical lineage linkage (Dagster -> Spark / Flink)
+  parent_job:
+    disabled: false
+    extractFromEnv: true
+    parentRunIdEnv: OPENLINEAGE_PARENT_RUN_ID
+    parentJobNameEnv: OPENLINEAGE_PARENT_JOB_NAME
+    parentJobNamespaceEnv: OPENLINEAGE_PARENT_JOB_NAMESPACE
+
+  # Additional Built-in Facets
+  spark_properties:
+    disabled: false
+    excludeKeys:
+      - ".*password.*"
+      - ".*secret.*"
+      - ".*token.*"
+      - ".*key.*"
+  spark_version:
+    disabled: false
+  spark_unknown_operator:
+    disabled: false
+
+# ------------------------------------------------------------------------------
+# Runtime Integrations Specific Settings
+# ------------------------------------------------------------------------------
+runtimes:
+  spark:
+    spark.extraListeners: "io.openlineage.spark.agent.OpenLineageSparkListener"
+    spark.openlineage.transport.type: "http"
+    spark.openlineage.transport.url: "${OPENLINEAGE_URL:-http://marquez-api.lineage.svc.cluster.local:5000}"
+    spark.openlineage.namespace: "${OPENLINEAGE_NAMESPACE:-data-platform}"
+    spark.openlineage.facets.custom:
+      domain: "${DATA_DOMAIN:-sales}"
+      environment: "${ENV:-production}"
+      resource_profile: "${RESOURCE_PROFILE:-batch}"
+
+  flink:
+    openlineage.dataset.namespace: "${OPENLINEAGE_NAMESPACE:-flink-streaming}"
+    openlineage.transport.type: "http"
+    openlineage.transport.url: "${OPENLINEAGE_URL:-http://marquez-api.lineage.svc.cluster.local:5000}"
+    openlineage.execution.checkpoint.interval.ms: 60000
+    openlineage.facets.custom:
+      processing_mode: "streaming"
+      kafka_bootstrap: "kafka:9092"
+
+  python:
+    openlineage.client.url: "${OPENLINEAGE_URL:-http://marquez-api.lineage.svc.cluster.local:5000}"
+    openlineage.client.namespace: "${OPENLINEAGE_NAMESPACE:-data-platform}"
+    openlineage.client.timeout: 5
+    openlineage.client.retry_count: 3

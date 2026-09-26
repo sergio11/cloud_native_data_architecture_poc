@@ -1,0 +1,27 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-data-product-owner
+  annotations:
+    policies.kyverno.io/title: Require Data Product Owner
+    policies.kyverno.io/category: Data Governance / Data Mesh
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Ensures that every DataProduct resource deployed within the cluster specifies
+      an accountable owner in metadata.annotations or metadata.owner with a valid email.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-owner-email
+      match:
+        any:
+          - resources:
+              kinds:
+                - DataProduct
+      validate:
+        message: "DataProduct must specify a valid owner email address in spec.owner or metadata.annotations['dataplatform.io/owner']."
+        pattern:
+          =(metadata):
+            =(annotations):
+              =(dataplatform.io/owner): "?*@?*.?*"

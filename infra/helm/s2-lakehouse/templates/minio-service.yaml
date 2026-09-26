@@ -1,0 +1,25 @@
+{{- if .Values.minio.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: minio
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.minio.service.type }}
+  ports:
+    - name: s3-api
+      port: {{ .Values.minio.service.apiPort }}
+      targetPort: 9000
+      nodePort: {{ .Values.minio.service.apiNodePort }}
+      protocol: TCP
+    - name: console
+      port: {{ .Values.minio.service.consolePort }}
+      targetPort: 9001
+      nodePort: {{ .Values.minio.service.consoleNodePort }}
+      protocol: TCP
+  selector:
+    app: minio
+{{- end }}

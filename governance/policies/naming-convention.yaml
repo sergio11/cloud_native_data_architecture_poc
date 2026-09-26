@@ -1,0 +1,22 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: enforce-mesh-naming-conventions
+  annotations:
+    policies.kyverno.io/title: Enforce Data Mesh Naming Conventions
+    policies.kyverno.io/category: Architecture Standards
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: validate-product-naming
+      match:
+        any:
+          - resources:
+              kinds:
+                - DataProduct
+      validate:
+        message: "DataProduct name must be lowercase alphanumeric with hyphens (e.g. orders, customers, daily-metrics)."
+        pattern:
+          metadata:
+            name: "?*([a-z0-9-])"

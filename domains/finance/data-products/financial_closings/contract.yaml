@@ -1,0 +1,61 @@
+apiVersion: datacontract.com/v1alpha1
+kind: DataContract
+metadata:
+  name: financial-closings-contract
+  version: "1.0.0"
+  status: active
+  domain: finance
+  data_product: financial_closings
+  owner: finance-team@company.internal
+spec:
+  description: "Binding contract between Finance domain and stakeholders for audited financial closures."
+  compatibility_mode: BACKWARD
+  sla:
+    freshness: "24h"
+    availability: "99.9%"
+    response_time_ms: 2000
+  schema:
+    format: iceberg
+    primary_key: ["closure_id"]
+    fields:
+      - name: closure_id
+        type: string
+        required: true
+        description: "Unique closure code (e.g. CLS-2024-Q3)"
+      - name: fiscal_year
+        type: integer
+        required: true
+        description: "Fiscal year of reporting"
+      - name: fiscal_period
+        type: integer
+        required: true
+        description: "Fiscal period (month 1-12 or quarter 1-4)"
+      - name: gross_revenue
+        type: decimal(18,2)
+        required: true
+        description: "Gross GAAP revenue recognized"
+      - name: net_revenue
+        type: decimal(18,2)
+        required: true
+        description: "Net revenue post returns and discounts"
+      - name: total_orders
+        type: long
+        required: true
+        description: "Total count of orders closed in period"
+      - name: status
+        type: string
+        required: true
+        description: "Audit state: DRAFT, AUDITED, FINALIZED"
+      - name: closed_at
+        type: timestamp
+        required: true
+        description: "Closure certification timestamp"
+      - name: certified_by
+        type: string
+        required: true
+        description: "Auditor or corporate controller email"
+  quality:
+    thresholds:
+      completeness: 1.00
+      uniqueness: 1.00
+      validity: 1.00

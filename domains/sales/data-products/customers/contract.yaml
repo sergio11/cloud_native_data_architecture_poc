@@ -1,0 +1,49 @@
+apiVersion: datacontract.com/v1alpha1
+kind: DataContract
+metadata:
+  name: customers-contract
+  version: "1.1.0"
+  status: active
+  domain: sales
+  data_product: customers
+  owner: sales-data-team@company.internal
+spec:
+  description: "Customer dimension data contract with explicit GDPR PII safeguards."
+  compatibility_mode: BACKWARD
+  sla:
+    freshness: "6h"
+    availability: "99.5%"
+    response_time_ms: 2000
+  schema:
+    format: iceberg
+    primary_key: ["id"]
+    fields:
+      - name: id
+        type: integer
+        required: true
+        description: "Surrogate customer ID"
+      - name: name_masked
+        type: string
+        required: true
+        description: "Masked customer name (First name + initial)"
+      - name: email_hash
+        type: string
+        required: true
+        description: "Cryptographic SHA-256 hash of primary email address"
+      - name: segment
+        type: string
+        required: true
+        description: "Customer segment: premium, standard, basic"
+      - name: registration_date
+        type: date
+        required: true
+        description: "Customer signup date"
+      - name: created_at
+        type: timestamp
+        required: true
+        description: "Audit timestamp"
+  quality:
+    thresholds:
+      completeness: 0.99
+      uniqueness: 1.00
+      validity: 0.99

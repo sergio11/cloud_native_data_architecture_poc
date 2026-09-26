@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/finance/financial_closings.json",
+  "title": "FinancialClosingsDataProductSchema",
+  "description": "Schema definition for financial closures data product asset",
+  "type": "object",
+  "required": [
+    "closure_id",
+    "fiscal_year",
+    "fiscal_period",
+    "gross_revenue",
+    "net_revenue",
+    "total_orders",
+    "status",
+    "closed_at",
+    "certified_by"
+  ],
+  "properties": {
+    "closure_id": { "type": "string" },
+    "fiscal_year": { "type": "integer", "minimum": 2000, "maximum": 2100 },
+    "fiscal_period": { "type": "integer", "minimum": 1, "maximum": 12 },
+    "gross_revenue": { "type": "number", "minimum": 0.0 },
+    "net_revenue": { "type": "number", "minimum": 0.0 },
+    "total_orders": { "type": "integer", "minimum": 0 },
+    "status": { "type": "string", "enum": ["DRAFT", "AUDITED", "FINALIZED"] },
+    "closed_at": { "type": "string", "format": "date-time" },
+    "certified_by": { "type": "string", "format": "email" }
+  },
+  "additionalProperties": false
+}

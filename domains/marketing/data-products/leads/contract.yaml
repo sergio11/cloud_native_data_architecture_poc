@@ -1,0 +1,45 @@
+apiVersion: datacontract.com/v1alpha1
+kind: DataContract
+metadata:
+  name: leads-contract
+  version: "1.1.0"
+  status: active
+  domain: marketing
+  data_product: leads
+  owner: marketing-analytics@company.internal
+spec:
+  description: "Clickstream events and lead conversion data contract."
+  compatibility_mode: BACKWARD
+  sla:
+    freshness: "15m"
+    availability: "99.5%"
+    response_time_ms: 1000
+  schema:
+    format: iceberg
+    primary_key: ["session_id", "event_timestamp"]
+    fields:
+      - name: session_id
+        type: string
+        required: true
+        description: "Browser or application session UUID"
+      - name: customer_id
+        type: integer
+        required: false
+        description: "Optional authenticated customer identifier"
+      - name: page_url
+        type: string
+        required: true
+        description: "Visited URL route or mobile screen name"
+      - name: event_type
+        type: string
+        required: true
+        description: "Interaction type: view, click, add_to_cart, checkout, purchase"
+      - name: event_timestamp
+        type: timestamp
+        required: true
+        description: "Client event generation epoch timestamp"
+  quality:
+    thresholds:
+      completeness: 0.98
+      uniqueness: 0.99
+      validity: 0.99

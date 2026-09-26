@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/sales/orders.json",
+  "title": "OrdersDataProductSchema",
+  "description": "Schema definition for sales orders data product asset",
+  "type": "object",
+  "required": ["id", "customer_id", "total_amount", "status", "order_date", "created_at"],
+  "properties": {
+    "id": { "type": "integer", "minimum": 1 },
+    "customer_id": { "type": "integer", "minimum": 1 },
+    "total_amount": { "type": "number", "minimum": 0.0 },
+    "status": {
+      "type": "string",
+      "enum": ["confirmed", "pending", "shipped", "cancelled"]
+    },
+    "order_date": { "type": "string", "format": "date" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

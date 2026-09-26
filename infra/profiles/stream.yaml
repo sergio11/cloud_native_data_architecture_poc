@@ -1,0 +1,182 @@
+# ==============================================================================
+# Modern Data Architecture POC - Startup Profile: Stream
+# File: infra/profiles/stream.yaml
+# Description: Stream processing profile activating foundational platform
+#              services, Kafka messaging, Flink Kubernetes Operator, streaming
+#              pipelines (orders & clickstream), plus Prometheus/Grafana metrics.
+# Target RAM Footprint: ~6.0 GB RAM
+# ==============================================================================
+profile:
+  name: "stream"
+  description: "Real-time stream processing with Kafka, Apache Flink, and Observability"
+  targetRamMb: 6144
+  targetCpuCores: 4.0
+
+subsystems:
+  # S1: OLTP Demo Ingestion Source
+  s1-ingestion:
+    enabled: true
+    replicas: 1
+    resources:
+      postgresql:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      ingestionRunner:
+        enabled: false
+
+  # S2: Lakehouse Storage and Iceberg Catalog
+  s2-lakehouse:
+    enabled: true
+    replicas: 1
+    resources:
+      minio:
+        requests:
+          cpu: "150m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      polaris:
+        requests:
+          cpu: "150m"
+          memory: "384Mi"
+        limits:
+          cpu: "600m"
+          memory: "512Mi"
+
+  # S3: Batch Processing Engine (Disabled in Stream Profile)
+  s3-batch:
+    enabled: false
+    replicas: 0
+    resources:
+      sparkOperator:
+        requests:
+          cpu: "0m"
+          memory: "0Mi"
+        limits:
+          cpu: "0m"
+          memory: "0Mi"
+
+  # S4: Stream Processing Engine (Kafka + Flink Operator + Jobs)
+  s4-stream:
+    enabled: true
+    replicas: 1
+    resources:
+      kafka:
+        requests:
+          cpu: "300m"
+          memory: "512Mi"
+        limits:
+          cpu: "1000m"
+          memory: "768Mi"
+      kafkaUi:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+      flinkOperator:
+        enabled: true
+        replicas: 1
+        requests:
+          cpu: "150m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      flinkJobs:
+        ordersStream:
+          enabled: true
+          jobmanager:
+            memory: "384m"
+            cpu: 0.5
+          taskmanager:
+            memory: "512m"
+            cpu: 0.5
+            replicas: 1
+        clickstreamStream:
+          enabled: true
+          jobmanager:
+            memory: "384m"
+            cpu: 0.5
+          taskmanager:
+            memory: "512m"
+            cpu: 0.5
+            replicas: 1
+
+  # S5: Serving Layer (Disabled in Stream Profile)
+  s5-serving:
+    enabled: false
+    replicas: 0
+    resources:
+      trino:
+        requests:
+          cpu: "0m"
+          memory: "0Mi"
+        limits:
+          cpu: "0m"
+          memory: "0Mi"
+
+  # S6: Data Mesh Governance and Contracts
+  s6-mesh:
+    enabled: true
+    replicas: 1
+    resources:
+      kyverno:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+
+  # S7: Data Fabric & Lineage
+  s7-fabric:
+    enabled: true
+    replicas: 1
+    resources:
+      marquez:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      marquezDb:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+
+  # S8: Operations, Orchestration & Observability (Prometheus & Grafana)
+  s8-ops:
+    enabled: true
+    replicas: 1
+    resources:
+      dagster:
+        enabled: false
+      prometheus:
+        enabled: true
+        requests:
+          cpu: "150m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      grafana:
+        enabled: true
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+      metabase:
+        enabled: false

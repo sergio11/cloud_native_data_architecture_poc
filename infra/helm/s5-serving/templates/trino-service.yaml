@@ -1,0 +1,20 @@
+{{- if .Values.trino.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: trino
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: trino
+    {{- include "s5-serving.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.trino.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.trino.service.port }}
+      targetPort: 8080
+      nodePort: {{ .Values.trino.service.nodePort }}
+      protocol: TCP
+  selector:
+    app: trino
+{{- end }}

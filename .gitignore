@@ -1,0 +1,232 @@
+# =============================================================================
+# .gitignore — Modern Data Architecture POC
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Jupyter / IPython
+.ipynb_checkpoints
+*.ipynb
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+pyrightconfig.json
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+junit*.xml
+
+# -----------------------------------------------------------------------------
+# Great Expectations
+# -----------------------------------------------------------------------------
+great_expectations/uncommitted/
+great_expectations/.ge_store_backend_id
+ge_data_docs/
+
+# -----------------------------------------------------------------------------
+# Spark / Hadoop
+# -----------------------------------------------------------------------------
+derby.log
+metastore_db/
+spark-warehouse/
+*.crc
+_temporary/
+_spark_metadata/
+
+# -----------------------------------------------------------------------------
+# Java / Scala / Maven / SBT (Spark dependencies)
+# -----------------------------------------------------------------------------
+target/
+*.class
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+.gradle/
+build/
+.m2/
+*.iml
+
+# -----------------------------------------------------------------------------
+# Kubernetes / Helm
+# -----------------------------------------------------------------------------
+# Rendered Helm charts (never commit generated output)
+infra/helm/*/charts/
+infra/helm/*/Chart.lock
+infra/helm/*/.helmignore
+*.helmignore
+kubeconfig
+kubeconfig.yaml
+.kube/
+
+# -----------------------------------------------------------------------------
+# kind / Podman / Docker
+# -----------------------------------------------------------------------------
+.docker/
+*.pid
+
+# -----------------------------------------------------------------------------
+# Terraform (if ever added)
+# -----------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+crash.log
+
+# -----------------------------------------------------------------------------
+# Secrets & credentials — NEVER commit these
+# -----------------------------------------------------------------------------
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+secret.yaml
+secret.yml
+*-secret.yaml
+*-secret.yml
+.env.*
+!.env.example
+credentials.json
+service-account*.json
+
+# -----------------------------------------------------------------------------
+# IDE & editor artifacts
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.orig
+.project
+.classpath
+.settings/
+
+# -----------------------------------------------------------------------------
+# OS artifacts
+# -----------------------------------------------------------------------------
+desktop.ini
+ehthumbs.db
+[Dd]esktop.ini
+
+# -----------------------------------------------------------------------------
+# Logs & local outputs
+# -----------------------------------------------------------------------------
+*.log
+logs/
+*.out
+nohup.out
+openlineage-events/
+
+# -----------------------------------------------------------------------------
+# Data files — do not commit generated/downloaded data
+# -----------------------------------------------------------------------------
+*.parquet
+*.avro
+*.orc
+*.csv
+*.tsv
+*.jsonl
+data/
+lakehouse/
+warehouse/
+checkpoint/
+checkpoints/
+iceberg-data/
+
+# -----------------------------------------------------------------------------
+# MinIO / S3 local mirror
+# -----------------------------------------------------------------------------
+.minio.sys/
+minio-data/
+
+# -----------------------------------------------------------------------------
+# Dagster
+# -----------------------------------------------------------------------------
+$DAGSTER_HOME/
+.dagster/
+dagster_home/
+storage/
+
+# -----------------------------------------------------------------------------
+# Node / npm (if any web tooling is added)
+# -----------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# -----------------------------------------------------------------------------
+# Documentation builds
+# -----------------------------------------------------------------------------
+docs/_build/
+docs/site/
+site/
+
+# -----------------------------------------------------------------------------
+# Temporary / scratch
+# -----------------------------------------------------------------------------
+tmp/
+temp/
+scratch/
+*.tmp
+*.bak
+*.swp

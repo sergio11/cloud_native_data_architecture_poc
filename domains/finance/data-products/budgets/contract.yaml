@@ -1,0 +1,57 @@
+apiVersion: datacontract.com/v1alpha1
+kind: DataContract
+metadata:
+  name: budgets-contract
+  version: "1.1.0"
+  status: active
+  domain: finance
+  data_product: budgets
+  owner: fp-and-a@company.internal
+spec:
+  description: "Departmental budget and variance dataset contract."
+  compatibility_mode: BACKWARD
+  sla:
+    freshness: "12h"
+    availability: "99.5%"
+    response_time_ms: 3000
+  schema:
+    format: iceberg
+    primary_key: ["budget_id", "fiscal_year", "cost_center"]
+    fields:
+      - name: budget_id
+        type: string
+        required: true
+        description: "Primary key identifier"
+      - name: fiscal_year
+        type: integer
+        required: true
+        description: "Target budget year"
+      - name: cost_center
+        type: string
+        required: true
+        description: "Departmental cost center code (e.g. CC-MKT-01, CC-SLS-02)"
+      - name: department
+        type: string
+        required: true
+        description: "Department name"
+      - name: allocated_amount
+        type: decimal(18,2)
+        required: true
+        description: "Approved budget allocation"
+      - name: actual_spent
+        type: decimal(18,2)
+        required: true
+        description: "Current spend tracked"
+      - name: variance_amount
+        type: decimal(18,2)
+        required: true
+        description: "allocated_amount - actual_spent"
+      - name: updated_at
+        type: timestamp
+        required: true
+        description: "Last sync timestamp"
+  quality:
+    thresholds:
+      completeness: 0.99
+      uniqueness: 1.00
+      validity: 0.99

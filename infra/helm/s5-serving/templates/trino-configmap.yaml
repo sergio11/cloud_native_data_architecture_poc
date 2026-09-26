@@ -1,0 +1,67 @@
+{{- if .Values.trino.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-config
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: trino
+    {{- include "s5-serving.labels" . | nindent 4 }}
+data:
+  node.properties: |
+    node.environment=poc
+    node.data-dir=/data/trino
+
+  jvm.config: |
+    -server
+    -Xmx{{ .Values.trino.jvm.maxHeapSize }}
+    {{ .Values.trino.jvm.gc }}
+    -XX:G1HeapRegionSize=32M
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+ExitOnOutOfMemoryError
+    -Djdk.attach.allowAttachSelf=true
+
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port=8080
+    query.max-memory=800MB
+    query.max-memory-per-node=400MB
+    discovery.uri=http://localhost:8080
+
+  iceberg.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri={{ .Values.catalogs.iceberg.restCatalogUri }}
+    fs.native-s3.enabled=true
+    s3.endpoint={{ .Values.catalogs.iceberg.s3Endpoint }}
+    s3.aws-access-key={{ .Values.catalogs.iceberg.s3AccessKey }}
+    s3.aws-secret-key={{ .Values.catalogs.iceberg.s3SecretKey }}
+    s3.path-style-access={{ .Values.catalogs.iceberg.s3PathStyleAccess }}
+
+  gold.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri={{ .Values.catalogs.iceberg.restCatalogUri }}
+    fs.native-s3.enabled=true
+    s3.endpoint={{ .Values.catalogs.iceberg.s3Endpoint }}
+    s3.aws-access-key={{ .Values.catalogs.iceberg.s3AccessKey }}
+    s3.aws-secret-key={{ .Values.catalogs.iceberg.s3SecretKey }}
+    s3.path-style-access={{ .Values.catalogs.iceberg.s3PathStyleAccess }}
+
+  stream.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri={{ .Values.catalogs.iceberg.restCatalogUri }}
+    fs.native-s3.enabled=true
+    s3.endpoint={{ .Values.catalogs.iceberg.s3Endpoint }}
+    s3.aws-access-key={{ .Values.catalogs.iceberg.s3AccessKey }}
+    s3.aws-secret-key={{ .Values.catalogs.iceberg.s3SecretKey }}
+    s3.path-style-access={{ .Values.catalogs.iceberg.s3PathStyleAccess }}
+
+  kafka.properties: |
+    connector.name=kafka
+    kafka.nodes={{ .Values.catalogs.kafka.nodes }}
+    kafka.table-names={{ .Values.catalogs.kafka.tableNames }}
+    kafka.hide-internal-columns=false
+{{- end }}

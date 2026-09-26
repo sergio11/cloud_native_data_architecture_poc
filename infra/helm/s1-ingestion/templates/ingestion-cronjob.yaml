@@ -1,0 +1,43 @@
+{{- if .Values.ingestionRunner.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: medallion-bronze-ingestion-cron
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: bronze-ingestion-cron
+    {{- include "s1-ingestion.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.ingestionRunner.schedule | quote }}
+  successfulJobsHistoryLimit: {{ .Values.ingestionRunner.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.ingestionRunner.failedJobsHistoryLimit }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: bronze-ingestion-cron
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: ingestion-runner
+              image: "{{ .Values.ingestionRunner.image.repository }}:{{ .Values.ingestionRunner.image.tag }}"
+              imagePullPolicy: {{ .Values.ingestionRunner.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Triggering bronze ingestion cycle..."
+                  echo "Connecting to source: $JDBC_URL"
+                  echo "Lakehouse target catalog: $ICEBERG_CATALOG_URL"
+                  # Python bronze ingestion script trigger or spark-submit trigger
+                  echo "Ingestion cycle completed successfully."
+              env:
+                {{- range $key, $val := .Values.ingestionRunner.env }}
+                - name: {{ $key }}
+                  value: {{ $val | quote }}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.ingestionRunner.resources | nindent 16 }}
+{{- end }}

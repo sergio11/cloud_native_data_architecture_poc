@@ -1,0 +1,15 @@
+apiVersion: v2
+name: s6-mesh
+description: Subsystem S6 - Data Mesh Layer (Data Product CRDs, Domain Resource Quotas & Kyverno Governance Engine)
+type: application
+version: 1.0.0
+appVersion: "1.11.4"
+keywords:
+  - datamesh
+  - crd
+  - kyverno
+  - governance
+  - contracts
+maintainers:
+  - name: Data Engineering Platform Team
+    email: data-platform@poc.local

@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-platform-defaults
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: spark-batch
+    {{- include "s3-batch.labels" . | nindent 4 }}
+data:
+  spark-defaults.conf: |
+    # Spark Iceberg Runtime
+    spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}=org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.type=rest
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.uri={{ .Values.sparkDefaults.iceberg.catalogUrl }}
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.warehouse={{ .Values.sparkDefaults.iceberg.warehouse }}
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.endpoint={{ .Values.sparkDefaults.iceberg.s3Endpoint }}
+    spark.sql.defaultCatalog={{ .Values.sparkDefaults.iceberg.catalogName }}
+
+    # S3A MinIO Storage Connector
+    spark.hadoop.fs.s3a.endpoint={{ .Values.sparkDefaults.iceberg.s3Endpoint }}
+    spark.hadoop.fs.s3a.access.key={{ .Values.sparkDefaults.iceberg.accessKey }}
+    spark.hadoop.fs.s3a.secret.key={{ .Values.sparkDefaults.iceberg.secretKey }}
+    spark.hadoop.fs.s3a.path.style.access=true
+    spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+    spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+
+    # OpenLineage Tracing & Lineage
+    spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener
+    spark.openlineage.transport.type=http
+    spark.openlineage.transport.url={{ .Values.sparkDefaults.openLineage.url }}
+    spark.openlineage.transport.endpoint=/api/v1/lineage
+    spark.openlineage.namespace={{ .Values.sparkDefaults.openLineage.namespace }}
+
+    # Memory and Parallelism Optimizations
+    spark.sql.adaptive.enabled=true
+    spark.sql.adaptive.coalescePartitions.enabled=true
+    spark.sql.shuffle.partitions=10
+    spark.default.parallelism=10

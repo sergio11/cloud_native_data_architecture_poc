@@ -1,0 +1,258 @@
+# ==============================================================================
+# Helm Values for Marquez API & Marquez Web UI on Kubernetes
+# ==============================================================================
+# Deploys Marquez metadata server, web UI, and dedicated PostgreSQL database
+# within the 'lineage' Kubernetes namespace for OpenLineage event ingestion.
+# ==============================================================================
+
+global:
+  nameOverride: "marquez"
+  fullnameOverride: "marquez"
+  namespace: "lineage"
+  imagePullSecrets: []
+
+# ------------------------------------------------------------------------------
+# Marquez Core API Service
+# ------------------------------------------------------------------------------
+api:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: marquezproject/marquez
+    tag: 0.49.0
+    pullPolicy: IfNotPresent
+
+  serviceAccount:
+    create: true
+    name: "marquez-api-sa"
+    annotations: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    fsGroup: 10001
+
+  securityContext:
+    readOnlyRootFilesystem: false
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  service:
+    type: ClusterIP
+    port: 5000
+    targetPort: 5000
+    adminPort: 5001
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/path: "/metrics"
+      prometheus.io/port: "5001"
+
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      kubernetes.io/ingress.class: "nginx"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    hosts:
+      - host: marquez-api.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1024Mi
+    limits:
+      cpu: 2000m
+      memory: 2048Mi
+
+  livenessProbe:
+    httpGet:
+      path: /ping
+      port: 5001
+    initialDelaySeconds: 40
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 5
+
+  readinessProbe:
+    httpGet:
+      path: /ping
+      port: 5001
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  jvmOptions:
+    - "-Xms512m"
+    - "-Xmx1536m"
+    - "-XX:+UseG1GC"
+    - "-XX:MaxGCPauseMillis=100"
+
+  env:
+    - name: MARQUEZ_PORT
+      value: "5000"
+    - name: MARQUEZ_ADMIN_PORT
+      value: "5001"
+    - name: POSTGRES_HOST
+      value: "marquez-postgresql"
+    - name: POSTGRES_PORT
+      value: "5432"
+    - name: POSTGRES_DB
+      value: "marquez"
+    - name: POSTGRES_USER
+      value: "marquez"
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: marquez-postgresql-auth
+          key: postgres-password
+    - name: FLYWAY_BASELINE_ON_MIGRATE
+      value: "true"
+    - name: MARQUEZ_LOG_LEVEL
+      value: "INFO"
+
+# ------------------------------------------------------------------------------
+# Marquez Web UI Service
+# ------------------------------------------------------------------------------
+web:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: marquezproject/marquez-web
+    tag: 0.49.0
+    pullPolicy: IfNotPresent
+
+  serviceAccount:
+    create: true
+    name: "marquez-web-sa"
+    annotations: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    fsGroup: 10001
+
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      kubernetes.io/ingress.class: "nginx"
+    hosts:
+      - host: marquez.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 3000
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    timeoutSeconds: 5
+
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 3000
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+
+  env:
+    - name: MARQUEZ_HOST
+      value: "marquez-api"
+    - name: MARQUEZ_PORT
+      value: "5000"
+
+# ------------------------------------------------------------------------------
+# PostgreSQL Sub-Chart Configuration
+# ------------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    tag: 16.2.0-debian-12-r12
+
+  auth:
+    database: "marquez"
+    username: "marquez"
+    existingSecret: "marquez-postgresql-auth"
+    secretKeys:
+      adminPasswordKey: "postgres-password"
+      userPasswordKey: "postgres-password"
+
+  primary:
+    persistence:
+      enabled: true
+      storageClass: "standard"
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2048Mi
+    podSecurityContext:
+      enabled: true
+      fsGroup: 1001
+    containerSecurityContext:
+      enabled: true
+      runAsUser: 1001
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: "monitoring"
+      interval: 30s
+
+# ------------------------------------------------------------------------------
+# Cluster Scheduling & Resilience
+# ------------------------------------------------------------------------------
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["marquez"]
+          topologyKey: kubernetes.io/hostname
+
+tolerations: []
+nodeSelector: {}

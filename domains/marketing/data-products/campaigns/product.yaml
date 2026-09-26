@@ -1,0 +1,48 @@
+apiVersion: dataplatform.io/v1alpha1
+kind: DataProduct
+metadata:
+  name: campaigns
+  domain: marketing
+  owner: marketing-analytics@company.internal
+  version: "1.0.0"
+  created_at: "2024-01-10"
+  updated_at: "2024-09-26"
+spec:
+  description: "Multi-channel marketing campaign definitions, budget allocations, scheduling, and conversion performance."
+  classification: internal
+  sla:
+    freshness: "4h"
+    availability: "99%"
+    latency_p99: "4s"
+  assets:
+    - name: gold_campaigns
+      type: iceberg_table
+      path: "s3a://gold/marketing/campaigns/"
+      format: parquet
+      partitioned_by: ["channel"]
+      description: "Aggregated campaign performance and ROI metrics"
+      access_tier: internal
+    - name: silver_campaigns
+      type: iceberg_table
+      path: "s3a://silver/marketing/campaigns/"
+      format: parquet
+      description: "Cleaned campaign records validated against business rules"
+      access_tier: internal
+  quality:
+    completeness: 0.99
+    uniqueness: 1.00
+    timeliness: 0.98
+    validity: 0.99
+  contract: "./contract.yaml"
+  schema: "./schema.json"
+  consumers:
+    - name: sales-team
+      contact: sales-leaders@company.internal
+      use_case: "Lead source attribution"
+    - name: finance-team
+      contact: finance-analytics@company.internal
+      use_case: "Marketing budget utilization"
+  tags:
+    - marketing
+    - campaigns
+    - acquisition

@@ -1,0 +1,145 @@
+# ==============================================================================
+# Modern Data Architecture POC - Startup Profile: Platform
+# File: infra/profiles/platform.yaml
+# Description: Minimal foundational platform profile providing object storage
+#              (MinIO), metadata catalog (Polaris), OLTP database (PostgreSQL),
+#              event broker (Kafka), and data lineage (Marquez).
+# Target RAM Footprint: ~3.0 GB RAM
+# ==============================================================================
+profile:
+  name: "platform"
+  description: "Base platform storage, catalog, messaging, and lineage services"
+  targetRamMb: 3072
+  targetCpuCores: 2.0
+
+subsystems:
+  # S1: OLTP Demo Ingestion Source
+  s1-ingestion:
+    enabled: true
+    replicas: 1
+    resources:
+      postgresql:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      ingestionRunner:
+        enabled: false
+
+  # S2: Lakehouse Object Storage and Catalog
+  s2-lakehouse:
+    enabled: true
+    replicas: 1
+    resources:
+      minio:
+        requests:
+          cpu: "150m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      polaris:
+        requests:
+          cpu: "150m"
+          memory: "384Mi"
+        limits:
+          cpu: "600m"
+          memory: "512Mi"
+
+  # S3: Batch Processing Engine (Spark)
+  s3-batch:
+    enabled: false
+    replicas: 0
+    resources:
+      sparkOperator:
+        requests:
+          cpu: "0m"
+          memory: "0Mi"
+        limits:
+          cpu: "0m"
+          memory: "0Mi"
+
+  # S4: Stream Processing Engine (Kafka + Flink)
+  s4-stream:
+    enabled: true
+    replicas: 1
+    resources:
+      kafka:
+        requests:
+          cpu: "200m"
+          memory: "512Mi"
+        limits:
+          cpu: "800m"
+          memory: "768Mi"
+      kafkaUi:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+      flinkOperator:
+        enabled: false
+        replicas: 0
+
+  # S5: Serving Layer (Trino Distributed SQL)
+  s5-serving:
+    enabled: false
+    replicas: 0
+    resources:
+      trino:
+        requests:
+          cpu: "0m"
+          memory: "0Mi"
+        limits:
+          cpu: "0m"
+          memory: "0Mi"
+
+  # S6: Data Mesh Governance and Contracts
+  s6-mesh:
+    enabled: true
+    replicas: 1
+    resources:
+      kyverno:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+
+  # S7: Data Fabric & Lineage
+  s7-fabric:
+    enabled: true
+    replicas: 1
+    resources:
+      marquez:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      marquezDb:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+
+  # S8: Operations, Orchestration & Observability
+  s8-ops:
+    enabled: false
+    replicas: 0
+    resources:
+      dagster:
+        enabled: false
+      prometheus:
+        enabled: false
+      grafana:
+        enabled: false
+      metabase:
+        enabled: false

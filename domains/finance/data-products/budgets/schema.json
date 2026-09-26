@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/finance/budgets.json",
+  "title": "BudgetsDataProductSchema",
+  "description": "Schema definition for departmental budgets and expenditure variance",
+  "type": "object",
+  "required": [
+    "budget_id",
+    "fiscal_year",
+    "cost_center",
+    "department",
+    "allocated_amount",
+    "actual_spent",
+    "variance_amount",
+    "updated_at"
+  ],
+  "properties": {
+    "budget_id": { "type": "string" },
+    "fiscal_year": { "type": "integer" },
+    "cost_center": { "type": "string" },
+    "department": { "type": "string" },
+    "allocated_amount": { "type": "number", "minimum": 0.0 },
+    "actual_spent": { "type": "number", "minimum": 0.0 },
+    "variance_amount": { "type": "number" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

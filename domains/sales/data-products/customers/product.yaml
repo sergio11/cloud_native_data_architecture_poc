@@ -1,0 +1,62 @@
+apiVersion: dataplatform.io/v1alpha1
+kind: DataProduct
+metadata:
+  name: customers
+  domain: sales
+  owner: sales-data-team@company.internal
+  version: "1.1.0"
+  created_at: "2024-01-15"
+  updated_at: "2024-09-26"
+spec:
+  description: "Customer master dimension containing profile data, lifecycle status, tier segment, and GDPR-compliant pseudonymized identifiers."
+  classification: pii
+  sla:
+    freshness: "6h"
+    availability: "99.5%"
+    latency_p99: "2s"
+  assets:
+    - name: gold_customers
+      type: iceberg_table
+      path: "s3a://gold/sales/customers/"
+      format: parquet
+      description: "Pseudonymized customer master dimension (PII email hashed, names masked)"
+      access_tier: internal
+    - name: silver_customers
+      type: iceberg_table
+      path: "s3a://silver/sales/customers/"
+      format: parquet
+      description: "Cleaned and validated customer records"
+      access_tier: restricted
+    - name: bronze_customers
+      type: iceberg_table
+      path: "s3a://bronze/sales/customers/"
+      format: parquet
+      description: "Raw customer table extracted from OLTP"
+      access_tier: restricted
+  quality:
+    completeness: 0.99
+    uniqueness: 1.00
+    timeliness: 0.98
+    validity: 0.99
+    suite: "quality/expectations/silver_customers_suite.json"
+  contract: "./contract.yaml"
+  schema: "./schema.json"
+  lineage:
+    source: "postgresql.public.customers"
+    transformations:
+      - step: "bronze_ingestion"
+        script: "pipelines/medallion/bronze_ingestion.py"
+        schedule: "0 * * * *"
+        description: "Raw snapshot of customers table into Bronze"
+      - step: "silver_cleaning"
+        script: "pipelines/medallion/silver_transform.py"
+        schedule: "15 * * * *"
+        description: "Email format validation, deduplication, and conformance checks"
+      - step: "gold_aggregation"
+        script: "pipelines/medallion/gold_aggregation.py"
+        schedule: "30 * * * *"
+        description: "Cryptographic SHA-256 hashing of email and masking of full name for GDPR compliance"
+  tags:
+    - customers
+    - pii
+    - master-data

@@ -1,0 +1,45 @@
+apiVersion: dataplatform.io/v1alpha1
+kind: DataProduct
+metadata:
+  name: financial_closings
+  domain: finance
+  owner: finance-team@company.internal
+  version: "1.0.0"
+  created_at: "2024-01-20"
+  updated_at: "2024-09-26"
+spec:
+  description: "Audited financial period closing ledgers, revenue reconciliation, and statutory accounting reports."
+  classification: confidential
+  sla:
+    freshness: "24h"
+    availability: "99.9%"
+    latency_p99: "2s"
+  assets:
+    - name: gold_financial_closings
+      type: iceberg_table
+      path: "s3a://gold/finance/financial_closings/"
+      format: parquet
+      partitioned_by: ["fiscal_year", "fiscal_period"]
+      description: "Audited balance sheet reconciliation closures"
+      access_tier: restricted
+    - name: silver_financial_closings
+      type: iceberg_table
+      path: "s3a://silver/finance/financial_closings/"
+      format: parquet
+      description: "Aggregated transactional ledger entries"
+      access_tier: restricted
+  quality:
+    completeness: 1.00
+    uniqueness: 1.00
+    timeliness: 0.99
+    validity: 1.00
+  contract: "./contract.yaml"
+  schema: "./schema.json"
+  consumers:
+    - name: executive-reporting
+      contact: cfo-office@company.internal
+      use_case: "Quarterly Board and SEC regulatory reporting"
+  tags:
+    - finance
+    - compliance
+    - sox

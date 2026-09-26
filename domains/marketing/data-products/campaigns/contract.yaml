@@ -1,0 +1,50 @@
+apiVersion: datacontract.com/v1alpha1
+kind: DataContract
+metadata:
+  name: campaigns-contract
+  version: "1.0.0"
+  status: active
+  domain: marketing
+  data_product: campaigns
+  owner: marketing-analytics@company.internal
+spec:
+  description: "Marketing campaign dataset contract defining channels, budgets, and scheduling."
+  compatibility_mode: BACKWARD
+  sla:
+    freshness: "4h"
+    availability: "99%"
+    response_time_ms: 3000
+  schema:
+    format: iceberg
+    primary_key: ["id"]
+    fields:
+      - name: id
+        type: integer
+        required: true
+        description: "Unique campaign identifier"
+      - name: channel
+        type: string
+        required: true
+        description: "Distribution channel: email, sms, display, social, search"
+      - name: budget
+        type: decimal(12,2)
+        required: true
+        description: "Allocated budget in EUR"
+      - name: start_date
+        type: date
+        required: true
+        description: "Campaign launch date"
+      - name: end_date
+        type: date
+        required: true
+        description: "Campaign termination date (must be >= start_date)"
+  quality:
+    thresholds:
+      completeness: 0.99
+      uniqueness: 1.00
+      validity: 0.99
+    assertions:
+      - rule: "budget > 0"
+        description: "Campaign budget must be positive"
+      - rule: "end_date >= start_date"
+        description: "Campaign end date must not precede start date"

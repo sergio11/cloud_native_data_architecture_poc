@@ -1,0 +1,68 @@
+apiVersion: governance.datamesh.io/v1
+kind: FederatedGovernanceStandard
+metadata:
+  name: corporate-data-standards
+  version: "1.0.0"
+  approved_by: "Federated Computational Governance Board"
+spec:
+  principles:
+    - id: PR-01
+      name: "Domain Ownership Autonomy"
+      description: "Business domains retain full ownership of their data models, pipeline transformations, and publication cadence."
+    - id: PR-02
+      name: "Data as a Product"
+      description: "Analytical data must be exposed via well-documented, discoverable, and formally contracted endpoints."
+    - id: PR-03
+      name: "Self-Serve Platform"
+      description: "Infrastructure abstraction allows domains to deploy and monitor data products without central bottlenecks."
+    - id: PR-04
+      name: "Federated Computational Governance"
+      description: "Global standards are established collaboratively and enforced automatically through CI checks and cluster admission policies."
+
+  standards:
+    metadata:
+      required_fields:
+        - name
+        - domain
+        - owner
+        - version
+        - classification
+        - sla
+      owner_validation_regex: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+
+    classification:
+      levels:
+        - level: public
+          description: "Unrestricted visibility"
+        - level: internal
+          description: "Available across all company domains"
+        - level: confidential
+          description: "Access requires formal consumer registration"
+        - level: pii
+          description: "Personal Identifiable Information. Mandatory pseudonymization or masking in Silver and Gold tiers."
+
+    lakehouse_naming:
+      storage_pattern: "s3a://{layer}/{domain}/{product}/"
+      layers:
+        - bronze
+        - silver
+        - gold
+      catalog_namespace_pattern: "{layer}.{domain}.{table_name}"
+
+    contract_compatibility:
+      default_mode: "BACKWARD"
+      prohibited_actions:
+        - "Dropping existing fields"
+        - "Renaming existing fields without compatibility alias"
+        - "Changing field data type to incompatible type"
+        - "Adding required fields without default value"
+        - "Relaxing security classification without sign-off"
+      allowed_actions:
+        - "Adding optional nullable fields"
+        - "Adding new output assets"
+        - "Adding non-breaking assertions"
+
+    quality_thresholds:
+      minimum_completeness: 0.95
+      minimum_uniqueness: 0.98
+      minimum_validity: 0.95

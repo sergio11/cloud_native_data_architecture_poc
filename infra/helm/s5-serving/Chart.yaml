@@ -1,0 +1,15 @@
+apiVersion: v2
+name: s5-serving
+description: Subsystem S5 - Serving Layer (Trino Distributed SQL Query Coordinator with Iceberg and Kafka Catalogs)
+type: application
+version: 1.0.0
+appVersion: "444"
+keywords:
+  - trino
+  - serving
+  - sql
+  - iceberg
+  - analytics
+maintainers:
+  - name: Data Engineering Platform Team
+    email: data-platform@poc.local

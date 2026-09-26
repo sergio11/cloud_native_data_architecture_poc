@@ -1,0 +1,102 @@
+# ==============================================================================
+# Subsystem S2: Lakehouse Storage & Catalog - Values Configuration
+# File: infra/helm/s2-lakehouse/values.yaml
+# ==============================================================================
+
+global:
+  namespace: platform
+  storageClass: "standard"
+
+# MinIO S3 Object Storage
+minio:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: minio/minio
+    tag: "RELEASE.2024-05-10T01-41-38Z"
+    pullPolicy: IfNotPresent
+
+  auth:
+    rootUser: "minioadmin"
+    rootPassword: "minioadmin"
+
+  service:
+    type: NodePort
+    apiPort: 9000
+    apiNodePort: 9000
+    consolePort: 9001
+    consoleNodePort: 9001
+
+  persistence:
+    enabled: true
+    storageClass: "standard"
+    accessMode: ReadWriteOnce
+    size: 10Gi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+  nodeSelector:
+    node-role.kubernetes.io/storage: "true"
+
+  tolerations: []
+  affinity: {}
+
+# Automatic Lakehouse Buckets Provisioning
+bucketInit:
+  enabled: true
+  image:
+    repository: minio/mc
+    tag: "RELEASE.2024-05-09T17-04-24Z"
+    pullPolicy: IfNotPresent
+  buckets:
+    - datalake
+    - warehouse
+    - bronze
+    - silver
+    - gold
+    - stream
+    - contracts
+    - checkpoints
+
+# Apache Polaris REST Iceberg Catalog
+polaris:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: apache/polaris
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: NodePort
+    port: 8181
+    nodePort: 8181
+
+  config:
+    realm: "default-realm"
+    defaultCatalog: "polaris"
+    warehouseLocation: "s3://warehouse/"
+    s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
+    awsRegion: "us-east-1"
+    accessKey: "minioadmin"
+    secretKey: "minioadmin"
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 600m
+      memory: 512Mi
+
+  nodeSelector:
+    node-role.kubernetes.io/storage: "true"
+
+  tolerations: []
+  affinity: {}

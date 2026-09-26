@@ -1,0 +1,11 @@
+faker==24.3.0
+psycopg2-binary==2.9.9
+tqdm==4.66.2
+confluent-kafka==2.3.0
+click==8.1.7
+python-dotenv==1.0.1
+avro-python3==1.10.2
+requests==2.31.0
+rich==13.7.1
+pandas==2.2.1
+numpy==1.26.4

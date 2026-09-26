@@ -1,0 +1,83 @@
+{{- if .Values.sparkOperator.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-operator-service-account
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    {{- include "s3-batch.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spark-operator-cluster-role
+  labels:
+    {{- include "s3-batch.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["*"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["*"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["*"]
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkapplications", "scheduledsparkapplications"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spark-operator-cluster-role-binding
+  labels:
+    {{- include "s3-batch.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spark-operator-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: spark-operator-service-account
+    namespace: {{ .Values.global.namespace | default "platform" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-operator-spark
+  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  labels:
+    {{- include "s3-batch.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-operator-spark-role
+  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  labels:
+    {{- include "s3-batch.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-operator-spark-role-binding
+  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  labels:
+    {{- include "s3-batch.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: spark-operator-spark-role
+subjects:
+  - kind: ServiceAccount
+    name: spark-operator-spark
+    namespace: {{ .Values.global.computeNamespace | default "sales" }}
+{{- end }}

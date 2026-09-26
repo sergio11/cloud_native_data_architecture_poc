@@ -1,0 +1,51 @@
+name: Data Contract & Governance Validation
+
+on:
+  push:
+    paths:
+      - 'domains/**/contract.yaml'
+      - 'domains/**/product.yaml'
+      - 'domains/**/schema.json'
+      - 'governance/**'
+  pull_request:
+    paths:
+      - 'domains/**/contract.yaml'
+      - 'domains/**/product.yaml'
+      - 'domains/**/schema.json'
+      - 'governance/**'
+
+jobs:
+  validate-contracts:
+    name: Validate Contracts & Governance Policies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml jsonschema
+
+      - name: Run Global Contract and Manifest Validator
+        run: |
+          python governance/contract_validator.py --repo-root .
+
+      - name: Check Backward Compatibility on Modified Contracts
+        run: |
+          # Detect changed contracts and compare against git HEAD~1
+          MODIFIED_CONTRACTS=$(git diff --name-only origin/main...HEAD | grep 'contract.yaml' || true)
+          for contract in $MODIFIED_CONTRACTS; do
+            echo "Checking backward compatibility for $contract..."
+            git show origin/main:"$contract" > /tmp/prev_contract.yaml || true
+            if [ -s /tmp/prev_contract.yaml ]; then
+              python governance/contract_validator.py --file "$contract" --prev-file /tmp/prev_contract.yaml
+            fi
+          done

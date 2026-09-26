@@ -1,0 +1,59 @@
+{{- if .Values.jobs.bronzeIngestion.enabled }}
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: ScheduledSparkApplication
+metadata:
+  name: spark-bronze-ingestion
+  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  labels:
+    app: spark-bronze-ingestion
+    medallion: bronze
+    {{- include "s3-batch.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.jobs.bronzeIngestion.schedule | quote }}
+  concurrencyPolicy: Forbid
+  template:
+    type: Python
+    pythonVersion: "3"
+    mode: cluster
+    image: "{{ .Values.sparkDefaults.image.repository }}:{{ .Values.sparkDefaults.image.tag }}"
+    imagePullPolicy: {{ .Values.sparkDefaults.image.pullPolicy }}
+    mainApplicationFile: "local:///opt/spark/work-dir/pipelines/medallion/bronze_ingestion.py"
+    sparkVersion: "3.5.1"
+    restartPolicy:
+      type: OnFailure
+      onFailureRetries: 2
+      onFailureRetryInterval: 10
+      onSubmissionFailureRetries: 3
+    driver:
+      cores: {{ .Values.sparkDefaults.driver.cores }}
+      coreLimit: {{ .Values.sparkDefaults.driver.coreLimit | quote }}
+      memory: {{ .Values.sparkDefaults.driver.memory | quote }}
+      labels:
+        version: "3.5.1"
+        role: driver
+      serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
+      env:
+        - name: JDBC_URL
+          value: {{ .Values.sparkDefaults.database.jdbcUrl | quote }}
+        - name: JDBC_USER
+          value: {{ .Values.sparkDefaults.database.jdbcUser | quote }}
+        - name: JDBC_PASSWORD
+          value: {{ .Values.sparkDefaults.database.jdbcPassword | quote }}
+        - name: ICEBERG_CATALOG_URL
+          value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
+        - name: MINIO_ENDPOINT
+          value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
+        - name: MINIO_ACCESS_KEY
+          value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
+        - name: MINIO_SECRET_KEY
+          value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
+        - name: OPENLINEAGE_URL
+          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
+    executor:
+      cores: {{ .Values.sparkDefaults.executor.cores }}
+      instances: {{ .Values.sparkDefaults.executor.instances }}
+      memory: {{ .Values.sparkDefaults.executor.memory | quote }}
+      labels:
+        version: "3.5.1"
+        role: executor
+{{- end }}

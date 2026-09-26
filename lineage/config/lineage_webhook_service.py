@@ -1,0 +1,1041 @@
+"""
+lineage_webhook_service.py - Active Metadata & OpenLineage Webhook Microservice.
+
+FastAPI microservice that:
+1. Ingests OpenLineage RunEvents at /api/v1/lineage
+2. Evaluates active metadata rules from alert-rules.yaml (RF-20):
+   - Rule 1: Schema change alert on Silver/Gold tables
+   - Rule 2: Quality threshold breach alert
+   - Rule 3: Pipeline failure alert
+   - Rule 4: SLA freshness breach alert
+3. Persists events, datasets, schema history, and alerts in SQLite (with WAL mode).
+4. Exposes REST endpoints for querying active alerts, dataset lineage graphs, and health metrics.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import sqlite3
+import sys
+import threading
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+# Try importing YAML, fallback to embedded parser if missing
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("lineage_webhook_service")
+
+# -----------------------------------------------------------------------------
+# Configuration & Paths
+# -----------------------------------------------------------------------------
+DATABASE_PATH = os.getenv("LINEAGE_DB_PATH", "lineage_events.db")
+ALERT_RULES_PATH = os.getenv(
+    "ALERT_RULES_PATH",
+    str(Path(__file__).parent / "alert-rules.yaml"),
+)
+
+# -----------------------------------------------------------------------------
+# Pydantic Schemas for OpenLineage Spec (Simplified & Extensible)
+# -----------------------------------------------------------------------------
+class Job(BaseModel):
+    namespace: str = "default"
+    name: str
+    facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class Run(BaseModel):
+    runId: str
+    facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class DatasetFacet(BaseModel):
+    schema_: Optional[Dict[str, Any]] = Field(default=None, alias="schema")
+    datasource: Optional[Dict[str, Any]] = None
+    dataQualityAssertions: Optional[Dict[str, Any]] = None
+    version: Optional[Dict[str, Any]] = None
+    extra_facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
+
+
+class Dataset(BaseModel):
+    namespace: str
+    name: str
+    facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class OpenLineageEvent(BaseModel):
+    eventType: str = "COMPLETE"  # START, RUNNING, COMPLETE, FAIL, ABORT, OTHER
+    eventTime: str
+    run: Run
+    job: Job
+    inputs: Optional[List[Dataset]] = Field(default_factory=list)
+    outputs: Optional[List[Dataset]] = Field(default_factory=list)
+    producer: Optional[str] = "openlineage-client"
+    schemaURL: Optional[str] = None
+
+    class Config:
+        extra = "allow"
+
+
+class AlertItem(BaseModel):
+    alert_id: str
+    rule_id: str
+    rule_name: str
+    severity: str
+    dataset_name: Optional[str] = None
+    job_name: Optional[str] = None
+    summary: str
+    description: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    status: str = "ACTIVE"
+
+
+class IngestionResponse(BaseModel):
+    status: str
+    event_id: str
+    job_name: str
+    event_type: str
+    alerts_triggered: int
+    alerts: List[Dict[str, Any]]
+
+
+# -----------------------------------------------------------------------------
+# Database Manager (SQLite with WAL mode)
+# -----------------------------------------------------------------------------
+class StorageManager:
+    """Manages thread-safe SQLite persistence for OpenLineage events, datasets,
+    schema history, and generated alerts."""
+
+    def __init__(self, db_path: str = DATABASE_PATH):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        event_time TEXT NOT NULL,
+                        job_namespace TEXT NOT NULL,
+                        job_name TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        inputs_json TEXT,
+                        outputs_json TEXT,
+                        raw_payload TEXT NOT NULL,
+                        received_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
+                    CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_name);
+                    CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time);
+
+                    CREATE TABLE IF NOT EXISTS datasets (
+                        dataset_key TEXT PRIMARY KEY,
+                        namespace TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        current_schema_json TEXT,
+                        schema_hash TEXT,
+                        last_updated_at TEXT NOT NULL,
+                        last_job_name TEXT,
+                        last_run_id TEXT,
+                        total_events INTEGER DEFAULT 1
+                    );
+
+                    CREATE TABLE IF NOT EXISTS schema_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dataset_key TEXT NOT NULL,
+                        schema_hash TEXT NOT NULL,
+                        schema_json TEXT NOT NULL,
+                        captured_at TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        FOREIGN KEY (dataset_key) REFERENCES datasets(dataset_key)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS alerts (
+                        alert_id TEXT PRIMARY KEY,
+                        rule_id TEXT NOT NULL,
+                        rule_name TEXT NOT NULL,
+                        severity TEXT NOT NULL,
+                        dataset_name TEXT,
+                        job_name TEXT,
+                        summary TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        details_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'ACTIVE'
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_id);
+                    CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);
+                    CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
+                    CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
+                    """
+                )
+
+    def insert_event(self, event: OpenLineageEvent, raw_json: str) -> None:
+        received_at = datetime.now(timezone.utc).isoformat()
+        inputs_json = json.dumps([d.model_dump() for d in (event.inputs or [])])
+        outputs_json = json.dumps([d.model_dump() for d in (event.outputs or [])])
+
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO events (
+                        event_id, event_type, event_time, job_namespace, job_name,
+                        run_id, inputs_json, outputs_json, raw_payload, received_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.run.runId,
+                        event.eventType,
+                        event.eventTime,
+                        event.job.namespace,
+                        event.job.name,
+                        event.run.runId,
+                        inputs_json,
+                        outputs_json,
+                        raw_json,
+                        received_at,
+                    ),
+                )
+
+    def get_dataset(self, dataset_key: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM datasets WHERE dataset_key = ?",
+                (dataset_key,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def upsert_dataset_schema(
+        self,
+        namespace: str,
+        name: str,
+        schema_dict: Optional[Dict[str, Any]],
+        run_id: str,
+        job_name: str,
+        event_time: str,
+    ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+        """Upsert dataset and detect schema changes.
+
+        Returns (is_new_or_changed, previous_schema, new_schema).
+        """
+        dataset_key = f"{namespace}.{name}"
+        schema_json = json.dumps(schema_dict, sort_keys=True) if schema_dict else "{}"
+        schema_hash = hashlib.sha256(schema_json.encode("utf-8")).hexdigest()
+
+        with self._lock:
+            with self._get_connection() as conn:
+                existing = conn.execute(
+                    "SELECT current_schema_json, schema_hash FROM datasets WHERE dataset_key = ?",
+                    (dataset_key,),
+                ).fetchone()
+
+                if not existing:
+                    # New dataset record
+                    conn.execute(
+                        """
+                        INSERT INTO datasets (
+                            dataset_key, namespace, name, current_schema_json, schema_hash,
+                            last_updated_at, last_job_name, last_run_id, total_events
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            dataset_key,
+                            namespace,
+                            name,
+                            schema_json,
+                            schema_hash,
+                            event_time,
+                            job_name,
+                            run_id,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO schema_history (dataset_key, schema_hash, schema_json, captured_at, run_id)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (dataset_key, schema_hash, schema_json, event_time, run_id),
+                    )
+                    return True, None, schema_dict
+
+                old_hash = existing["schema_hash"]
+                old_schema_json = existing["current_schema_json"]
+
+                if old_hash != schema_hash and schema_dict:
+                    # Schema changed!
+                    old_schema = json.loads(old_schema_json) if old_schema_json else None
+                    conn.execute(
+                        """
+                        UPDATE datasets SET
+                            current_schema_json = ?,
+                            schema_hash = ?,
+                            last_updated_at = ?,
+                            last_job_name = ?,
+                            last_run_id = ?,
+                            total_events = total_events + 1
+                        WHERE dataset_key = ?
+                        """,
+                        (
+                            schema_json,
+                            schema_hash,
+                            event_time,
+                            job_name,
+                            run_id,
+                            dataset_key,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO schema_history (dataset_key, schema_hash, schema_json, captured_at, run_id)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (dataset_key, schema_hash, schema_json, event_time, run_id),
+                    )
+                    return True, old_schema, schema_dict
+                else:
+                    # Update metadata only
+                    conn.execute(
+                        """
+                        UPDATE datasets SET
+                            last_updated_at = ?,
+                            last_job_name = ?,
+                            last_run_id = ?,
+                            total_events = total_events + 1
+                        WHERE dataset_key = ?
+                        """,
+                        (event_time, job_name, run_id, dataset_key),
+                    )
+                    return False, None, schema_dict
+
+    def insert_alert(self, alert: AlertItem) -> None:
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO alerts (
+                        alert_id, rule_id, rule_name, severity, dataset_name,
+                        job_name, summary, description, details_json, created_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        alert.alert_id,
+                        alert.rule_id,
+                        alert.rule_name,
+                        alert.severity,
+                        alert.dataset_name,
+                        alert.job_name,
+                        alert.summary,
+                        alert.description,
+                        json.dumps(alert.details),
+                        alert.created_at,
+                        alert.status,
+                    ),
+                )
+
+    def is_recent_alert_duplicate(
+        self, rule_id: str, identifier: str, window_seconds: int = 300
+    ) -> bool:
+        """Check if an identical alert was fired recently to avoid spam."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT created_at FROM alerts
+                WHERE rule_id = ? AND (dataset_name = ? OR job_name = ?)
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (rule_id, identifier, identifier),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            try:
+                alert_time = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+                diff = (datetime.now(timezone.utc) - alert_time).total_seconds()
+                return diff < window_seconds
+            except Exception:
+                return False
+
+    def query_alerts(
+        self,
+        severity: Optional[str] = None,
+        rule_id: Optional[str] = None,
+        status: Optional[str] = None,
+        dataset: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM alerts WHERE 1=1"
+        params: List[Any] = []
+
+        if severity:
+            query += " AND severity = ?"
+            params.append(severity.upper())
+        if rule_id:
+            query += " AND rule_id = ?"
+            params.append(rule_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status.upper())
+        if dataset:
+            query += " AND dataset_name LIKE ?"
+            params.append(f"%{dataset}%")
+
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            result = []
+            for r in rows:
+                item = dict(r)
+                item["details"] = json.loads(item["details_json"])
+                del item["details_json"]
+                result.append(item)
+            return result
+
+    def get_alert_by_id(self, alert_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,)).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            res["details"] = json.loads(res["details_json"])
+            del res["details_json"]
+            return res
+
+    def set_alert_status(self, alert_id: str, new_status: str) -> bool:
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    "UPDATE alerts SET status = ? WHERE alert_id = ?",
+                    (new_status.upper(), alert_id),
+                )
+                return cur.rowcount > 0
+
+    def get_dataset_lineage(self, dataset_name: str) -> Dict[str, Any]:
+        """Fetch lineage connections: all jobs consuming or producing this dataset."""
+        with self._get_connection() as conn:
+            # Producers (where dataset in outputs)
+            producers = conn.execute(
+                """
+                SELECT DISTINCT job_namespace, job_name, event_type, event_time, run_id
+                FROM events
+                WHERE outputs_json LIKE ?
+                ORDER BY event_time DESC LIMIT 20
+                """,
+                (f"%{dataset_name}%",),
+            ).fetchall()
+
+            # Consumers (where dataset in inputs)
+            consumers = conn.execute(
+                """
+                SELECT DISTINCT job_namespace, job_name, event_type, event_time, run_id
+                FROM events
+                WHERE inputs_json LIKE ?
+                ORDER BY event_time DESC LIMIT 20
+                """,
+                (f"%{dataset_name}%",),
+            ).fetchall()
+
+            # Schema history
+            schemas = conn.execute(
+                """
+                SELECT schema_hash, schema_json, captured_at, run_id
+                FROM schema_history
+                WHERE dataset_key LIKE ?
+                ORDER BY captured_at DESC LIMIT 10
+                """,
+                (f"%{dataset_name}%",),
+            ).fetchall()
+
+            return {
+                "dataset": dataset_name,
+                "producers": [dict(p) for p in producers],
+                "consumers": [dict(c) for c in consumers],
+                "schema_versions": [
+                    {
+                        "hash": s["schema_hash"],
+                        "captured_at": s["captured_at"],
+                        "run_id": s["run_id"],
+                        "schema": json.loads(s["schema_json"]),
+                    }
+                    for s in schemas
+                ],
+            }
+
+    def list_datasets(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT dataset_key, namespace, name, schema_hash, last_updated_at, last_job_name, total_events FROM datasets ORDER BY last_updated_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_stats(self) -> Dict[str, Any]:
+        with self._get_connection() as conn:
+            total_events = conn.execute("SELECT COUNT(*) as c FROM events").fetchone()["c"]
+            total_datasets = conn.execute("SELECT COUNT(*) as c FROM datasets").fetchone()["c"]
+            total_alerts = conn.execute("SELECT COUNT(*) as c FROM alerts").fetchone()["c"]
+            active_alerts = conn.execute(
+                "SELECT COUNT(*) as c FROM alerts WHERE status = 'ACTIVE'"
+            ).fetchone()["c"]
+            critical_alerts = conn.execute(
+                "SELECT COUNT(*) as c FROM alerts WHERE severity = 'CRITICAL' AND status = 'ACTIVE'"
+            ).fetchone()["c"]
+            return {
+                "total_events": total_events,
+                "total_datasets": total_datasets,
+                "total_alerts": total_alerts,
+                "active_alerts": active_alerts,
+                "critical_alerts": critical_alerts,
+            }
+
+
+# -----------------------------------------------------------------------------
+# Active Metadata Rule Evaluator (RF-20)
+# -----------------------------------------------------------------------------
+class RuleEngine:
+    """Evaluates the four active metadata rules defined in alert-rules.yaml."""
+
+    def __init__(self, storage: StorageManager, rules_path: str = ALERT_RULES_PATH):
+        self.storage = storage
+        self.rules_path = rules_path
+        self.rules = self._load_rules()
+
+    def _load_rules(self) -> List[Dict[str, Any]]:
+        """Load rules from YAML file or return fallback default rules."""
+        if Path(self.rules_path).exists() and yaml is not None:
+            try:
+                with open(self.rules_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+                    rules = cfg.get("rules", [])
+                    logger.info("Successfully loaded %d active metadata rules from %s", len(rules), self.rules_path)
+                    return rules
+            except Exception as e:
+                logger.error("Failed to parse alert-rules.yaml: %s. Using default rules.", e)
+
+        logger.info("Initializing fallback default active metadata rules")
+        return [
+            {
+                "id": "RF20-RULE-001",
+                "name": "SchemaChangeAlert",
+                "enabled": True,
+                "dataset_pattern": "^(silver|gold)\\..*",
+            },
+            {
+                "id": "RF20-RULE-002",
+                "name": "QualityThresholdBreachAlert",
+                "enabled": True,
+                "min_pass_rate": 0.95,
+            },
+            {
+                "id": "RF20-RULE-003",
+                "name": "PipelineFailureAlert",
+                "enabled": True,
+                "terminal_states": ["FAIL", "ABORT"],
+            },
+            {
+                "id": "RF20-RULE-004",
+                "name": "SLAFreshnessBreachAlert",
+                "enabled": True,
+            },
+        ]
+
+    def evaluate(self, event: OpenLineageEvent) -> List[AlertItem]:
+        alerts: List[AlertItem] = []
+
+        # Evaluate Rule 1: Schema Change Alert on Silver/Gold tables
+        schema_alerts = self._check_schema_changes(event)
+        alerts.extend(schema_alerts)
+
+        # Evaluate Rule 2: Quality threshold breach alert
+        quality_alerts = self._check_quality_breaches(event)
+        alerts.extend(quality_alerts)
+
+        # Evaluate Rule 3: Pipeline failure alert
+        failure_alerts = self._check_pipeline_failures(event)
+        alerts.extend(failure_alerts)
+
+        # Evaluate Rule 4: SLA freshness breach alert
+        sla_alerts = self._check_sla_freshness(event)
+        alerts.extend(sla_alerts)
+
+        # Persist triggered alerts (respecting deduplication)
+        for alert in alerts:
+            target_key = alert.dataset_name or alert.job_name or "unknown"
+            if not self.storage.is_recent_alert_duplicate(alert.rule_id, target_key, 300):
+                self.storage.insert_alert(alert)
+                logger.warning(
+                    "TRIGGERED ALERT [%s - %s]: %s (target=%s)",
+                    alert.severity,
+                    alert.rule_name,
+                    alert.summary,
+                    target_key,
+                )
+
+        return alerts
+
+    def _check_schema_changes(self, event: OpenLineageEvent) -> List[AlertItem]:
+        """Rule 1: Detect schema modifications in Silver and Gold tables."""
+        alerts: List[AlertItem] = []
+        datasets_to_check = (event.outputs or []) + (event.inputs or [])
+
+        silver_gold_regex = re.compile(r"^(silver|gold)\..*", re.IGNORECASE)
+
+        for ds in datasets_to_check:
+            # Check pattern match
+            if not silver_gold_regex.search(ds.name) and not silver_gold_regex.search(f"{ds.namespace}.{ds.name}"):
+                continue
+
+            schema_facet = ds.facets.get("schema") if ds.facets else None
+            if not schema_facet:
+                continue
+
+            fields = schema_facet.get("fields", [])
+            is_changed, old_schema, new_schema = self.storage.upsert_dataset_schema(
+                namespace=ds.namespace,
+                name=ds.name,
+                schema_dict=schema_facet,
+                run_id=event.run.runId,
+                job_name=event.job.name,
+                event_time=event.eventTime,
+            )
+
+            if is_changed and old_schema:
+                # Compare fields
+                old_fields = {f.get("name"): f.get("type") for f in old_schema.get("fields", [])}
+                new_fields = {f.get("name"): f.get("type") for f in fields}
+
+                added = set(new_fields.keys()) - set(old_fields.keys())
+                removed = set(old_fields.keys()) - set(new_fields.keys())
+                altered = {
+                    col: {"old": old_fields[col], "new": new_fields[col]}
+                    for col in set(old_fields.keys()) & set(new_fields.keys())
+                    if old_fields[col] != new_fields[col]
+                }
+
+                diff_parts = []
+                severity = "WARNING"
+                if removed:
+                    severity = "CRITICAL"
+                    diff_parts.append(f"Removed columns: {list(removed)}")
+                if altered:
+                    severity = "CRITICAL"
+                    diff_parts.append(f"Type changed: {altered}")
+                if added:
+                    diff_parts.append(f"Added columns: {list(added)}")
+
+                summary = f"Schema drift detected on {ds.name}"
+                description = f"Dataset {ds.name} schema updated by job {event.job.name}. Details: " + "; ".join(diff_parts)
+
+                alerts.append(
+                    AlertItem(
+                        alert_id=str(uuid.uuid4()),
+                        rule_id="RF20-RULE-001",
+                        rule_name="SchemaChangeAlert",
+                        severity=severity,
+                        dataset_name=ds.name,
+                        job_name=event.job.name,
+                        summary=summary,
+                        description=description,
+                        details={
+                            "dataset": ds.name,
+                            "namespace": ds.namespace,
+                            "job": event.job.name,
+                            "runId": event.run.runId,
+                            "added_columns": list(added),
+                            "removed_columns": list(removed),
+                            "type_changes": altered,
+                            "total_fields": len(fields),
+                        },
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+
+        return alerts
+
+    def _check_quality_breaches(self, event: OpenLineageEvent) -> List[AlertItem]:
+        """Rule 2: Detect quality threshold breach in dataQuality / dataQualityAssertions facets."""
+        alerts: List[AlertItem] = []
+
+        # 1. Run-level dataQuality facet
+        run_facets = event.run.facets or {}
+        dq_facet = run_facets.get("dataQuality") or run_facets.get("dataQualityMetrics")
+
+        if dq_facet:
+            pass_rate = dq_facet.get("passRate") or dq_facet.get("pass_rate")
+            suite_name = dq_facet.get("suiteName", "unknown_suite")
+            failed_count = dq_facet.get("failedExpectations", 0)
+
+            if pass_rate is not None and pass_rate < 0.95:
+                severity = "CRITICAL" if pass_rate < 0.90 else "WARNING"
+                alerts.append(
+                    AlertItem(
+                        alert_id=str(uuid.uuid4()),
+                        rule_id="RF20-RULE-002",
+                        rule_name="QualityThresholdBreachAlert",
+                        severity=severity,
+                        job_name=event.job.name,
+                        summary=f"Quality pass rate breach: {pass_rate:.2%} (Suite: {suite_name})",
+                        description=(
+                            f"Validation suite {suite_name} scored {pass_rate:.2%}, below 95% threshold. "
+                            f"Failed expectations: {failed_count}."
+                        ),
+                        details=dq_facet,
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+
+        # 2. Dataset-level dataQualityAssertions facets
+        all_datasets = (event.inputs or []) + (event.outputs or [])
+        for ds in all_datasets:
+            if not ds.facets:
+                continue
+            assertions_facet = ds.facets.get("dataQualityAssertions")
+            if not assertions_facet:
+                continue
+
+            assertions = assertions_facet.get("assertions", [])
+            failed_assertions = [a for a in assertions if a.get("success") is False]
+
+            if failed_assertions:
+                critical_failed = [
+                    a for a in failed_assertions
+                    if a.get("meta", {}).get("severity", "").lower() in ["critical", "high", "fatal"]
+                ]
+                severity = "CRITICAL" if critical_failed else "WARNING"
+                alerts.append(
+                    AlertItem(
+                        alert_id=str(uuid.uuid4()),
+                        rule_id="RF20-RULE-002",
+                        rule_name="QualityThresholdBreachAlert",
+                        severity=severity,
+                        dataset_name=ds.name,
+                        job_name=event.job.name,
+                        summary=f"Data quality assertion failures on {ds.name} ({len(failed_assertions)} failed)",
+                        description=(
+                            f"Dataset {ds.name} had {len(failed_assertions)} failed quality checks. "
+                            f"Critical failures: {len(critical_failed)}."
+                        ),
+                        details={
+                            "dataset": ds.name,
+                            "total_assertions": len(assertions),
+                            "failed_count": len(failed_assertions),
+                            "failed_assertions": failed_assertions[:10],
+                        },
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+
+        return alerts
+
+    def _check_pipeline_failures(self, event: OpenLineageEvent) -> List[AlertItem]:
+        """Rule 3: Pipeline failure alert on FAIL or ABORT."""
+        alerts: List[AlertItem] = []
+
+        if event.eventType in ("FAIL", "ABORT"):
+            # Extract error details
+            error_facet = (event.run.facets or {}).get("errorMessage") or (event.run.facets or {}).get("spark_unknown_operator")
+            error_msg = "Pipeline execution failed or aborted"
+            if isinstance(error_facet, dict):
+                error_msg = error_facet.get("message", error_msg)
+
+            severity = "CRITICAL"
+            alerts.append(
+                AlertItem(
+                    alert_id=str(uuid.uuid4()),
+                    rule_id="RF20-RULE-003",
+                    rule_name="PipelineFailureAlert",
+                    severity=severity,
+                    job_name=event.job.name,
+                    summary=f"Pipeline job execution failed: {event.job.name}",
+                    description=f"Job {event.job.name} (runId: {event.run.runId}) failed with state {event.eventType}. {error_msg}",
+                    details={
+                        "job": event.job.name,
+                        "namespace": event.job.namespace,
+                        "runId": event.run.runId,
+                        "eventType": event.eventType,
+                        "eventTime": event.eventTime,
+                    },
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+
+        return alerts
+
+    def _check_sla_freshness(self, event: OpenLineageEvent) -> List[AlertItem]:
+        """Rule 4: SLA freshness breach alert."""
+        alerts: List[AlertItem] = []
+
+        if event.eventType not in ("COMPLETE", "CHECK"):
+            return alerts
+
+        try:
+            event_dt = datetime.fromisoformat(event.eventTime.replace("Z", "+00:00"))
+            now_dt = datetime.now(timezone.utc)
+            lag_seconds = (now_dt - event_dt).total_seconds()
+        except Exception:
+            lag_seconds = 0.0
+
+        # Check outputs SLA against SLA table
+        for ds in (event.outputs or []):
+            max_staleness = 3600  # Default 1h
+            is_stream = False
+
+            if ds.name.startswith("stream."):
+                max_staleness = 5  # 5 seconds for streaming
+                is_stream = True
+            elif ds.name.startswith("bronze.") or ds.name.startswith("silver."):
+                max_staleness = 3600
+            elif ds.name.startswith("gold."):
+                max_staleness = 86400
+
+            if lag_seconds > max_staleness:
+                severity = "CRITICAL" if is_stream or max_staleness <= 3600 else "WARNING"
+                alerts.append(
+                    AlertItem(
+                        alert_id=str(uuid.uuid4()),
+                        rule_id="RF20-RULE-004",
+                        rule_name="SLAFreshnessBreachAlert",
+                        severity=severity,
+                        dataset_name=ds.name,
+                        job_name=event.job.name,
+                        summary=f"SLA Freshness breach on {ds.name} (lag: {lag_seconds:.1f}s)",
+                        description=(
+                            f"Dataset {ds.name} produced with lag of {lag_seconds:.1f}s, "
+                            f"exceeding maximum SLA threshold of {max_staleness}s."
+                        ),
+                        details={
+                            "dataset": ds.name,
+                            "job": event.job.name,
+                            "lag_seconds": lag_seconds,
+                            "max_staleness_seconds": max_staleness,
+                            "eventTime": event.eventTime,
+                        },
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+
+        return alerts
+
+
+# -----------------------------------------------------------------------------
+# FastAPI App Definition & Dependency Injection
+# -----------------------------------------------------------------------------
+storage = StorageManager()
+rule_engine = RuleEngine(storage)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Lineage Webhook Service started. Connected to DB at %s", storage.db_path)
+    yield
+    logger.info("Lineage Webhook Service shutting down.")
+
+
+app = FastAPI(
+    title="OpenLineage Webhook & Active Metadata Service",
+    description="Microservice for OpenLineage event ingestion and real-time active metadata alerts (RF-20)",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -----------------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------------
+@app.post(
+    "/api/v1/lineage",
+    status_code=status.HTTP_201_CREATED,
+    response_model=IngestionResponse,
+    summary="Ingest OpenLineage event",
+)
+async def ingest_lineage_event(event: OpenLineageEvent) -> IngestionResponse:
+    """Ingest OpenLineage RunEvent, store in SQLite, and evaluate active metadata rules."""
+    raw_json = event.model_dump_json()
+
+    try:
+        # 1. Store event
+        storage.insert_event(event, raw_json)
+
+        # 2. Evaluate active metadata alert rules
+        triggered_alerts = rule_engine.evaluate(event)
+
+        return IngestionResponse(
+            status="accepted",
+            event_id=event.run.runId,
+            job_name=event.job.name,
+            event_type=event.eventType,
+            alerts_triggered=len(triggered_alerts),
+            alerts=[asdict_alert(a) for a in triggered_alerts],
+        )
+    except Exception as exc:
+        logger.exception("Failed to process OpenLineage event: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Lineage event ingestion failed: {str(exc)}",
+        )
+
+
+def asdict_alert(a: AlertItem) -> Dict[str, Any]:
+    return {
+        "alert_id": a.alert_id,
+        "rule_id": a.rule_id,
+        "rule_name": a.rule_name,
+        "severity": a.severity,
+        "dataset_name": a.dataset_name,
+        "job_name": a.job_name,
+        "summary": a.summary,
+        "description": a.description,
+        "details": a.details,
+        "created_at": a.created_at,
+        "status": a.status,
+    }
+
+
+@app.get("/api/v1/alerts", summary="Get active metadata alerts")
+async def get_alerts(
+    severity: Optional[str] = Query(None, description="Filter by severity (CRITICAL, WARNING, INFO)"),
+    rule_id: Optional[str] = Query(None, description="Filter by rule ID (e.g. RF20-RULE-001)"),
+    status: Optional[str] = Query("ACTIVE", description="Filter by status (ACTIVE, ACKNOWLEDGED, RESOLVED)"),
+    dataset: Optional[str] = Query(None, description="Filter by dataset substring"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Retrieve active metadata alerts with optional filtering."""
+    alerts = storage.query_alerts(
+        severity=severity,
+        rule_id=rule_id,
+        status=status,
+        dataset=dataset,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "count": len(alerts),
+        "limit": limit,
+        "offset": offset,
+        "alerts": alerts,
+    }
+
+
+@app.get("/api/v1/alerts/{alert_id}", summary="Get alert by ID")
+async def get_alert(alert_id: str):
+    """Retrieve details for a single alert."""
+    alert = storage.get_alert_by_id(alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    return alert
+
+
+@app.post("/api/v1/alerts/{alert_id}/acknowledge", summary="Acknowledge alert")
+async def acknowledge_alert(alert_id: str):
+    """Mark an active alert as ACKNOWLEDGED."""
+    updated = storage.set_alert_status(alert_id, "ACKNOWLEDGED")
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    return {"status": "success", "alert_id": alert_id, "new_status": "ACKNOWLEDGED"}
+
+
+@app.get("/api/v1/lineage/{dataset:path}", summary="Get lineage for dataset")
+async def get_dataset_lineage(dataset: str):
+    """Get lineage graph and producers/consumers for a dataset."""
+    lineage_data = storage.get_dataset_lineage(dataset)
+    return lineage_data
+
+
+@app.get("/api/v1/datasets", summary="List known datasets")
+async def list_datasets():
+    """List all registered datasets and their latest schemas."""
+    return {"datasets": storage.list_datasets()}
+
+
+@app.get("/api/v1/stats", summary="Platform metadata statistics")
+async def get_stats():
+    """Get summary counts of lineage events and alert states."""
+    return storage.get_stats()
+
+
+@app.get("/health", summary="Healthcheck")
+async def health():
+    return {"status": "healthy", "service": "lineage_webhook_service", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/metrics", summary="Prometheus metrics")
+async def prometheus_metrics():
+    """Prometheus exposition format metrics for scrapers."""
+    stats = storage.get_stats()
+    lines = [
+        "# HELP lineage_events_total Total OpenLineage events ingested",
+        "# TYPE lineage_events_total counter",
+        f"lineage_events_total {stats['total_events']}",
+        "# HELP lineage_datasets_tracked Total unique datasets tracked in lineage graph",
+        "# TYPE lineage_datasets_tracked gauge",
+        f"lineage_datasets_tracked {stats['total_datasets']}",
+        "# HELP lineage_active_alerts Current active metadata alerts count",
+        "# TYPE lineage_active_alerts gauge",
+        f"lineage_active_alerts {stats['active_alerts']}",
+        "# HELP lineage_critical_alerts Current active critical alerts count",
+        "# TYPE lineage_critical_alerts gauge",
+        f"lineage_critical_alerts {stats['critical_alerts']}",
+    ]
+    return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    host = os.getenv("HOST", "0.0.0.0")
+    logger.info("Starting Lineage Webhook Service on %s:%d", host, port)
+    uvicorn.run(app, host=host, port=port)

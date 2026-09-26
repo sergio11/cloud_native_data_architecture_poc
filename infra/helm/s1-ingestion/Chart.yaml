@@ -1,0 +1,15 @@
+apiVersion: v2
+name: s1-ingestion
+description: Subsystem S1 - Ingestion Layer (PostgreSQL OLTP Demo Source & Replication Services)
+type: application
+version: 1.0.0
+appVersion: "16.2"
+keywords:
+  - ingestion
+  - postgresql
+  - oltp
+  - cdc
+  - debezium
+maintainers:
+  - name: Data Engineering Platform Team
+    email: data-platform@poc.local

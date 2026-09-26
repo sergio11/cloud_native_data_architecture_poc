@@ -1,0 +1,33 @@
+{{- if .Values.polaris.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: polaris-config
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: polaris
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+data:
+  polaris-server.yml: |
+    server:
+      type: simple
+      applicationContextPath: /
+      connector:
+        type: http
+        port: 8181
+        bindHost: 0.0.0.0
+    metaStoreManager:
+      type: in-memory
+    defaultRealm: {{ .Values.polaris.config.realm | quote }}
+    aws:
+      endpoint: {{ .Values.polaris.config.s3Endpoint | quote }}
+      region: {{ .Values.polaris.config.awsRegion | quote }}
+      pathStyleAccess: true
+      credentials:
+        accessKeyId: {{ .Values.polaris.config.accessKey | quote }}
+        secretAccessKey: {{ .Values.polaris.config.secretKey | quote }}
+    catalogs:
+      - name: {{ .Values.polaris.config.defaultCatalog | quote }}
+        type: internal
+        defaultBaseLocation: {{ .Values.polaris.config.warehouseLocation | quote }}
+{{- end }}

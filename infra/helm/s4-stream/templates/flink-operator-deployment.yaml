@@ -1,0 +1,53 @@
+{{- if .Values.flinkOperator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-kubernetes-operator
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: flink-kubernetes-operator
+    {{- include "s4-stream.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.flinkOperator.replicaCount }}
+  selector:
+    matchLabels:
+      app: flink-kubernetes-operator
+  template:
+    metadata:
+      labels:
+        app: flink-kubernetes-operator
+        {{- include "s4-stream.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: flink-operator-sa
+      {{- with .Values.flinkOperator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: flink-operator
+          image: "{{ .Values.flinkOperator.image.repository }}:{{ .Values.flinkOperator.image.tag }}"
+          imagePullPolicy: {{ .Values.flinkOperator.image.pullPolicy }}
+          env:
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OPERATOR_NAME
+              value: flink-kubernetes-operator
+            - name: FLINK_CONF_flink_k8s_operator_dynamic_namespaces_enabled
+              value: "true"
+          resources:
+            {{- toYaml .Values.flinkOperator.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+{{- end }}

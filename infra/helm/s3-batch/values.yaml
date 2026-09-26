@@ -1,0 +1,85 @@
+# ==============================================================================
+# Subsystem S3: Batch Processing Layer - Values Configuration
+# File: infra/helm/s3-batch/values.yaml
+# ==============================================================================
+
+global:
+  namespace: platform
+  computeNamespace: sales
+
+sparkOperator:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/googlecloudplatform/spark-operator
+    tag: "v1beta2-1.4.0-3.5.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+  nodeSelector:
+    node-role.kubernetes.io/compute: "true"
+
+  tolerations: []
+  affinity: {}
+
+sparkDefaults:
+  image:
+    repository: apache/spark-py
+    tag: "v3.5.1"
+    pullPolicy: IfNotPresent
+
+  driver:
+    cores: 1
+    coreLimit: "1000m"
+    memory: "512m"
+    labels:
+      version: "3.5.1"
+      role: driver
+    serviceAccount: spark-operator-spark
+
+  executor:
+    cores: 1
+    coreLimit: "1000m"
+    instances: 1
+    memory: "640m"
+    labels:
+      version: "3.5.1"
+      role: executor
+
+  nodeSelector:
+    node-role.kubernetes.io/compute: "true"
+
+  iceberg:
+    catalogName: "polaris"
+    catalogUrl: "http://polaris.platform.svc.cluster.local:8181"
+    warehouse: "s3a://warehouse/"
+    s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
+    accessKey: "minioadmin"
+    secretKey: "minioadmin"
+
+  openLineage:
+    url: "http://marquez.platform.svc.cluster.local:5000"
+    namespace: "poc_data_engineering"
+
+  database:
+    jdbcUrl: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp"
+    jdbcUser: "postgres"
+    jdbcPassword: "oltp_password_secret"
+
+jobs:
+  bronzeIngestion:
+    enabled: true
+    schedule: "0 2 * * *"
+  silverTransform:
+    enabled: true
+    schedule: "0 3 * * *"
+  goldAggregation:
+    enabled: true
+    schedule: "0 4 * * *"

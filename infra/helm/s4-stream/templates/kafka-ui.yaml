@@ -1,0 +1,69 @@
+{{- if .Values.kafkaUi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-ui
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: kafka-ui
+    {{- include "s4-stream.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.kafkaUi.replicaCount }}
+  selector:
+    matchLabels:
+      app: kafka-ui
+  template:
+    metadata:
+      labels:
+        app: kafka-ui
+        {{- include "s4-stream.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: kafka-ui
+          image: "{{ .Values.kafkaUi.image.repository }}:{{ .Values.kafkaUi.image.tag }}"
+          imagePullPolicy: {{ .Values.kafkaUi.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: KAFKA_CLUSTERS_0_NAME
+              value: "poc-cluster"
+            - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
+              value: "kafka.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local:9092"
+            - name: SERVER_PORT
+              value: "8080"
+          resources:
+            {{- toYaml .Values.kafkaUi.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-ui
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: kafka-ui
+    {{- include "s4-stream.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.kafkaUi.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.kafkaUi.service.port }}
+      targetPort: 8080
+      nodePort: {{ .Values.kafkaUi.service.nodePort }}
+      protocol: TCP
+  selector:
+    app: kafka-ui
+{{- end }}

@@ -1,0 +1,20 @@
+{{- if .Values.polaris.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: polaris
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: polaris
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.polaris.service.type }}
+  ports:
+    - name: rest-api
+      port: {{ .Values.polaris.service.port }}
+      targetPort: 8181
+      nodePort: {{ .Values.polaris.service.nodePort }}
+      protocol: TCP
+  selector:
+    app: polaris
+{{- end }}

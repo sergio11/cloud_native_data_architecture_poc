@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/governance/contract-schema.json",
+  "title": "DataContractSchema",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "const": "DataContract"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "version", "domain", "data_product", "owner"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "status": { "type": "string" },
+        "domain": { "type": "string" },
+        "data_product": { "type": "string" },
+        "owner": {
+          "type": "string",
+          "format": "email"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["description", "compatibility_mode", "sla", "schema", "quality"],
+      "properties": {
+        "description": { "type": "string" },
+        "compatibility_mode": {
+          "type": "string",
+          "enum": ["BACKWARD", "FORWARD", "FULL", "NONE"]
+        },
+        "sla": { "type": "object" },
+        "schema": {
+          "type": "object",
+          "required": ["format", "fields"],
+          "properties": {
+            "format": { "type": "string" },
+            "primary_key": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "type", "required"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "type": { "type": "string" },
+                  "required": { "type": "boolean" },
+                  "description": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "quality": {
+          "type": "object",
+          "required": ["thresholds"]
+        }
+      }
+    }
+  }
+}

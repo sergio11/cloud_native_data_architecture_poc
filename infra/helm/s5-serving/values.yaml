@@ -1,0 +1,59 @@
+# ==============================================================================
+# Subsystem S5: Serving Layer - Values Configuration
+# File: infra/helm/s5-serving/values.yaml
+# ==============================================================================
+
+global:
+  namespace: platform
+
+trino:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: trinodb/trino
+    tag: "444"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: NodePort
+    port: 8080
+    nodePort: 8080
+
+  resources:
+    requests:
+      cpu: 400m
+      memory: 896Mi
+    limits:
+      cpu: 1500m
+      memory: 1280Mi
+
+  jvm:
+    maxHeapSize: "1024M"
+    gc: "-XX:+UseG1GC"
+
+  nodeSelector:
+    node-role.kubernetes.io/compute: "true"
+
+  tolerations: []
+  affinity: {}
+
+catalogs:
+  iceberg:
+    enabled: true
+    restCatalogUri: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
+    s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
+    s3AccessKey: "minioadmin"
+    s3SecretKey: "minioadmin"
+    s3PathStyleAccess: true
+
+  kafka:
+    enabled: true
+    nodes: "kafka.platform.svc.cluster.local:9092"
+    tableNames: "sales.orders.events,marketing.clickstream.raw"
+
+viewsInit:
+  enabled: true
+  image:
+    repository: trinodb/trino
+    tag: "444"
+    pullPolicy: IfNotPresent

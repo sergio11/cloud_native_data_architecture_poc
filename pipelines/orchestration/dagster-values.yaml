@@ -1,0 +1,36 @@
+# Dagster Helm values optimized for 8GB RAM Kubernetes/kind
+dagsterWebserver:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+  service:
+    type: ClusterIP
+    port: 3000
+
+dagsterDaemon:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: "300m"
+      memory: "384Mi"
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+
+postgresql:
+  enabled: true
+  postgresqlUsername: "dagster"
+  postgresqlPassword: "dagsterpassword"
+  postgresqlDatabase: "dagster"
+  resources:
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+    requests:
+      cpu: "50m"
+      memory: "128Mi"

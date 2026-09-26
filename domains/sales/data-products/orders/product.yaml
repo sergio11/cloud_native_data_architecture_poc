@@ -1,0 +1,78 @@
+apiVersion: dataplatform.io/v1alpha1
+kind: DataProduct
+metadata:
+  name: orders
+  domain: sales
+  owner: sales-data-team@company.internal
+  version: "1.2.0"
+  created_at: "2024-01-15"
+  updated_at: "2024-09-26"
+spec:
+  description: "Confirmed e-commerce customer purchase orders, order line items, fulfillment status, and transaction totals."
+  classification: confidential
+  sla:
+    freshness: "1h"
+    availability: "99%"
+    latency_p99: "3s"
+    support_hours: "24x7"
+    incident_response: "30m"
+  assets:
+    - name: gold_orders
+      type: iceberg_table
+      path: "s3a://gold/sales/orders/"
+      format: parquet
+      partitioned_by: ["order_date"]
+      description: "Aggregated order metrics and sales reporting ready for analytical querying"
+      access_tier: internal
+    - name: silver_orders
+      type: iceberg_table
+      path: "s3a://silver/sales/orders/"
+      format: parquet
+      description: "Cleaned, typed, and referentially validated order transactions"
+      access_tier: internal
+    - name: bronze_orders
+      type: iceberg_table
+      path: "s3a://bronze/sales/orders/"
+      format: parquet
+      description: "Raw ingested order records from PostgreSQL OLTP"
+      access_tier: restricted
+    - name: orders_stream
+      type: kafka_topic
+      path: "sales.orders.events"
+      description: "Real-time CDC order events for streaming speed layer"
+      access_tier: internal
+  quality:
+    completeness: 0.98
+    uniqueness: 1.00
+    timeliness: 0.99
+    validity: 0.995
+    suite: "quality/expectations/silver_orders_suite.json"
+  contract: "./contract.yaml"
+  schema: "./schema.json"
+  lineage:
+    source: "postgresql.public.orders"
+    transformations:
+      - step: "bronze_ingestion"
+        script: "pipelines/medallion/bronze_ingestion.py"
+        schedule: "0 * * * *"
+        description: "Full and incremental extraction from PostgreSQL to Bronze Iceberg"
+      - step: "silver_cleaning"
+        script: "pipelines/medallion/silver_transform.py"
+        schedule: "15 * * * *"
+        description: "Deduplication, type validation, and quality gate check"
+      - step: "gold_aggregation"
+        script: "pipelines/medallion/gold_aggregation.py"
+        schedule: "30 * * * *"
+        description: "Materialization of daily sales rollups and metrics"
+  consumers:
+    - name: finance-team
+      contact: finance-analytics@company.internal
+      use_case: "Revenue reconciliation and financial closing"
+    - name: marketing-team
+      contact: marketing-growth@company.internal
+      use_case: "Campaign conversion attribution and customer lifetime value"
+  tags:
+    - ecommerce
+    - sales
+    - revenue
+    - core

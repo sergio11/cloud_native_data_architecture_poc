@@ -1,0 +1,45 @@
+{{- range $domainName, $domainCfg := .Values.domains }}
+{{- if $domainCfg.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $domainName }}-network-policy
+  namespace: {{ $domainCfg.namespace }}
+  labels:
+    domain: {{ $domainName }}
+    subsystem: s6-mesh
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow intra-domain traffic
+    - from:
+        - podSelector: {}
+    # Allow traffic from platform and ops namespaces
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: platform
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ops
+  egress:
+    # Allow DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow communication to platform namespace (MinIO 9000, Kafka 9092, Postgres 5432, Polaris 8181, Marquez 5000)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: platform
+    # Allow intra-domain egress
+    - to:
+        - podSelector: {}
+---
+{{- end }}
+{{- end }}

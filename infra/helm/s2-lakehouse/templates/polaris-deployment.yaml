@@ -1,0 +1,75 @@
+{{- if .Values.polaris.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polaris
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: polaris
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.polaris.replicaCount }}
+  selector:
+    matchLabels:
+      app: polaris
+  template:
+    metadata:
+      labels:
+        app: polaris
+        {{- include "s2-lakehouse.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.polaris.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-minio
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for MinIO on port 9000..."
+              until nc -z -w 2 minio.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local 9000; do
+                sleep 2
+              done
+              echo "MinIO reachable."
+      containers:
+        - name: polaris
+          image: "{{ .Values.polaris.image.repository }}:{{ .Values.polaris.image.tag }}"
+          imagePullPolicy: {{ .Values.polaris.image.pullPolicy }}
+          ports:
+            - name: rest-api
+              containerPort: 8181
+              protocol: TCP
+          env:
+            - name: POLARIS_CONFIG
+              value: /app/config/polaris-server.yml
+            - name: AWS_ACCESS_KEY_ID
+              value: {{ .Values.polaris.config.accessKey | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              value: {{ .Values.polaris.config.secretKey | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.polaris.config.awsRegion | quote }}
+          resources:
+            {{- toYaml .Values.polaris.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+          readinessProbe:
+            httpGet:
+              path: /api/catalog/v1/config
+              port: 8181
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/catalog/v1/config
+              port: 8181
+            initialDelaySeconds: 20
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: polaris-config
+{{- end }}

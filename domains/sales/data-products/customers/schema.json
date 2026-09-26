@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataplatform.internal/schemas/sales/customers.json",
+  "title": "CustomersDataProductSchema",
+  "description": "Schema definition for customer master dimension with PII masking",
+  "type": "object",
+  "required": ["id", "name_masked", "email_hash", "segment", "registration_date", "created_at"],
+  "properties": {
+    "id": { "type": "integer", "minimum": 1 },
+    "name_masked": { "type": "string" },
+    "email_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "segment": {
+      "type": "string",
+      "enum": ["premium", "standard", "basic"]
+    },
+    "registration_date": { "type": "string", "format": "date" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

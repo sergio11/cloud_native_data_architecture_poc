@@ -1,0 +1,39 @@
+{{- range $domainName, $domainCfg := .Values.domains }}
+{{- if $domainCfg.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ $domainName }}-quota
+  namespace: {{ $domainCfg.namespace }}
+  labels:
+    domain: {{ $domainName }}
+    subsystem: s6-mesh
+spec:
+  hard:
+    requests.cpu: {{ $domainCfg.quotas.requestsCpu | quote }}
+    requests.memory: {{ $domainCfg.quotas.requestsMemory | quote }}
+    limits.cpu: {{ $domainCfg.quotas.limitsCpu | quote }}
+    limits.memory: {{ $domainCfg.quotas.limitsMemory | quote }}
+    pods: {{ $domainCfg.quotas.pods | quote }}
+    persistentvolumeclaims: {{ $domainCfg.quotas.persistentvolumeclaims | quote }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ $domainName }}-limits
+  namespace: {{ $domainCfg.namespace }}
+  labels:
+    domain: {{ $domainName }}
+    subsystem: s6-mesh
+spec:
+  limits:
+    - default:
+        cpu: "1000m"
+        memory: "1024Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      type: Container
+---
+{{- end }}
+{{- end }}

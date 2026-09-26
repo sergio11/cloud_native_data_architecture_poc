@@ -1,0 +1,16 @@
+{{- if and .Values.minio.enabled .Values.minio.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.minio.persistence.accessMode }}
+  storageClassName: {{ .Values.minio.persistence.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.minio.persistence.size }}
+{{- end }}

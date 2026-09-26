@@ -1,0 +1,16 @@
+apiVersion: v2
+name: s2-lakehouse
+description: Subsystem S2 - Lakehouse Storage Layer (MinIO Object Store & Apache Polaris Iceberg REST Catalog)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - lakehouse
+  - iceberg
+  - minio
+  - s3
+  - polaris
+  - catalog
+maintainers:
+  - name: Data Engineering Platform Team
+    email: data-platform@poc.local

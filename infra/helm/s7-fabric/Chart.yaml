@@ -1,0 +1,6 @@
+apiVersion: v2
+name: s7-fabric
+description: Helm chart for Subsystem S7 - Data Fabric (OpenLineage, Marquez, Active Metadata & Alerts)
+type: application
+version: 1.0.0
+appVersion: "0.45.0"

@@ -1,0 +1,54 @@
+{{- if .Values.sparkOperator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-operator
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: spark-operator
+    {{- include "s3-batch.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.sparkOperator.replicaCount }}
+  selector:
+    matchLabels:
+      app: spark-operator
+  template:
+    metadata:
+      labels:
+        app: spark-operator
+        {{- include "s3-batch.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: spark-operator-service-account
+      {{- with .Values.sparkOperator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: spark-operator
+          image: "{{ .Values.sparkOperator.image.repository }}:{{ .Values.sparkOperator.image.tag }}"
+          imagePullPolicy: {{ .Values.sparkOperator.image.pullPolicy }}
+          command:
+            - /usr/bin/spark-operator
+            - -v=2
+            - -logtostderr
+            - -namespace=
+            - -enable-ui-service=true
+          ports:
+            - name: metrics
+              containerPort: 10254
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.sparkOperator.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 10254
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 10254
+            initialDelaySeconds: 15
+            periodSeconds: 20
+{{- end }}

@@ -102,9 +102,9 @@ class EventStreamAdapter(EventBrokerPort):
 
     def _publish_to_kafka(self, bootstrap: str, topic: str, key: str, payload: dict[str, Any]) -> None:
         """Publishes a single event to Kafka, failing fast without any SQLite fallback."""
-        from confluent_kafka import Producer
-
         try:
+            from confluent_kafka import Producer
+
             producer = Producer({"bootstrap.servers": bootstrap})
             producer.produce(topic, key=str(key), value=json.dumps(payload))
             producer.poll(0)

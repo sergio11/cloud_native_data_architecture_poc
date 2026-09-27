@@ -84,7 +84,6 @@ def main() -> None:
     parser.add_argument("--seed-if-empty", action="store_true", default=False,
                         help="Publish a deterministic 14-event demo burst when the topic log is empty "
                              "(an empty log is also auto-seeded loudly for demo-script compatibility)")
-    parser.add_argument("--marquez-url", default=os.getenv("MARQUEZ_URL", "http://localhost:5000"))
     args = parser.parse_args()
 
     replay_mode = args.replay or args.start_offset == "earliest"

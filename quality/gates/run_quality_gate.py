@@ -107,26 +107,14 @@ def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float) ->
 @click.option("--table", required=True, help="Target Lakehouse table (e.g. silver.sales.orders)")
 @click.option("--threshold", default=0.95, type=float, help="Pass rate threshold (0.0 to 1.0)")
 @click.option("--input-file", default=None, help="Optional local JSON/Parquet file to validate")
-@click.option("--sample-size", default=100000, type=int, help="Sample size")
-@click.option("--trino-host", default="localhost", help="Trino coordinator host")
-@click.option("--trino-port", default=8080, type=int, help="Trino port")
-@click.option("--trino-user", default="data-platform", help="Trino user")
-@click.option("--trino-catalog", default="iceberg", help="Trino catalog")
 @click.option("--marquez-url", default=None, help="Marquez URL")
-@click.option("--webhook-url", default=None, help="Alert webhook URL")
 @click.option("--output-dir", default=None, help="Directory to save run results JSON")
 def main(
     suite: str,
     table: str,
     threshold: float,
     input_file: str | None,
-    sample_size: int,
-    trino_host: str,
-    trino_port: int,
-    trino_user: str,
-    trino_catalog: str,
     marquez_url: str | None,
-    webhook_url: str | None,
     output_dir: str | None,
 ) -> None:
     run_id = str(uuid.uuid4())
@@ -164,8 +152,8 @@ def main(
                 "quality gate cannot approve an empty dataset (RF-06)."
             )
 
-        # Emit Lineage / Webhook if configured
-        if marquez_url or webhook_url or os.getenv("MARQUEZ_URL"):
+        # Emit Lineage if configured
+        if marquez_url or os.getenv("MARQUEZ_URL"):
             container.lineage.emit_job_event(
                 job_name=f"quality_gate_{table}",
                 inputs=[table],

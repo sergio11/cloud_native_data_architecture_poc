@@ -9,12 +9,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.ports.inbound import QueryServingPort
 from src.ports.outbound import QueryExecutorPort
 
 logger = logging.getLogger("use_case.query_serving")
 
 
-class QueryServingUseCase:
+class QueryServingUseCase(QueryServingPort):
     """Orchestrates transparent unification of batch and streaming tiers at query time.
 
     Lambda fusion semantics (RF-11):
@@ -62,11 +63,16 @@ class QueryServingUseCase:
             "'batch_historical' AS source_tier "
             "FROM gold.sales.daily_metrics "
             "UNION ALL "
-            "SELECT s.order_date, s.status, s.window_orders, s.window_revenue, "
-            "s.avg_order_value, 'stream_speed' AS source_tier "
+            "SELECT s.order_date AS order_date, s.status AS status, "
+            "SUM(s.window_orders) AS total_orders, "
+            "SUM(s.window_revenue) AS total_revenue, "
+            "SUM(s.window_revenue) / NULLIF(SUM(s.window_orders), 0) "
+            "AS avg_order_value, "
+            "'stream_speed' AS source_tier "
             "FROM stream.sales.orders_windowed s "
             "WHERE NOT EXISTS (SELECT 1 FROM gold.sales.daily_metrics b "
-            "WHERE b.order_date = s.order_date AND b.status = s.status)"
+            "WHERE b.order_date = s.order_date AND b.status = s.status) "
+            "GROUP BY s.order_date, s.status"
             ")"
         )
         if order_date_gte:

@@ -35,7 +35,6 @@ def main() -> None:
         choices=["orders", "customers", "order_items", "campaigns", "all"],
         help="Operational entity to ingest into Bronze tier",
     )
-    parser.add_argument("--marquez-url", default=os.getenv("MARQUEZ_URL", "http://localhost:5000"))
     args = parser.parse_args()
 
     entities = SUPPORTED_ENTITIES if args.entity == "all" else [args.entity]

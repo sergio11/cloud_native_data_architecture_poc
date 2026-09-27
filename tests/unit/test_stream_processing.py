@@ -140,6 +140,47 @@ def test_process_stream_two_runs_no_duplicate_windows(tmp_path: Path):
     assert len(rows_after_second) == len(rows_after_first)  # no duplicate windows
 
 
+def test_incremental_batches_share_window_without_fragmentation(tmp_path: Path):
+    use_case, broker, storage = _make_use_case(tmp_path)
+    topic = "unit.shared_window"
+
+    broker.publish_event(topic, "1", {
+        "timestamp": "2026-01-15T12:01:00+00:00", "status": "confirmed",
+        "total_amount": 50.0, "order_date": "2026-01-15",
+    })
+    broker.publish_event(topic, "2", {
+        "timestamp": "2026-01-15T12:02:00+00:00", "status": "confirmed",
+        "total_amount": 70.0, "order_date": "2026-01-15",
+    })
+
+    first = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
+    assert first["status"] == "SUCCESS"
+    assert first["mode"] == "append"
+    assert first["events_consumed"] == 2
+    rows_first = storage.read_table(TARGET_TABLE)
+    assert len(rows_first) == 1
+    assert rows_first[0]["window_start"] == "2026-01-15T12:00:00+00:00"
+    assert int(rows_first[0]["window_orders"]) == 2
+    assert float(rows_first[0]["window_revenue"]) == 120.0
+
+    broker.publish_event(topic, "3", {
+        "timestamp": "2026-01-15T12:03:00+00:00", "status": "confirmed",
+        "total_amount": 30.0, "order_date": "2026-01-15",
+    })
+
+    second = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
+    assert second["status"] == "SUCCESS"
+    assert second["mode"] == "append"
+    assert second["events_consumed"] == 1
+    rows_second = storage.read_table(TARGET_TABLE)
+    assert len(rows_second) == 1  # no fragmentation: still a single row for W
+    keys = [(r["window_start"], r["status"]) for r in rows_second]
+    assert len(keys) == len(set(keys))  # no duplicate (window_start, status) rows
+    assert rows_second[0]["window_start"] == "2026-01-15T12:00:00+00:00"
+    assert int(rows_second[0]["window_orders"]) == 3
+    assert float(rows_second[0]["window_revenue"]) == 150.0
+
+
 def test_process_stream_replay_overwrites(tmp_path: Path):
     use_case, broker, storage = _make_use_case(tmp_path)
     topic = "unit.replay_overwrite"

@@ -18,6 +18,13 @@ logger = logging.getLogger("adapter.source.oltp")
 
 TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+DEFAULT_SEED = 42
+
+# Fixed reference clock for the synthetic fallback so output is fully
+# reproducible per (seed, table_name, count). Wall-clock `now` would make
+# two calls with the same seed differ in order_date/created_at timestamps.
+SYNTHETIC_REFERENCE_TIME = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
+
 
 class OltpSourceAdapter(OltpSourcePort):
     """
@@ -28,9 +35,20 @@ class OltpSourceAdapter(OltpSourcePort):
     synthetic generator serves the local demo profile instead.
     """
 
-    def __init__(self, pg_host: str | None = None, seed_db_path: str = "data/oltp_seed.db") -> None:
+    def __init__(
+        self,
+        pg_host: str | None = None,
+        seed: int | None = None,
+    ) -> None:
         self._pg_host = pg_host or os.getenv("PGHOST", "localhost")
-        self._seed_db_path = seed_db_path
+        if seed is None:
+            env_seed = os.getenv("POC_DATA_SEED")
+            try:
+                self._seed = int(env_seed) if env_seed is not None else DEFAULT_SEED
+            except (TypeError, ValueError):
+                self._seed = DEFAULT_SEED
+        else:
+            self._seed = int(seed)
 
     @staticmethod
     def _validate_identifier(table_name: str) -> None:
@@ -100,22 +118,23 @@ class OltpSourceAdapter(OltpSourcePort):
         return self._generate_synthetic_records(table_name, limit or 100)
 
     def _generate_synthetic_records(self, table_name: str, count: int) -> list[dict[str, Any]]:
+        rng = random.Random(self._seed)
         records = []
-        now = datetime.now(UTC)
+        now = SYNTHETIC_REFERENCE_TIME
 
         if table_name == "customers":
             segments = ["premium", "standard", "basic"]
             names = ["Alice Smith", "Bob Jones", "Carol White", "David Brown", "Emma Watson", "Frank Miller"]
             for i in range(1, count + 1):
-                name = random.choice(names)
+                name = rng.choice(names)
                 slug = name.lower().replace(" ", ".")
                 records.append({
                     "id": i,
                     "name": name,
                     "email": f"{slug}{i}@example.com",
-                    "segment": random.choice(segments),
-                    "registration_date": (now - timedelta(days=random.randint(10, 365))).strftime("%Y-%m-%d"),
-                    "created_at": (now - timedelta(days=random.randint(1, 100))).isoformat(),
+                    "segment": rng.choice(segments),
+                    "registration_date": (now - timedelta(days=rng.randint(10, 365))).strftime("%Y-%m-%d"),
+                    "created_at": (now - timedelta(days=rng.randint(1, 100))).isoformat(),
                 })
 
         elif table_name == "orders":
@@ -123,11 +142,11 @@ class OltpSourceAdapter(OltpSourcePort):
             for i in range(1, count + 1):
                 records.append({
                     "id": i,
-                    "customer_id": random.randint(1, min(100, count)),
-                    "total_amount": round(random.uniform(25.0, 450.0), 2),
-                    "status": random.choice(statuses),
-                    "order_date": (now - timedelta(days=random.randint(0, 14))).strftime("%Y-%m-%d"),
-                    "created_at": (now - timedelta(hours=random.randint(1, 72))).isoformat(),
+                    "customer_id": rng.randint(1, min(100, count)),
+                    "total_amount": round(rng.uniform(25.0, 450.0), 2),
+                    "status": rng.choice(statuses),
+                    "order_date": (now - timedelta(days=rng.randint(0, 14))).strftime("%Y-%m-%d"),
+                    "created_at": (now - timedelta(hours=rng.randint(1, 72))).isoformat(),
                 })
 
         elif table_name == "campaigns":
@@ -135,8 +154,8 @@ class OltpSourceAdapter(OltpSourcePort):
             for i in range(1, count + 1):
                 records.append({
                     "id": i,
-                    "channel": random.choice(channels),
-                    "budget": round(random.uniform(500.0, 5000.0), 2),
+                    "channel": rng.choice(channels),
+                    "budget": round(rng.uniform(500.0, 5000.0), 2),
                     "start_date": (now - timedelta(days=30)).strftime("%Y-%m-%d"),
                     "end_date": now.strftime("%Y-%m-%d"),
                 })

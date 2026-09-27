@@ -5,8 +5,8 @@ Builds a fully isolated hexagonal world under ``tmp_path``: lakehouse SQLite
 database, persistent event log and lineage audit JSONL all live inside the
 test's temporary directory, so nothing is ever written to the repository's
 ``data/`` folder. Adapters and use cases are constructed DIRECTLY (mirroring
-``src/container.py`` wiring) - ``src.container`` is never imported because its
-module-scope default container creates ``data/`` artifacts as a side effect.
+``src/container.py`` wiring) - ``src.container`` is never imported here simply
+to keep this fixture fully self-contained and hermetic.
 
 Network is disabled at the seams:
   * ``MarquezLineageAdapter`` points at an unroutable address AND its HTTP
@@ -191,7 +191,9 @@ def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
         cleanse_silver=CleanseSilverUseCase(
             storage=storage, quality_engine=quality_engine, lineage=lineage
         ),
-        aggregate_gold=AggregateGoldUseCase(storage=storage, lineage=lineage),
+        aggregate_gold=AggregateGoldUseCase(
+            storage=storage, lineage=lineage, quality_engine=quality_engine
+        ),
         process_stream=ProcessStreamUseCase(
             broker=broker, storage=storage, lineage=lineage
         ),

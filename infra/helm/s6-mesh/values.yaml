@@ -6,6 +6,8 @@
 global:
   namespace: platform
 
+# DEFERRED (RF-17): no template in templates/ consumes this block yet — admission
+# control is not rendered; scripts/setup-cluster.sh only registers the Kyverno repo.
 kyverno:
   enabled: true
   replicaCount: 1
@@ -28,6 +30,10 @@ kyverno:
 crds:
   install: true
 
+# SINGLE SOURCE OF TRUTH for per-domain ResourceQuota/LimitRange (rendered by
+# templates/domain-quotas.yaml). The former duplicate governance/policies/domain-quotas.yaml
+# was deleted: scripts/setup.sh applies governance/policies/ wholesale, so keeping both
+# would install contradictory quotas (e.g. sales 15 pods/4Gi vs 20 pods/6Gi here — this chart wins).
 domains:
   sales:
     enabled: true

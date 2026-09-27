@@ -92,7 +92,7 @@ Verified by inspecting `infra/helm/**` before writing this section:
 - **Domain Boundaries**: three autonomous business units — `Sales`, `Marketing`, `Finance` — each owning `domains/<domain>/data-products/<product>/{product.yaml, contract.yaml, schema.json}`.
 - **Data Products**: manifests carry owner, description, SLA (freshness/availability), classification, quality thresholds, assets, consumers, and declared lineage steps.
 - **Declarative Data Contracts**: `contract.yaml` declares schema fields, compatibility mode, and protected fields. `src/use_cases/validate_contract.py` performs **real BACKWARD compatibility evaluation** of `contract.yaml` vs the sibling `schema.json` snapshot plus optional `jsonschema` structural validation; `governance/contract_validator.py` is a thin CLI delegating to that use case (`rake governance:validate`).
-- **Federated Governance**: policies live in `governance/policies/*.yaml` (owner required, PII classification, naming convention, domain quotas) and are enforced by the contract validation use case at repository level. Deployment-time admission (Kyverno) is a K8s-profile concern (chart values only today).
+- **Federated Governance**: policies live in `governance/policies/*.yaml` (owner required, PII classification, naming convention) and are enforced by the contract validation use case at repository level. Per-domain compute quotas are enforced ONLY by the `s6-mesh` Helm chart (`infra/helm/s6-mesh/values.yaml` + `templates/domain-quotas.yaml`, the single source of truth — no duplicate quota file under `governance/`). Deployment-time admission (Kyverno) is a K8s-profile concern (chart values only today, RF-17 DEFERRED).
 
 ### 1.2 Processing Plane (Local behaviour vs. K8s target)
 - **Local profile (executes today)**:
@@ -269,7 +269,7 @@ To satisfy **Constraint RC-02** (strict 8 GB RAM limit), the K8s profile activat
 
 | Profile | File | Target RAM | Subsystems enabled |
 | :--- | :--- | :---: | :--- |
-| **platform** | `infra/profiles/platform.yaml` | 3,072 MB | S1 Postgres, S2 MinIO+Polaris, S4 Kafka, S6 mesh, S7 Marquez (Spark/Flink/Trino/Dagster disabled) |
+| **platform** | `infra/profiles/platform.yaml` | 3,072 MB | Charts `s1-ingestion`, `s2-lakehouse`, `s7-fabric` via `scripts/profile-up.sh platform` (Spark/Flink/Trino/Dagster disabled; `s6-mesh`/`s8-ops` charts deploy only under `demo` — DEFERRED for this branch) |
 | **stream** | `infra/profiles/stream.yaml` | 6,144 MB | platform + Flink operator & jobs (orders + clickstream), Kafka, Prometheus/Grafana |
 | **batch** | `infra/profiles/batch.yaml` | 6,656 MB | platform + Spark operator + Trino + Dagster definitions |
 | **demo** | `infra/profiles/demo.yaml` | 7,424 MB | all subsystems S1–S8 in single-replica lightweight mode under a 7.5 GB ceiling |

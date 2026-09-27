@@ -1,3 +1,8 @@
+# Federated-standards reference for federated computational governance (RF-19).
+# HONESTY NOTE: no code or chart in this repo consumes this file yet (verified by
+# repo-wide grep for global-standards/corporate-data-standards/federation/) — it is
+# validated manually against domain contracts, not wired into any pipeline. Kept in
+# place as the canonical statement of global standards; do NOT invent consumers.
 apiVersion: governance.datamesh.io/v1
 kind: FederatedGovernanceStandard
 metadata:

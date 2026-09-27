@@ -36,14 +36,16 @@ def main() -> None:
         help="Entity to cleanse and promote to Silver tier",
     )
     parser.add_argument("--threshold", default=0.95, type=float, help="Quality gate pass threshold (0.0 to 1.0)")
-    parser.add_argument("--marquez-url", default=os.getenv("MARQUEZ_URL", "http://localhost:5000"))
     args = parser.parse_args()
 
     entities = ["orders", "customers"] if args.entity == "all" else [args.entity]
     for ent in entities:
         logger.info("Triggering Silver transformation & quality gate for '%s'...", ent)
         try:
-            res = container.cleanse_silver.execute(ent, quality_threshold=args.threshold)
+            # Driver-side convention (hexagonal: the core holds no filesystem
+            # knowledge) - resolve the expectation suite path per entity here.
+            suite_path = f"quality/expectations/silver_{ent}_suite.json"
+            res = container.cleanse_silver.execute(ent, quality_threshold=args.threshold, suite_path=suite_path)
             logger.info(
                 "Silver promotion successful for '%s': %d rows conformed (Quality score: %.2f)",
                 res["target_table"], res["rows_promoted"], res["quality_pass_rate"]

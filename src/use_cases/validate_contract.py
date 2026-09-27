@@ -26,6 +26,7 @@ from src.domain.contracts import (
     resolve_compatibility_mode,
     validate_compatibility_mode,
 )
+from src.ports.inbound import ValidateContractPort
 from src.ports.outbound import DomainCatalogPort
 
 try:
@@ -36,22 +37,19 @@ except ImportError:  # pragma: no cover - optional dependency
 logger = logging.getLogger("use_case.validate_contract")
 
 
-class ValidateContractUseCase:
+class ValidateContractUseCase(ValidateContractPort):
     """Orchestrates validation of Bitol ODCS contracts and data products.
 
-    ``catalog`` is the DomainCatalogPort used to discover manifests. When no
-    catalog is injected (composition-time default for drivers such as the
-    CLI delegator or ``Container`` calling ``ValidateContractUseCase()``),
-    ``execute`` lazily builds ``FsDomainCatalogAdapter(repo_root)``; the
-    adapter import lives inside the method so the use case keeps no hard
-    module-level dependency on infrastructure (the coordinator injects the
-    adapter through the container). ``repo_root`` therefore always drives the
-    governance-schema lookup and, for the default catalog, the scan root.
+    ``catalog`` is the REQUIRED DomainCatalogPort used to discover manifests.
+    Composition roots outside the core (``src.container.Container``, the
+    governance CLI delegator) inject ``FsDomainCatalogAdapter(repo_root)``;
+    the core never imports a concrete adapter itself (DIP). ``repo_root``
+    drives the governance-schema lookup.
     """
 
     def __init__(
         self,
-        catalog: DomainCatalogPort | None = None,
+        catalog: DomainCatalogPort,
         evaluator: ContractCompatibilityEvaluator | None = None,
     ) -> None:
         self._catalog = catalog
@@ -60,10 +58,6 @@ class ValidateContractUseCase:
 
     def execute(self, repo_root: str = ".") -> dict[str, Any]:
         catalog = self._catalog
-        if catalog is None:
-            from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter
-
-            catalog = FsDomainCatalogAdapter(repo_root)
 
         products = sorted(catalog.list_products(), key=lambda item: item[0])
         contracts = sorted(catalog.list_contracts(), key=lambda item: item[0])

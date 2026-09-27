@@ -23,10 +23,12 @@ from typing import IO, Any
 
 import yaml
 
+from src.ports.outbound import DomainCatalogPort
+
 logger = logging.getLogger("adapter.catalog.fs_domain_catalog")
 
 
-class FsDomainCatalogAdapter:
+class FsDomainCatalogAdapter(DomainCatalogPort):
     """Reads data-product manifests from the repository filesystem."""
 
     def __init__(self, repo_root: str = ".") -> None:

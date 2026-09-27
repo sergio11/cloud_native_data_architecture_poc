@@ -10,12 +10,13 @@ import logging
 from typing import Any
 
 from src.domain.entities import QualityGateEvaluation
+from src.ports.inbound import RunQualityGatePort
 from src.ports.outbound import LakehouseStoragePort, QualityEnginePort
 
 logger = logging.getLogger("use_case.run_quality_gate")
 
 
-class RunQualityGateUseCase:
+class RunQualityGateUseCase(RunQualityGatePort):
     """Orchestrates quality assertion execution and pass/fail enforcement."""
 
     def __init__(

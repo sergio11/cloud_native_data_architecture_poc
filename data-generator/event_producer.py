@@ -11,18 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import random
-import signal
-import sys
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import click
-from faker import Faker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +85,19 @@ class ClickstreamEvent:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def _get_faker():
+    """Lazily loads Faker so importing this module never requires faker.
+
+    Returns a Faker instance when the package is installed, else None so
+    callers keep running in stdout-simulation mode on stdlib random/uuid.
+    """
+    try:
+        from faker import Faker
+    except ImportError:
+        return None
+    return Faker()
 
 
 def generate_order_event(order_id: int, customer_id: int) -> OrderEvent:

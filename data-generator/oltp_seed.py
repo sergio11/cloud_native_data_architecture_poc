@@ -17,15 +17,21 @@ import logging
 import os
 import random
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import List, Tuple
 
 import click
-import numpy as np
-import psycopg2
-import psycopg2.extras
-from faker import Faker
-from tqdm import tqdm
+
+try:
+    import numpy as np
+except ImportError:  # graceful degradation: seeding helpers need numpy only at call time
+    np = None  # type: ignore[assignment]
+
+try:
+    import psycopg2
+    import psycopg2.extras
+except ImportError:  # graceful degradation: DB-backed seeding needs psycopg2 only at call time
+    psycopg2 = None  # type: ignore[assignment]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,6 +145,8 @@ def create_schema(conn: psycopg2.extensions.connection, recreate: bool = False) 
 
 def seed_products(conn: psycopg2.extensions.connection, n: int = 500) -> List[Tuple[int, float]]:
     logger.info("Seeding %d products...", n)
+    from faker import Faker
+
     faker = Faker()
     rows = []
     for _ in range(n):
@@ -165,6 +173,8 @@ def seed_products(conn: psycopg2.extensions.connection, n: int = 500) -> List[Tu
 
 def seed_customers(conn: psycopg2.extensions.connection, n: int = 1_000) -> List[int]:
     logger.info("Seeding %d customers...", n)
+    from faker import Faker
+
     faker = Faker()
     rows = []
     today = date.today()
@@ -200,7 +210,6 @@ def seed_orders(
     n_orders: int = 50_000,
 ) -> None:
     logger.info("Seeding %d orders with order items...", n_orders)
-    faker = Faker()
     today = date.today()
     start_dt = today - timedelta(days=90)
     days_span = (today - start_dt).days

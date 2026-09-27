@@ -20,14 +20,12 @@ import logging
 import os
 import re
 import sqlite3
-import sys
 import threading
-import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Response, status
@@ -512,7 +510,8 @@ class StorageManager:
     def list_datasets(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT dataset_key, namespace, name, schema_hash, last_updated_at, last_job_name, total_events FROM datasets ORDER BY last_updated_at DESC"
+                "SELECT dataset_key, namespace, name, schema_hash, last_updated_at, "
+                "last_job_name, total_events FROM datasets ORDER BY last_updated_at DESC"
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -545,7 +544,38 @@ class RuleEngine:
     def __init__(self, storage: StorageManager, rules_path: str = ALERT_RULES_PATH):
         self.storage = storage
         self.rules_path = rules_path
+        self._raw_config: Dict[str, Any] = {}
         self.rules = self._load_rules()
+        self.rules_by_id: Dict[str, Dict[str, Any]] = {
+            r["id"]: r for r in self.rules if isinstance(r, dict) and r.get("id")
+        }
+
+    def _rule(self, rule_id: str) -> Dict[str, Any]:
+        """Return the loaded YAML rule dict for rule_id ({} if absent)."""
+        rule = self.rules_by_id.get(rule_id)
+        return rule if isinstance(rule, dict) else {}
+
+    def _rule_enabled(self, rule_id: str) -> bool:
+        """A rule fires only when its YAML `enabled` flag is true.
+
+        Unknown rule ids default to True to preserve legacy behaviour
+        when alert-rules.yaml is missing/unparseable.
+        """
+        rule = self._rule(rule_id)
+        if not rule:
+            return True
+        return bool(rule.get("enabled", True))
+
+    def _dedup_window_seconds(self) -> int:
+        """Dedup window from YAML defaults.throttling (fallback: 300s)."""
+        try:
+            return int(
+                self._raw_config.get("defaults", {}).get("throttling", {}).get(
+                    "deduplication_window_seconds", 300
+                )
+            )
+        except (ValueError, TypeError, AttributeError):
+            return 300
 
     def _load_rules(self) -> List[Dict[str, Any]]:
         """Load rules from YAML file or return fallback default rules."""
@@ -553,8 +583,14 @@ class RuleEngine:
             try:
                 with open(self.rules_path, "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f)
-                    rules = cfg.get("rules", [])
-                    logger.info("Successfully loaded %d active metadata rules from %s", len(rules), self.rules_path)
+                    if isinstance(cfg, dict):
+                        self._raw_config = cfg
+                    rules = cfg.get("rules", []) if isinstance(cfg, dict) else []
+                    logger.info(
+                        "Successfully loaded %d active metadata rules from %s",
+                        len(rules),
+                        self.rules_path,
+                    )
                     return rules
             except Exception as e:
                 logger.error("Failed to parse alert-rules.yaml: %s. Using default rules.", e)
@@ -606,9 +642,10 @@ class RuleEngine:
         alerts.extend(sla_alerts)
 
         # Persist triggered alerts (respecting deduplication)
+        dedup_window = self._dedup_window_seconds()
         for alert in alerts:
             target_key = alert.dataset_name or alert.job_name or "unknown"
-            if not self.storage.is_recent_alert_duplicate(alert.rule_id, target_key, 300):
+            if not self.storage.is_recent_alert_duplicate(alert.rule_id, target_key, dedup_window):
                 self.storage.insert_alert(alert)
                 logger.warning(
                     "TRIGGERED ALERT [%s - %s]: %s (target=%s)",
@@ -623,9 +660,31 @@ class RuleEngine:
     def _check_schema_changes(self, event: OpenLineageEvent) -> List[AlertItem]:
         """Rule 1: Detect schema modifications in Silver and Gold tables."""
         alerts: List[AlertItem] = []
+        if not self._rule_enabled("RF20-RULE-001"):
+            return alerts
+        rule = self._rule("RF20-RULE-001")
+        target = rule.get("target", {})
+        if not isinstance(target, dict):
+            target = {}
+        criteria = rule.get("criteria", {})
+        if not isinstance(criteria, dict):
+            criteria = {}
+        sev_map = rule.get("severity_mapping", {})
+        if not isinstance(sev_map, dict):
+            sev_map = {}
+        pattern = target.get("dataset_pattern", r"^(silver|gold)\..*")
+        try:
+            silver_gold_regex = re.compile(str(pattern), re.IGNORECASE)
+        except re.error:
+            silver_gold_regex = re.compile(r"^(silver|gold)\..*", re.IGNORECASE)
+        removed_sev = str(sev_map.get("removed_column", "CRITICAL"))
+        altered_sev = str(sev_map.get("type_altered", "CRITICAL"))
+        added_sev = str(sev_map.get("added_column", "WARNING"))
+        detect_added = bool(criteria.get("detect_added_columns", True))
+        detect_removed = bool(criteria.get("detect_removed_columns", True))
+        detect_types = bool(criteria.get("detect_type_changes", True))
+        strict_mode = bool(criteria.get("strict_mode", False))
         datasets_to_check = (event.outputs or []) + (event.inputs or [])
-
-        silver_gold_regex = re.compile(r"^(silver|gold)\..*", re.IGNORECASE)
 
         for ds in datasets_to_check:
             # Check pattern match
@@ -661,17 +720,26 @@ class RuleEngine:
 
                 diff_parts = []
                 severity = "WARNING"
-                if removed:
-                    severity = "CRITICAL"
+                if removed and detect_removed:
+                    severity = removed_sev
                     diff_parts.append(f"Removed columns: {list(removed)}")
-                if altered:
-                    severity = "CRITICAL"
+                if altered and detect_types:
+                    severity = altered_sev
                     diff_parts.append(f"Type changed: {altered}")
-                if added:
+                if added and detect_added:
+                    if strict_mode:
+                        severity = "CRITICAL"
+                    elif severity == "WARNING":
+                        severity = added_sev
                     diff_parts.append(f"Added columns: {list(added)}")
+                if not diff_parts:
+                    continue
 
                 summary = f"Schema drift detected on {ds.name}"
-                description = f"Dataset {ds.name} schema updated by job {event.job.name}. Details: " + "; ".join(diff_parts)
+                description = (
+                    f"Dataset {ds.name} schema updated by job {event.job.name}. "
+                    f"Details: " + "; ".join(diff_parts)
+                )
 
                 alerts.append(
                     AlertItem(
@@ -702,6 +770,28 @@ class RuleEngine:
     def _check_quality_breaches(self, event: OpenLineageEvent) -> List[AlertItem]:
         """Rule 2: Detect quality threshold breach in dataQuality / dataQualityAssertions facets."""
         alerts: List[AlertItem] = []
+        if not self._rule_enabled("RF20-RULE-002"):
+            return alerts
+        rule = self._rule("RF20-RULE-002")
+        criteria = rule.get("criteria", {})
+        if not isinstance(criteria, dict):
+            criteria = {}
+        sev_map = rule.get("severity_mapping", {})
+        if not isinstance(sev_map, dict):
+            sev_map = {}
+        try:
+            min_pass_rate = float(criteria.get("min_pass_rate", 0.95))
+        except (ValueError, TypeError):
+            min_pass_rate = 0.95
+        raw_crit = criteria.get("critical_severities", ["critical", "high", "fatal"])
+        if isinstance(raw_crit, list):
+            critical_sevs = {str(s).lower() for s in raw_crit}
+        else:
+            critical_sevs = {"critical", "high", "fatal"}
+        fail_on_critical = bool(criteria.get("fail_on_critical_assertion", True))
+        crit_pass_sev = str(sev_map.get("pass_rate_below_0_90", "CRITICAL"))
+        warn_pass_sev = str(sev_map.get("pass_rate_below_0_95", "WARNING"))
+        crit_assert_sev = str(sev_map.get("critical_assertion_failed", "CRITICAL"))
 
         # 1. Run-level dataQuality facet
         run_facets = event.run.facets or {}
@@ -712,8 +802,8 @@ class RuleEngine:
             suite_name = dq_facet.get("suiteName", "unknown_suite")
             failed_count = dq_facet.get("failedExpectations", 0)
 
-            if pass_rate is not None and pass_rate < 0.95:
-                severity = "CRITICAL" if pass_rate < 0.90 else "WARNING"
+            if pass_rate is not None and pass_rate < min_pass_rate:
+                severity = crit_pass_sev if pass_rate < 0.90 else warn_pass_sev
                 alerts.append(
                     AlertItem(
                         alert_id=str(uuid.uuid4()),
@@ -746,9 +836,12 @@ class RuleEngine:
             if failed_assertions:
                 critical_failed = [
                     a for a in failed_assertions
-                    if a.get("meta", {}).get("severity", "").lower() in ["critical", "high", "fatal"]
+                    if str((a.get("meta") or {}).get("severity", "")).lower() in critical_sevs
                 ]
-                severity = "CRITICAL" if critical_failed else "WARNING"
+                if critical_failed and fail_on_critical:
+                    severity = crit_assert_sev
+                else:
+                    severity = "WARNING"
                 alerts.append(
                     AlertItem(
                         alert_id=str(uuid.uuid4()),
@@ -777,41 +870,107 @@ class RuleEngine:
     def _check_pipeline_failures(self, event: OpenLineageEvent) -> List[AlertItem]:
         """Rule 3: Pipeline failure alert on FAIL or ABORT."""
         alerts: List[AlertItem] = []
+        if not self._rule_enabled("RF20-RULE-003"):
+            return alerts
+        rule = self._rule("RF20-RULE-003")
+        criteria = rule.get("criteria", {})
+        if not isinstance(criteria, dict):
+            criteria = {}
+        raw_states = criteria.get("terminal_states", ["FAIL", "ABORT"])
+        terminal_states = [str(s).upper() for s in raw_states] if isinstance(raw_states, list) else ["FAIL", "ABORT"]
+        raw_excl = criteria.get("exclude_job_patterns", [])
+        exclude_patterns = [str(p) for p in raw_excl] if isinstance(raw_excl, list) else []
 
-        if event.eventType in ("FAIL", "ABORT"):
-            # Extract error details
-            error_facet = (event.run.facets or {}).get("errorMessage") or (event.run.facets or {}).get("spark_unknown_operator")
-            error_msg = "Pipeline execution failed or aborted"
-            if isinstance(error_facet, dict):
-                error_msg = error_facet.get("message", error_msg)
+        if str(event.eventType).upper() not in terminal_states:
+            return alerts
+        for pat in exclude_patterns:
+            try:
+                if re.search(pat, event.job.name):
+                    return alerts
+            except re.error:
+                continue
 
-            severity = "CRITICAL"
-            alerts.append(
-                AlertItem(
-                    alert_id=str(uuid.uuid4()),
-                    rule_id="RF20-RULE-003",
-                    rule_name="PipelineFailureAlert",
-                    severity=severity,
-                    job_name=event.job.name,
-                    summary=f"Pipeline job execution failed: {event.job.name}",
-                    description=f"Job {event.job.name} (runId: {event.run.runId}) failed with state {event.eventType}. {error_msg}",
-                    details={
-                        "job": event.job.name,
-                        "namespace": event.job.namespace,
-                        "runId": event.run.runId,
-                        "eventType": event.eventType,
-                        "eventTime": event.eventTime,
-                    },
-                    created_at=datetime.now(timezone.utc).isoformat(),
-                )
+        # Extract error details (reached only for terminal states above)
+        run_facets = event.run.facets or {}
+        error_facet = run_facets.get("errorMessage") or run_facets.get("spark_unknown_operator")
+        error_msg = "Pipeline execution failed or aborted"
+        if isinstance(error_facet, dict):
+            error_msg = error_facet.get("message", error_msg)
+
+        severity = "CRITICAL"
+        alerts.append(
+            AlertItem(
+                alert_id=str(uuid.uuid4()),
+                rule_id="RF20-RULE-003",
+                rule_name="PipelineFailureAlert",
+                severity=severity,
+                job_name=event.job.name,
+                summary=f"Pipeline job execution failed: {event.job.name}",
+                description=(
+                    f"Job {event.job.name} (runId: {event.run.runId}) "
+                    f"failed with state {event.eventType}. {error_msg}"
+                ),
+                details={
+                    "job": event.job.name,
+                    "namespace": event.job.namespace,
+                    "runId": event.run.runId,
+                    "eventType": event.eventType,
+                    "eventTime": event.eventTime,
+                },
+                created_at=datetime.now(timezone.utc).isoformat(),
             )
+        )
 
         return alerts
+
+    def _sla_lookup(self, dataset_name: str) -> Tuple[float, str]:
+        """Resolve (max_staleness_seconds, sla_tier) for a dataset.
+
+        Uses YAML criteria.sla_definitions when present; otherwise falls
+        back to the legacy hardcoded medallion table.
+        """
+        rule = self._rule("RF20-RULE-004")
+        criteria = rule.get("criteria", {})
+        sla_defs = criteria.get("sla_definitions") if isinstance(criteria, dict) else None
+        if isinstance(sla_defs, list) and sla_defs:
+            for entry in sla_defs:
+                if not isinstance(entry, dict):
+                    continue
+                pat = str(entry.get("pattern", ".*"))
+                try:
+                    if re.search(pat, dataset_name):
+                        return (
+                            float(entry.get("max_staleness_seconds", 3600)),
+                            str(entry.get("sla_tier", "tier_2")),
+                        )
+                except re.error:
+                    continue
+            return 3600.0, "tier_2"
+        # Legacy fallback table (pre-RF-20-wiring behaviour)
+        if dataset_name.startswith("stream."):
+            return 5.0, "real_time"
+        elif dataset_name.startswith("bronze.") or dataset_name.startswith("silver."):
+            return 3600.0, "tier_2"
+        elif dataset_name.startswith("gold."):
+            return 86400.0, "tier_1"
+        return 3600.0, "tier_2"
+
+    def _sla_severity(self, sla_tier: str, max_staleness: float, is_stream: bool) -> str:
+        """Map an SLA tier breach to a severity via YAML severity_mapping."""
+        rule = self._rule("RF20-RULE-004")
+        sev_map = rule.get("severity_mapping", {})
+        if not isinstance(sev_map, dict):
+            sev_map = {}
+        if not rule:  # no YAML loaded -> preserve legacy severity behaviour
+            return "CRITICAL" if is_stream or max_staleness <= 3600 else "WARNING"
+        defaults = {"tier_1": "CRITICAL", "tier_2": "WARNING", "real_time": "CRITICAL"}
+        return str(sev_map.get(f"{sla_tier}_breach", defaults.get(sla_tier, "WARNING")))
 
     def _check_sla_freshness(self, event: OpenLineageEvent) -> List[AlertItem]:
         """Rule 4: SLA freshness breach alert."""
         alerts: List[AlertItem] = []
-
+        if not self._rule_enabled("RF20-RULE-004"):
+            return alerts
         if event.eventType not in ("COMPLETE", "CHECK"):
             return alerts
 
@@ -824,19 +983,11 @@ class RuleEngine:
 
         # Check outputs SLA against SLA table
         for ds in (event.outputs or []):
-            max_staleness = 3600  # Default 1h
-            is_stream = False
-
-            if ds.name.startswith("stream."):
-                max_staleness = 5  # 5 seconds for streaming
-                is_stream = True
-            elif ds.name.startswith("bronze.") or ds.name.startswith("silver."):
-                max_staleness = 3600
-            elif ds.name.startswith("gold."):
-                max_staleness = 86400
+            max_staleness, sla_tier = self._sla_lookup(ds.name)
+            is_stream = sla_tier == "real_time" or ds.name.startswith("stream.")
 
             if lag_seconds > max_staleness:
-                severity = "CRITICAL" if is_stream or max_staleness <= 3600 else "WARNING"
+                severity = self._sla_severity(sla_tier, max_staleness, is_stream)
                 alerts.append(
                     AlertItem(
                         alert_id=str(uuid.uuid4()),
@@ -1010,7 +1161,11 @@ async def get_stats():
 
 @app.get("/health", summary="Healthcheck")
 async def health():
-    return {"status": "healthy", "service": "lineage_webhook_service", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {
+        "status": "healthy",
+        "service": "lineage_webhook_service",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/metrics", summary="Prometheus metrics")

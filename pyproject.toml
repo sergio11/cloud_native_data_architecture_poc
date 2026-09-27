@@ -51,3 +51,4 @@ pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["src"]
+fail_under = 70

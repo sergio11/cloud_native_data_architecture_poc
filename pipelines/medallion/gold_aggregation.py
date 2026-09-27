@@ -23,6 +23,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("gold_aggregation")
 
+GOLD_SUITES = {
+    "daily_metrics": "quality/expectations/gold_daily_metrics_suite.json",
+    "customers": "quality/expectations/gold_customers_suite.json",
+}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Gold Layer Analytical Modeling & PII Masking Pipeline (Hexagonal)")
@@ -32,11 +37,14 @@ def main() -> None:
         choices=["all", "daily_metrics", "customers"],
         help="Target Gold product to materialize",
     )
-    parser.add_argument("--marquez-url", default=os.getenv("MARQUEZ_URL", "http://localhost:5000"))
     args = parser.parse_args()
 
     logger.info("Triggering Gold aggregation use case (target='%s')...", args.target)
-    res = container.aggregate_gold.execute(target=args.target)
+    res = container.aggregate_gold.execute(
+        target=args.target,
+        daily_metrics_suite=GOLD_SUITES["daily_metrics"],
+        customers_suite=GOLD_SUITES["customers"],
+    )
     logger.info(
         "Gold materialization finished with status: %s (full recomputation from Silver = Lambda batch replay)",
         res.get("status"),

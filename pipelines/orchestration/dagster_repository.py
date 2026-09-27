@@ -75,7 +75,7 @@ def silver_customers(bronze_customers, spark: SparkResource, ge: GreatExpectatio
     description="Curated daily sales metrics and revenue aggregations for serving"
 )
 def gold_daily_metrics(silver_orders, silver_customers, spark: SparkResource) -> dict:
-    spark.submit_job("pipelines/medallion/gold_aggregation.py", ["--target", "gold.sales.daily_metrics"])
+    spark.submit_job("pipelines/medallion/gold_aggregation.py", ["--target", "daily_metrics"])
     return {"table": "gold.sales.daily_metrics", "status": "published"}
 
 

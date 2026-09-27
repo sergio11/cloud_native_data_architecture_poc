@@ -5,12 +5,14 @@ Verifies end-to-end data flow: Bronze Ingestion -> Silver Cleansing -> Gold Mode
 
 from __future__ import annotations
 
-import os
-import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+import requests
 
+from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter
+from src.adapters.lineage import marquez_lineage
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.serving.sql_serving import SqlServingAdapter
@@ -24,15 +26,35 @@ from src.use_cases.process_stream import ProcessStreamUseCase
 from src.use_cases.query_serving import QueryServingUseCase
 from src.use_cases.validate_contract import ValidateContractUseCase
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keeps every use-case test offline: Marquez HTTP POST fails instantly
+    instead of burning the adapter's socket timeout on every lineage emit,
+    and no Trino / PostgreSQL backend can trigger."""
+
+    def _unreachable_post(*args, **kwargs):
+        raise requests.exceptions.ConnectionError(
+            "network disabled: unit tests must be hermetic"
+        )
+
+    monkeypatch.setattr(marquez_lineage.requests, "post", _unreachable_post)
+    monkeypatch.delenv("TRINO_HOST", raising=False)
+    monkeypatch.delenv("PGPASSWORD", raising=False)
+
 
 @pytest.fixture
-def temp_lakehouse():
-    temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, "test_lakehouse.db")
+def temp_lakehouse(tmp_path: Path):
+    db_path = str(tmp_path / "test_lakehouse.db")
     storage = LakehouseStorageAdapter(db_path=db_path)
-    source = OltpSourceAdapter()
-    stream_broker = EventStreamAdapter(db_path=os.path.join(temp_dir, "test_events.db"))
-    lineage = MarquezLineageAdapter(audit_file_path=os.path.join(temp_dir, "test_lineage.jsonl"))
+    source = OltpSourceAdapter(seed=42)
+    stream_broker = EventStreamAdapter(db_path=str(tmp_path / "test_events.db"))
+    lineage = MarquezLineageAdapter(
+        marquez_url="http://127.0.0.1:1",
+        audit_file_path=str(tmp_path / "test_lineage.jsonl"),
+    )
     quality = ExpectationEngineAdapter()
 
     return {
@@ -64,7 +86,10 @@ def test_medallion_pipeline_flow(temp_lakehouse):
 
     # 2. Cleanse Silver
     cleanse_uc = CleanseSilverUseCase(storage=storage, quality_engine=quality, lineage=lineage)
-    silver_res = cleanse_uc.execute("orders")
+    silver_res = cleanse_uc.execute(
+        "orders",
+        suite_path=str(REPO_ROOT / "quality" / "expectations" / "silver_orders_suite.json"),
+    )
     assert silver_res["status"] == "SUCCESS"
     assert silver_res["rows_promoted"] > 0
 
@@ -73,7 +98,7 @@ def test_medallion_pipeline_flow(temp_lakehouse):
     assert "_ingested_at" not in silver_records[0]  # Audit cols stripped for conformed layer
 
     # 3. Aggregate Gold
-    aggregate_uc = AggregateGoldUseCase(storage=storage, lineage=lineage)
+    aggregate_uc = AggregateGoldUseCase(storage=storage, lineage=lineage, quality_engine=quality)
     gold_res = aggregate_uc.execute("daily_metrics")
     assert gold_res["status"] == "SUCCESS"
     assert gold_res["daily_metrics_rows"] > 0
@@ -143,8 +168,8 @@ def test_kappa_streaming_and_serving(temp_lakehouse):
 
 
 def test_contract_validation_use_case():
-    validator = ValidateContractUseCase()
-    res = validator.execute(repo_root=".")
+    validator = ValidateContractUseCase(catalog=FsDomainCatalogAdapter(str(REPO_ROOT)))
+    res = validator.execute(repo_root=str(REPO_ROOT))
     assert res["products_evaluated"] >= 6
     assert res["contracts_evaluated"] >= 6
     assert res["passed"] is True

@@ -18,9 +18,7 @@ class SparkResource(ConfigurableResource):
     spark_image: str = "docker.io/apache/spark:3.5.0-scala2.12-java17-python3"
 
     def submit_job(self, script_path: str, args: list = None) -> bool:
-        logger.info("Submitting Spark job: %s with args: %s", script_path, args or [])
-        # In local/POC mode, executes python script or interacts with Spark Operator
-        return True
+        raise NotImplementedError("K8s profile only: Spark job submission is not wired in the local profile")
 
 
 class FlinkResource(ConfigurableResource):
@@ -28,8 +26,7 @@ class FlinkResource(ConfigurableResource):
     operator_endpoint: str = "http://flink-operator.platform.svc:8080"
 
     def trigger_savepoint_and_replay(self, deployment_name: str, earliest_offset: bool = True) -> bool:
-        logger.info("Triggering Kappa-style Flink replay for %s (earliest=%s)", deployment_name, earliest_offset)
-        return True
+        raise NotImplementedError("K8s profile only: Flink savepoint and replay is not wired in the local profile")
 
 
 class MarquezResource(ConfigurableResource):

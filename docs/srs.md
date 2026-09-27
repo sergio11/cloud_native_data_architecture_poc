@@ -2,6 +2,19 @@
 ## Modern Data Architecture Proof of Concept (POC)
 ### Standard: IEEE Std 830-1998 / ISO/IEC/IEEE 29148:2018 Compliant
 
+> **NOTICE — legacy numbering.** This English SRS uses a legacy RF numbering that
+> differs from the canonical requirements in [`../srs.txt`](../srs.txt) (Spanish, §5:
+> authoritative RF-01…RF-25 definitions, priorities `[M]`/`[S]`, and §9 acceptance
+> scenarios — the tests follow that numbering, e.g. `test_rf06_*` = quality gate,
+> `test_rf07_*` = time travel, `test_rf19_*` = lineage). Roughly, the legacy RF-06…RF-21
+> block in this file covers the same ground as the srs.txt RF-04…RF-17 region (Silver/Gold,
+> gates, serving, mesh, contracts, lineage), but there is **no exact row-by-row equivalence**:
+> do not treat the two numberings as interchangeable. For any conflict, `srs.txt` wins.
+> Repository paths in this file have been normalised to English
+> (`domains/sales`, `domains/finance`, `flink_orders_stream.py`, `sales.*` table names);
+> the K8s deployment target lives in `infra/helm` + `infra/profiles` (there is no
+> `docker-compose.yml` in this repo).
+
 ---
 
 ## Document Metadata
@@ -13,7 +26,7 @@
 | **Status** | Approved / Baseline |
 | **System Classification** | Enterprise Data Platform & Analytics Proof of Concept |
 | **Core Paradigms** | Data Mesh, Data Fabric, Data Products, Medallion Lakehouse, Hybrid Lambda/Kappa |
-| **Target Runtime** | Single-Node Kubernetes (kind / minikube) & Docker Compose (8 GB RAM constraint) |
+| **Target Runtime** | Single-Node Kubernetes (kind) via Helm profiles (8 GB RAM constraint; no Docker Compose file in this repo) |
 | **License** | MIT (100% Open Source Software) |
 
 ---
@@ -84,9 +97,9 @@ The document serves two primary objectives:
 
 ### 1.2 Scope
 The POC platform models an omnichannel e-commerce enterprise comprising three autonomous business domains:
-- **Ventas (Sales)**: Customer entities, order transactions, line-item purchases, and fulfillment states.
+- **Sales**: Customer entities, order transactions, line-item purchases, and fulfillment states.
 - **Marketing**: Marketing campaigns, multi-channel outreach, web clickstream/navigation events, and conversion funnels.
-- **Finanzas (Finance)**: Revenue recognition, gross margin aggregation, and financial reporting metrics derived from cross-domain consumption.
+- **Finance**: Revenue recognition, gross margin aggregation, and financial reporting metrics derived from cross-domain consumption.
 
 The system encompasses:
 - Synthetic transaction and streaming event generation (OLTP PostgreSQL database and Apache Kafka broker).
@@ -141,10 +154,10 @@ The Modern Data Architecture POC operates as a self-contained, microservices-bas
 ```
 +-----------------------------------------------------------------------------------+
 |                              ORGANIZATION PLANE                                   |
-|   Domain: Ventas (Sales)       Domain: Marketing           Domain: Finanzas       |
+|   Domain: Sales                Domain: Marketing           Domain: Finance         |
 |   - Data Products:             - Data Products:            - Derived Products:    |
-|     * clientes                   * campanas                  * cross_domain_360   |
-|     * pedidos                    * leads / funnel            * revenue_unified    |
+|     * customers                  * campaigns                 * cross_domain_360   |
+|     * orders                     * leads / funnel            * revenue_unified    |
 |   - Declarative Contracts      - Declarative Contracts     - Federated Policies   |
 +-----------------------------------------------------------------------------------+
 |                              PROCESSING PLANE                                     |
@@ -199,9 +212,9 @@ The system architecture separates enterprise data concerns across three orthogon
 | 1. ORGANIZATION PLANE (Decentralized Governance & Ownership)                      |
 |                                                                                   |
 |  +-----------------------+  +-----------------------+  +-----------------------+  |
-|  | Domain: Ventas (Sales)|  | Domain: Marketing     |  | Domain: Finanzas      |  |
-|  | * Product: clientes   |  | * Product: campanas   |  | * Product: rev_daily  |  |
-|  | * Product: pedidos    |  | * Product: leads      |  | * Product: c360_gold  |  |
+|  | Domain: Sales           |  | Domain: Marketing     |  | Domain: Finance       |  |
+|  | * Product: customers  |  | * Product: campaigns  |  | * Product: rev_daily  |  |
+|  | * Product: orders     |  | * Product: leads      |  | * Product: c360_gold  |  |
 |  | * Contract: v1.2.0    |  | * Contract: v1.0.0    |  | * Contract: v1.0.0    |  |
 |  +-----------------------+  +-----------------------+  +-----------------------+  |
 |               \                         |                         /               |
@@ -228,7 +241,7 @@ The system architecture separates enterprise data concerns across three orthogon
 |  Serving Layer:                                                                   |
 |    +---------------------------------------------------------------------------+  |
 |    | Trino SQL Query Engine (Federated Catalogs via Apache Polaris REST)       |  |
-|    | - View: serving.ventas.revenue_unified (Batch Gold UNION ALL Stream 5m)   |  |
+|    | - View: serving.sales.unified_revenue (Batch Gold UNION ALL Stream 5m)   |  |
 |    | - View: serving.cross_domain.customer_360                                 |  |
 |    +---------------------------------------------------------------------------+  |
 +===================================================================================+
@@ -253,7 +266,7 @@ The system architecture separates enterprise data concerns across three orthogon
 - **Purpose**: Generates and ingests synthetic operational transactions and web clickstream data representing a realistic Spanish e-commerce environment.
 - **Components**:
   - `oltp_seed.py`: Connects via `psycopg2` to PostgreSQL, creating idempotent schemas and seeding 1,000 customers, 50,000 orders, and 200,000 order line items.
-  - `event_producer.py`: Multithreaded Kafka producer with token-bucket rate limiting (10 to 100 events/sec) producing realistic checkout and navigation funnels to topics `ventas.pedidos.events` and `ventas.navegacion.raw`.
+  - `event_producer.py`: Multithreaded Kafka producer with token-bucket rate limiting (10 to 100 events/sec) producing realistic checkout and navigation funnels to topics `sales.orders.events` and `marketing.clickstream.raw`.
   - Ingestion Connectors: PySpark JDBC connector for batch snapshotting; Flink Kafka Source for low-latency streaming ingest.
 
 #### S2: Lakehouse Storage & Catalog Subsystem
@@ -273,21 +286,21 @@ The system architecture separates enterprise data concerns across three orthogon
 #### S4: Stream Processing Engine Subsystem
 - **Purpose**: Ingests, enriches, and aggregates high-frequency event streams with sub-minute latency.
 - **Components**:
-  - `flink_pedidos_stream.py`: PyFlink streaming pipeline reading `ventas.pedidos.events`, tumbling over 5-minute event-time windows with 30-second watermarks, calculating total volume and GMV, and writing to Iceberg stream buffers.
-  - `flink_navegacion_stream.py`: Clickstream sessionizer tracking visitor drop-off and funnel stages, streaming real-time metrics to `stream.marketing.funnel_metrics`.
+  - `flink_orders_stream.py`: PyFlink streaming pipeline reading `sales.orders.events`, tumbling over 5-minute event-time windows with 30-second watermarks, calculating total volume and GMV, and writing to Iceberg stream buffers.
+  - `flink_clickstream_stream.py`: Clickstream sessionizer tracking visitor drop-off and funnel stages, streaming real-time metrics to `stream.marketing.clickstream_windowed`.
   - Replay Mechanism: Configurable stream offsets supporting complete reprocessing (Kappa paradigm).
 
 #### S5: Serving Layer Subsystem
 - **Purpose**: Presents a unified, zero-copy SQL access interface across diverse storage tiers and catalogs.
 - **Components**:
   - **Engine**: Trino distributed SQL query engine with Iceberg connector hooked to Apache Polaris REST catalog.
-  - `unified_view.sql`: Exposes views (e.g., `serving.ventas.revenue_unified`) that execute a `UNION ALL` between historical Gold batch tables and active streaming Iceberg buffers, using date filtering to prevent double counting.
-  - Cross-Domain Analytics: Supports federated joins combining `ventas` transactions, `marketing` spend, and `finanzas` allocations.
+  - `unified_view.sql`: Exposes views (e.g., `serving.sales.unified_revenue`) that execute a `UNION ALL` between historical Gold batch tables and active streaming Iceberg buffers, using date filtering to prevent double counting.
+  - Cross-Domain Analytics: Supports federated joins combining `sales` transactions, `marketing` spend, and `finance` allocations.
 
 #### S6: Data Mesh & Data Products Layer Subsystem
 - **Purpose**: Enforces decentralized domain boundary ownership, explicit data asset interfaces, and contractual accountability.
 - **Components**:
-  - **Domain Repositories**: Independent workspaces for `domains/ventas`, `domains/marketing`, and `domains/finanzas`.
+  - **Domain Repositories**: Independent workspaces for `domains/sales`, `domains/marketing`, and `domains/finance`.
   - **Manifests (`product.yaml`)**: Machine-readable descriptors specifying product ownership, metadata, SLA guarantees, data classifications, and output ports.
   - **Data Contracts (`contract.yaml`)**: Bitol Open Data Contract Standard (ODCS) declarative contracts defining schemas, validation rules, compatibility policies, and consumer registrations.
 
@@ -323,10 +336,10 @@ The system architecture separates enterprise data concerns across three orthogon
  [Pipelines S3/S4] ---(F5: OpenLineage)-----> [Marquez Lineage & Quality Gates]
 ```
 
-- **Flow F1 (OLTP to Bronze Ingestion)**: Scheduled or manual trigger initiates `bronze_ingestion.py`. Spark connects to PostgreSQL via JDBC, captures an immutable snapshot of `pedidos`, `clientes`, and `campanas`, appends ingestion timestamps (`_ingested_at`), and appends to Iceberg Bronze tables on MinIO. Emits OpenLineage START/COMPLETE events to Marquez.
-- **Flow F2 (Streaming Ingestion & Aggregation)**: `event_producer.py` publishes JSON messages to Kafka. `flink_pedidos_stream.py` consumes records using event-time timestamps, extracts windowed totals (5-minute tumbling windows), and sinks results to Iceberg `stream.ventas.pedidos_windowed`.
+- **Flow F1 (OLTP to Bronze Ingestion)**: Scheduled or manual trigger initiates `bronze_ingestion.py`. Spark connects to PostgreSQL via JDBC, captures an immutable snapshot of `orders`, `customers`, and `campaigns`, appends ingestion timestamps (`_ingested_at`), and appends to Iceberg Bronze tables on MinIO. Emits OpenLineage START/COMPLETE events to Marquez.
+- **Flow F2 (Streaming Ingestion & Aggregation)**: `event_producer.py` publishes JSON messages to Kafka. `flink_orders_stream.py` consumes records using event-time timestamps, extracts windowed totals (5-minute tumbling windows), and sinks results to Iceberg `stream.sales.orders_windowed`.
 - **Flow F3 (Medallion Progression)**: `silver_transform.py` runs (thin driver over the core use case), reading Bronze, filtering corrupt rows, deduplicating by primary key, and writing to Silver. `run_quality_gate.py` evaluates the GE-format suite with the built-in fail-closed engine. Upon passage (score >= 0.95), `gold_aggregation.py` reads Silver, computes dimensional KPIs, hashes PII columns using SHA-256, and writes to Gold tables (a **full recomputation from Silver on every run**).
-- **Flow F4 (Unified Serving Query)**: A business analyst issues `SELECT * FROM serving.ventas.revenue_unified` to Trino. Trino evaluates the view definition: historical data prior to `CURRENT_DATE - INTERVAL '2' DAY` is read from `gold.ventas.metricas_diarias`, while recent data is read from `stream.ventas.pedidos_windowed`. The query returns unified results without manual reconciliation.
+- **Flow F4 (Unified Serving Query)**: A business analyst issues `SELECT * FROM serving.sales.unified_revenue` to Trino. Trino evaluates the view definition: historical data prior to `CURRENT_DATE - INTERVAL '2' DAY` is read from `gold.sales.daily_metrics`, while recent data is read from `stream.sales.orders_windowed`. The query returns unified results without manual reconciliation.
 - **Flow F5 (Lineage & Quality Enforcement)**: During every pipeline step, dataset names, input/output schemas, row counts, and execution run UUIDs are transmitted over HTTP to Marquez. If `run_quality_gate.py` detects a critical check breach (e.g., null primary keys), it exits with code `1`, halting the DAG, emitting an OpenLineage FAILED event, and firing a notification webhook.
 - **Flow F6 (Kappa Reprocessing / Historical Replay)**: Upon algorithm revision or backfill request, the operator triggers a **full stream log replay** (`flink_orders_stream.py --start-offset earliest` / `--replay`, or `rake stream:replay`) or resets consumer offsets to `earliest`. The batch side needs no flag: every `gold_aggregation.py` run is already a **full recomputation** of the historical aggregates from Silver. Both paths re-evaluate historical data idempotently without mutating raw Bronze history.
 
@@ -336,7 +349,7 @@ The system architecture separates enterprise data concerns across three orthogon
 
 - **AD-1 (Hybrid Lambda + Kappa Architecture)**: Combine the reliability and deep relational transformation power of Spark batch processing for master historical data (Lambda batch tier) with Flink low-latency windowing for real-time telemetry (Kappa streaming tier), joined seamlessly at the Trino serving layer.
 - **AD-2 (Apache Iceberg + Apache Polaris as Lakehouse Foundation)**: Select Apache Iceberg over Delta Lake or Apache Hudi for native multi-engine interoperability (Spark, Flink, and Trino share identical metadata) and Apache Polaris as the vendor-neutral REST catalog.
-- **AD-3 (Multi-Domain Data Mesh with Declarative Contracts)**: Organize data architecture around autonomous business domains (`ventas`, `marketing`, `finanzas`) rather than centralized technical layers. Enforce domain boundaries via Bitol-compliant YAML data contracts (`contract.yaml`).
+- **AD-3 (Multi-Domain Data Mesh with Declarative Contracts)**: Organize data architecture around autonomous business domains (`sales`, `marketing`, `finance`) rather than centralized technical layers. Enforce domain boundaries via Bitol-compliant YAML data contracts (`contract.yaml`).
 - **AD-4 (Resource-Constrained Execution Profiling for 8 GB RAM)**: Mitigate memory contention on developer hardware by establishing 4 distinct operational startup profiles (`Platform`, `Stream`, `Batch`, `Demo`), executing heavy compute workloads sequentially rather than simultaneously.
 
 ---
@@ -380,28 +393,28 @@ The system architecture separates enterprise data concerns across three orthogon
 
 ### 5.1 Ingestion & Synthetic Generation
 
-- **RF-01 [M] Synthetic OLTP Data Generation**: The system shall generate a synthetic relational e-commerce dataset via `oltp_seed.py` comprising `clientes` (1,000 rows with realistic Spanish demographic attributes and PII), `pedidos` (50,000 order records distributed across the last 90 days), `lineas_pedido` (200,000 item details), and `campanas` (100 marketing records). Generation must be idempotent using `INSERT ON CONFLICT DO NOTHING`.
-- **RF-02 [M] Real-Time Event Generation**: The system shall continuously stream synthetic JSON events to Apache Kafka topics (`ventas.pedidos.events` and `ventas.navegacion.raw`) via `event_producer.py`. The producer must feature token-bucket rate limiting (10-100 events/sec), realistic conversion funnel probabilities, and session correlation IDs.
+- **RF-01 [M] Synthetic OLTP Data Generation**: The system shall generate a synthetic relational e-commerce dataset via `oltp_seed.py` comprising `customers` (1,000 rows with realistic Spanish demographic attributes and PII), `orders` (50,000 order records distributed across the last 90 days), `order_items` (200,000 item details), and `campaigns` (100 marketing records). Generation must be idempotent using `INSERT ON CONFLICT DO NOTHING`.
+- **RF-02 [M] Real-Time Event Generation**: The system shall continuously stream synthetic JSON events to Apache Kafka topics (`sales.orders.events` and `marketing.clickstream.raw`) via `event_producer.py`. The producer must feature token-bucket rate limiting (10-100 events/sec), realistic conversion funnel probabilities, and session correlation IDs.
 - **RF-03 [M] Batch Ingestion to Bronze Lakehouse**: The system shall read relational tables from PostgreSQL via Spark JDBC, append audit metadata columns (`_ingested_at`, `_source`, `_batch_id`), and persist the records into raw Iceberg tables within `bronze.*` on MinIO without schema alteration.
 - **RF-04 [M] Real-Time Stream Ingestion**: The system shall ingest records from Kafka topics via Apache Flink, parse JSON payloads against predefined schemas, handle deserialization failures via an internal dead-letter queue, and commit windowed records into Iceberg streaming tables.
 
 ### 5.2 Medallion Architecture & Lakehouse Storage
 
 - **RF-05 [M] Bronze Raw Preservation**: The system shall maintain an immutable, append-only history of raw ingested data in Bronze Iceberg tables. No deduplication, business filtering, or data mutation shall be performed in this tier.
-- **RF-06 [M] Silver Data Cleansing & Deduplication**: The system shall process Bronze records into Silver tables (`silver.ventas.pedidos`, `silver.ventas.clientes`) by performing whitespace trimming, casting to contractual datatypes, eliminating exact and primary-key duplicates via window deduplication, and validating foreign key relationships.
-- **RF-07 [M] Gold Aggregation & Dimensional Modeling**: The system shall aggregate Silver data into high-value business KPI tables (`gold.ventas.metricas_diarias`, `gold.marketing.rendimiento_campanas`). Aggregations shall include daily GMV, order volume, cancellation rates, and customer lifetime value. *(Implementation note: sales Gold — `gold.sales.daily_metrics`, `gold.sales.customers` — is delivered and verified; marketing/finance Gold tables are PLANNED, not produced in this POC — see `docs/traceability-status.md`.)*
-- **RF-08 [M] ACID Operations & Time Travel**: The system shall support snapshot isolation, atomic commits, schema evolution, and time-travel queries across all Iceberg tables, verifiable via Spark and Trino metadata tables (e.g., `silver.ventas.pedidos$snapshots`).
+- **RF-06 [M] Silver Data Cleansing & Deduplication**: The system shall process Bronze records into Silver tables (`silver.sales.orders`, `silver.sales.customers`) by performing whitespace trimming, casting to contractual datatypes, eliminating exact and primary-key duplicates via window deduplication, and validating foreign key relationships.
+- **RF-07 [M] Gold Aggregation & Dimensional Modeling**: The system shall aggregate Silver data into high-value business KPI tables (`gold.sales.daily_metrics`, `gold.sales.customers`). Aggregations shall include daily GMV, order volume, cancellation rates, and customer lifetime value. *(Implementation note: sales Gold is delivered and verified; marketing/finance Gold tables are PLANNED, not produced in this POC — see `docs/traceability-status.md`.)*
+- **RF-08 [M] ACID Operations & Time Travel**: The system shall support snapshot isolation, atomic commits, schema evolution, and time-travel queries across all Iceberg tables, verifiable via Spark and Trino metadata tables (e.g., `silver.sales.orders$snapshots`).
 - **RF-09 [M] Centralized REST Catalog Registration**: All Iceberg namespaces and tables must be registered in Apache Polaris REST catalog, ensuring a single source of metadata truth across Spark, Flink, and Trino.
 
 ### 5.3 Processing & Serving Layer
 
 - **RF-10 [S] Kappa-Style Historical Reprocessing**: The stream processing and batch aggregation pipelines shall provide an idempotent replay capability (stream: `--start-offset earliest` / `--replay` CLI flags or broker offset resets; batch: full recomputation of derived tables on every run) allowing complete recomputation of derived tables without mutating raw Bronze history.
-- **RF-11 [M] Unified Batch + Stream Serving**: The system shall provide unified analytical views in Trino (`serving.ventas.revenue_unified`, `serving.marketing.funnel_unified`) that seamlessly execute a `UNION ALL` between historical Gold batch tables and active streaming buffers, applying partition filters to ensure zero data duplication.
-- **RF-12 [S] Interactive Cross-Domain SQL Querying**: Trino shall execute ad-hoc analytical queries joining assets across disparate domains (e.g., joining `ventas.pedidos` with `marketing.campanas` and `finanzas` budgets) with sub-3-second P99 query latency.
+- **RF-11 [M] Unified Batch + Stream Serving**: The system shall provide unified analytical views in Trino (`serving.sales.unified_revenue`, `serving.marketing.unified_campaign_performance`) that seamlessly execute a `UNION ALL` between historical Gold batch tables and active streaming buffers, applying partition filters to ensure zero data duplication.
+- **RF-12 [S] Interactive Cross-Domain SQL Querying**: Trino shall execute ad-hoc analytical queries joining assets across disparate domains (e.g., joining `sales.orders` with `marketing.campaigns` and `finance` budgets) with sub-3-second P99 query latency.
 
 ### 5.4 Data Mesh & Data Products
 
-- **RF-13 [M] Domain Autonomy & Decentralization**: The system codebase, schemas, and pipelines shall be segregated into distinct domain directories (`domains/ventas`, `domains/marketing`, `domains/finanzas`) reflecting domain boundaries and autonomous lifecycle management.
+- **RF-13 [M] Domain Autonomy & Decentralization**: The system codebase, schemas, and pipelines shall be segregated into distinct domain directories (`domains/sales`, `domains/marketing`, `domains/finance`) reflecting domain boundaries and autonomous lifecycle management.
 - **RF-14 [M] Formal Data Product Manifests**: Each data product shall contain a standardized `product.yaml` descriptor documenting product ownership, metadata, business SLA commitments, input ports, and output ports.
 - **RF-15 [M] Declarative Data Contracts**: Every product shall maintain an authoritative `contract.yaml` adhering to the Bitol Open Data Contract Standard, defining formal field types, validation constraints, privacy classifications, and registered consumers.
 - **RF-16 [M] Contract Backward Compatibility Verification**: The system shall validate that schema changes maintain strict backward compatibility (preventing field removal or datatype narrowing). Pre-commit or CI checks must reject breaking changes.
@@ -417,7 +430,7 @@ The system architecture separates enterprise data concerns across three orthogon
 
 - **RF-21 [M] Asset-Based Workflow Orchestration**: Pipeline workflows shall be defined in Dagster as a directed acyclic graph of Software-Defined Assets (SDAs), tracking asset materialization status and upstream/downstream dependencies.
 - **RF-22 [M] Platform Telemetry & Dashboards**: Prometheus shall collect container, JVM, and pipeline metrics. Grafana dashboards shall display pipeline execution latency, data quality pass rates, active memory consumption, and record throughput.
-- **RF-23 [M] Startup Execution Profiles**: The platform shall provide modular execution profiles (`Platform`, `Stream`, `Batch`, `Demo`) in `docker-compose.yml` or Kubernetes overlay manifests to prevent exceeding the 8 GB RAM memory budget constraint (RC-02).
+- **RF-23 [M] Startup Execution Profiles**: The platform shall provide modular execution profiles (`Platform`, `Stream`, `Batch`, `Demo`) in `infra/profiles/*.yaml` and the `infra/helm` charts to prevent exceeding the 8 GB RAM memory budget constraint (RC-02). (There is no `docker-compose.yml` in this repo; Helm profiles are the deployment target.)
 - **RF-24 [M] Automated End-to-End Demo Script**: The system shall provide an executable shell script (`scripts/demo.sh`) that orchestrates synthetic data generation, batch ingestion, streaming pipelines, quality gate execution, Trino verification queries, and lineage assertion with colored status output.
 - **RF-25 [M] Production-Grade Technical Documentation**: The repository shall contain complete architectural specifications, Architecture Decision Records (ADRs), concept-to-component mappings, and execution guides written in professional technical English.
 
@@ -599,9 +612,9 @@ The system architecture separates enterprise data concerns across three orthogon
 
 ### 8.1 Data Volume and Generation Bounds
 - **OLTP PostgreSQL Database**:
-  - `clientes`: exactly 1,000 records (~150 KB).
-  - `pedidos`: exactly 50,000 records (~5.5 MB).
-  - `lineas_pedido`: exactly 200,000 records (~18 MB).
+  - `customers`: exactly 1,000 records (~150 KB).
+  - `orders`: exactly 50,000 records (~5.5 MB).
+  - `order_items`: exactly 200,000 records (~18 MB).
   - Total relational disk footprint: **<= 50 MB**.
 - **Kafka Streaming Buffer**:
   - Event generation rate: 10 to 50 events/sec.
@@ -630,15 +643,15 @@ The system architecture separates enterprise data concerns across three orthogon
 - **Then** the script must complete with exit code `0`, and SQL verification queries must confirm exactly 1,000 customers, 50,000 orders, and 200,000 order lines without record duplication.
 
 #### Scenario AC-02: Quality Gate Enforces Business SLA & Contract (RF-18, RF-15)
-- **Given** a populated `silver.ventas.pedidos` Iceberg table,
+- **Given** a populated `silver.sales.orders` Iceberg table,
 - **When** `run_quality_gate.py` executes against `silver_orders_suite.json`,
 - **Then** the validation suite must verify that 100% of `id` values are unique, completeness across required fields meets or exceeds 0.98, all order amounts exceed 0.01, and the script exits with code `0`.
 - **When** synthetic corrupt rows (e.g., negative order amounts or null primary keys) are injected into the dataset,
 - **Then** `run_quality_gate.py` must halt pipeline progression, output a failure report, and return exit code `1`.
 
 #### Scenario AC-03: Unified Batch and Stream Query Execution (RF-11)
-- **Given** historical order records populated in `gold.ventas.metricas_diarias` and real-time streaming records ingested by Flink into `stream.ventas.pedidos_windowed`,
-- **When** a user queries `SELECT * FROM serving.ventas.revenue_unified` in Trino,
+- **Given** historical order records populated in `gold.sales.daily_metrics` and real-time streaming records ingested by Flink into `stream.sales.orders_windowed`,
+- **When** a user queries `SELECT * FROM serving.sales.unified_revenue` in Trino,
 - **Then** Trino must return a consolidated time series displaying both historical and real-time records without double counting or query syntax errors.
 
 #### Scenario AC-04: GDPR PII Masking Verification (RF-19)
@@ -660,7 +673,7 @@ The system architecture separates enterprise data concerns across three orthogon
 | **RF-01** | S1 | `data-generator/oltp_seed.py` | Automated CLI execution & SQL count |
 | **RF-02** | S1 | `data-generator/event_producer.py` | Kafka consumer message inspection |
 | **RF-03** | S1, S2, S3 | `pipelines/medallion/bronze_ingestion.py` | Iceberg Bronze metadata inspection |
-| **RF-04** | S1, S2, S4 | `pipelines/stream/flink_pedidos_stream.py` | Flink job execution & table query |
+| **RF-04** | S1, S2, S4 | `pipelines/stream/flink_orders_stream.py` | Flink job execution & table query |
 | **RF-05** | S2, S3 | `pipelines/medallion/bronze_ingestion.py` | Bronze table schema & audit check |
 | **RF-06** | S2, S3 | `pipelines/medallion/silver_transform.py` | Primary key deduplication check |
 | **RF-07** | S2, S3 | `pipelines/medallion/gold_aggregation.py` | KPI query verification in Trino |
@@ -669,7 +682,7 @@ The system architecture separates enterprise data concerns across three orthogon
 | **RF-10** | S3, S4 | Full recomputation in `gold_aggregation.py` / `rake stream:replay` (log replay) | Historical re-run idempotency test |
 | **RF-11** | S5 | `pipelines/serving/unified_view.sql` | Trino SQL `UNION ALL` query check |
 | **RF-12** | S5 | Trino Engine | Cross-domain multi-table join test |
-| **RF-13** | S6 | `domains/ventas`, `domains/marketing` | Directory structure & autonomy audit |
+| **RF-13** | S6 | `domains/sales`, `domains/marketing` | Directory structure & autonomy audit |
 | **RF-14** | S6 | `domains/*/data-products/*/product.yaml` | YAML schema validation |
 | **RF-15** | S6 | `domains/*/data-products/*/contract.yaml` | Bitol ODCS compliance validation |
 | **RF-16** | S6 | `quality/gates/run_quality_gate.py` | Backward compatibility test |
@@ -679,7 +692,7 @@ The system architecture separates enterprise data concerns across three orthogon
 | **RF-20** | S7 | Kyverno / Kubernetes manifests | Admission control test |
 | **RF-21** | S8 | Dagster SDA Definitions | Dagster UI asset materialization |
 | **RF-22** | S8 | Prometheus & Grafana | Dashboard HTTP 200 & metrics scrape |
-| **RF-23** | S8 | `docker-compose.yml` / Profiles | `docker stats` memory audit <= 8 GB |
+| **RF-23** | S8 | `infra/profiles/*.yaml` + `infra/helm` charts | `docker stats` memory audit <= 8 GB |
 | **RF-24** | All | `scripts/demo.sh` | End-to-end automated script pass |
 | **RF-25** | All | `README.md`, `docs/*` | Formal documentation review |
 

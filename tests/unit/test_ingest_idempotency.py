@@ -91,23 +91,15 @@ def test_ingest_bronze_idempotent(tmp_path):
     assert lineage.events[1]["job_name"] == "bronze_ingest_orders"
 
     count2 = len(storage.read_table("bronze.sales.orders"))
-    if res2["rows_ingested"] == 0:
-        # RF-01: identical content inserted 0 new rows, table did not grow
-        assert res2["idempotent_hit"] is True
-        assert count2 == count1
-    else:
-        # Is the port idempotent at all for byte-identical content?
-        probe = [{"probe_key": "same", "probe_value": "1"}]
-        storage.write_table("probe.rf01_content_hash", probe, mode="append")
-        second_probe_write = storage.write_table("probe.rf01_content_hash", probe, mode="append")
-        if second_probe_write == 0:
-            pytest.fail(
-                "Storage dedups byte-identical probe content but the Bronze re-run duplicated rows: "
-                "content hash likely includes audit columns (_batch_id/_ingested_at) which differ per run."
-            )
-        pytest.skip(
-            "LakehouseStoragePort content-hash idempotency (RF-01) not yet observed - storage adapter pending."
-        )
+    # RF-01: re-running ingestion over an identical snapshot is idempotent —
+    # the content hash excludes audit columns (_batch_id/_ingested_at), so
+    # byte-identical business content must write 0 rows (idempotent_hit).
+    assert res2["rows_ingested"] == 0, (
+        "Bronze re-run over an identical snapshot duplicated rows: "
+        "content hash likely includes audit columns (_batch_id/_ingested_at) which differ per run."
+    )
+    assert res2["idempotent_hit"] is True
+    assert count2 == count1
 
 
 def test_ingest_bronze_new_content_appends(tmp_path):

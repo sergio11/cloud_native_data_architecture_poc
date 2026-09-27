@@ -16,12 +16,13 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from src.ports.inbound import IngestBronzePort
 from src.ports.outbound import LakehouseStoragePort, LineagePublisherPort, OltpSourcePort
 
 logger = logging.getLogger("use_case.ingest_bronze")
 
 
-class IngestBronzeUseCase:
+class IngestBronzeUseCase(IngestBronzePort):
     """Orchestrates extraction of OLTP data into Bronze raw lakehouse storage."""
 
     def __init__(

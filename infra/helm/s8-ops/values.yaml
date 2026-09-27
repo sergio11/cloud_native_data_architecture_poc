@@ -1,3 +1,5 @@
+# DEFERRED (RF-23): this chart has NO templates/ — nothing below is rendered or
+# deployed today (dashboard JSON + alerts.yaml ship as plain assets only).
 grafana:
   enabled: true
   replicaCount: 1

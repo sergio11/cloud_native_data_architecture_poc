@@ -66,7 +66,7 @@ end
 desc 'Lint the codebase with ruff'
 task :lint do
   puts "\n\e[33m[Quality] Running ruff...\e[0m"
-  sh 'ruff check src tests pipelines governance quality'
+  sh 'ruff check src tests pipelines governance quality data-generator lineage'
   puts "\e[32mRuff: all checks passed.\e[0m"
 end
 

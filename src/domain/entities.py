@@ -7,29 +7,7 @@ Follows GRASP Information Expert and SOLID principles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
-
-
-class OrderStatus(str, Enum):
-    CONFIRMED = "confirmed"
-    PENDING = "pending"
-    SHIPPED = "shipped"
-    CANCELLED = "cancelled"
-
-
-class CustomerSegment(str, Enum):
-    PREMIUM = "premium"
-    STANDARD = "standard"
-    BASIC = "basic"
-
-
-class DataClassification(str, Enum):
-    PUBLIC = "public"
-    INTERNAL = "internal"
-    CONFIDENTIAL = "confidential"
-    PII = "pii"
-    RESTRICTED = "restricted"
 
 
 @dataclass(frozen=True)
@@ -49,27 +27,6 @@ class Customer:
             "email": self.email,
             "segment": self.segment,
             "registration_date": self.registration_date,
-            "created_at": self.created_at,
-        }
-
-
-@dataclass(frozen=True)
-class Order:
-    """Sales order entity."""
-    id: int
-    customer_id: int
-    total_amount: float
-    status: str
-    order_date: str
-    created_at: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "customer_id": self.customer_id,
-            "total_amount": self.total_amount,
-            "status": self.status,
-            "order_date": self.order_date,
             "created_at": self.created_at,
         }
 

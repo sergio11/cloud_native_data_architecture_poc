@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 from src.domain.aggregations import BusinessAggregator
+from src.ports.inbound import ProcessStreamPort
 from src.ports.outbound import EventBrokerPort, LakehouseStoragePort, LineagePublisherPort
 
 logger = logging.getLogger("use_case.process_stream")
@@ -17,8 +18,13 @@ logger = logging.getLogger("use_case.process_stream")
 CONSUMER_GROUP = "speed_layer"
 
 
-class ProcessStreamUseCase:
-    """Orchestrates stream window processing and Kappa replay logic."""
+class ProcessStreamUseCase(ProcessStreamPort):
+    """Orchestrates stream window processing and Kappa replay logic.
+
+    Incremental runs advance the ``speed_layer`` cursor for observability but
+    rebuild the whole speed table from the full event log (overwrite) so that
+    tumbling windows shared across batches never fragment into partial rows.
+    """
 
     def __init__(
         self,
@@ -38,9 +44,24 @@ class ProcessStreamUseCase:
     ) -> dict[str, Any]:
         """Consumes stream events and rebuilds/updates the speed buffer table.
 
-        replay=False: consumes only not-yet-consumed events for the
-        ``speed_layer`` consumer group and appends their windows; when there is
-        nothing new it returns ``NO_EVENTS`` without writing anything.
+        replay=False (incremental): advances the ``speed_layer`` consumer-group
+        cursor (``max_messages=500``) to count newly arrived events
+        (``events_consumed``) for observability; when there is nothing new it
+        returns ``NO_EVENTS`` without writing anything. When new events exist
+        the FULL speed table is rebuilt deterministically: the entire topic
+        log is re-consumed with ``replay=True`` (which never touches cursors),
+        all 5-minute tumbling windows are recomputed from scratch via
+        ``BusinessAggregator.aggregate_tumbling_window`` and the table is
+        written with ``mode='overwrite'``. ``windows_generated`` /
+        ``windows_written`` therefore report full-table recompute counts, not
+        just the delta of the latest batch.
+
+        Rationale: the event log is tiny at POC scale, so a full recompute per
+        incremental run is cheap, idempotent and eliminates partial-window
+        fragmentation (events of the same window arriving in different runs
+        would otherwise produce multiple partial rows for the same
+        ``(window_start, status)`` key); the cursor still tracks consumption
+        for observability.
 
         replay=True: FULL RECOMPUTE (RF-10) - rewinds to offset 0, consumes the
         entire topic log, recomputes every tumbling window from scratch and
@@ -53,30 +74,39 @@ class ProcessStreamUseCase:
         # 1. Consume events from the persistent log (replay rewinds to earliest offset RF-10)
         if replay:
             events = self._broker.consume_events(topic=topic, max_messages=None, replay=True)
+            events_consumed = len(events)
         else:
-            events = self._broker.consume_events(
+            incremental = self._broker.consume_events(
                 topic=topic, max_messages=500, replay=False, consumer_group=CONSUMER_GROUP,
             )
-        logger.info("Consumed %d stream events from topic '%s'", len(events), topic)
+            logger.info("Consumed %d stream events from topic '%s'", len(incremental), topic)
 
-        if not events:
-            return {
-                "topic": topic,
-                "target_table": target_table,
-                "events_consumed": 0,
-                "windows_generated": 0,
-                "windows_written": 0,
-                "mode": mode,
-                "status": "NO_EVENTS",
-            }
+            if not incremental:
+                return {
+                    "topic": topic,
+                    "target_table": target_table,
+                    "events_consumed": 0,
+                    "windows_generated": 0,
+                    "windows_written": 0,
+                    "mode": mode,
+                    "status": "NO_EVENTS",
+                }
+            events_consumed = len(incremental)
+            # Full deterministic recompute from the entire topic log (does not touch cursors).
+            events = self._broker.consume_events(topic=topic, max_messages=None, replay=True)
+            logger.info(
+                "Recomputing speed table from full log (%d events, %d new)",
+                len(events),
+                events_consumed,
+            )
 
         # 2. Compute 5-minute tumbling windows from event time (RF-09)
         windows = BusinessAggregator.aggregate_tumbling_window(events, window_size_seconds=300)
         logger.info("Calculated %d window aggregations", len(windows))
 
-        # 3. Write/Update Speed layer table (append incremental, overwrite on full replay)
-        write_mode = "overwrite" if replay else "append"
-        written = self._storage.write_table(target_table, windows, mode=write_mode)
+        # 3. Write Speed layer table (overwrite on both replay and incremental
+        # full recompute; incremental overwrites to avoid partial-window fragmentation)
+        written = self._storage.write_table(target_table, windows, mode="overwrite")
 
         # 4. Emit OpenLineage metadata
         self._lineage.emit_job_event(
@@ -89,7 +119,7 @@ class ProcessStreamUseCase:
         return {
             "topic": topic,
             "target_table": target_table,
-            "events_consumed": len(events),
+            "events_consumed": events_consumed,
             "windows_generated": len(windows),
             "windows_written": written,
             "mode": mode,

@@ -14,14 +14,15 @@ However, a core architectural constraint of this POC is **Constraint RC-02**: th
 Running all services and heavy distributed compute engines (Spark and Flink) concurrently within 8 GB RAM leads to immediate memory exhaustion, heavy swap thrashing, or catastrophic termination via the Linux Out-Of-Memory (OOM) killer.
 
 ## Decision
-We implement a **modular operational profiling strategy** using Docker Compose profiles and Kubernetes resource overlays. The architecture establishes four distinct operational profiles, enforcing strict container memory ceilings (`mem_limit`) and sequencing resource-heavy compute engines.
+We implement a **modular operational profiling strategy** using Helm values overlays (`infra/profiles/*.yaml`, applied by `scripts/profile-up.sh <profile>` with reverted by `scripts/profile-down.sh`). The architecture establishes four distinct operational profiles, enforcing per-container requests/limits and sequencing resource-heavy compute engines. (Historical note: earlier drafts described Docker Compose profiles with `mem_limit`; the Helm/K8s profile set is the deployment target — there is no Compose file in this repo.)
 
 ### 1. Operational Execution Profiles (RF-23)
 
-1. **`platform` Profile (Core Foundations - 4.4 GB RAM)**:
-   - Boots shared baseline services: PostgreSQL (`256M`), Kafka (`512M`), MinIO (`256M`), Polaris Catalog (`512M`), Marquez (`512M`), Dagster (`512M`), Prometheus/Grafana (`384M`), and Trino (`1536M`).
+1. **`platform` Profile (Core Foundations — `targetRamMb: 3072` per `infra/profiles/platform.yaml`)**:
+   - Deploys exactly what `scripts/profile-up.sh platform` installs: charts `s1-ingestion` (PostgreSQL), `s2-lakehouse` (MinIO + Polaris), `s7-fabric` (Marquez).
    - Keeps compute engines (Spark and Flink) idle or stopped.
    - Used for interactive SQL exploration, catalog discovery, contract authoring, and dashboard inspection.
+   - Honesty note (docs follow code): `infra/profiles/platform.yaml` also carries `s6-mesh`/`s4-kafka` values entries, but the `platform` branch of the script does **not** install the `s6-mesh`/`s8-ops` charts — those deploy only under the `demo` profile (DEFERRED for the platform branch).
 
 2. **`stream` Profile (Real-Time Ingestion & Processing - 6.0 GB RAM)**:
    - Keeps `platform` core services running.
@@ -40,6 +41,7 @@ We implement a **modular operational profiling strategy** using Docker Compose p
    - Runs contracts validation, the pure-Python Medallion chain to Gold, event-log streaming with tumbling windows, fail-closed quality gates, the unified serving query, and the automated test suite (local profile; K8s engines are the deployment target, not the executor).
 
 ```
+> Honesty note: the table below is the original pre-Helm sizing sketch (Docker-Compose era). The enforced source of truth is `infra/profiles/*.yaml` (`targetRamMb`, per-service requests/limits) consumed by `scripts/profile-up.sh`; K8s is the deployment target.
 +-----------------------------------------------------------------------------------------+
 |                               MEMORY PROFILE DISTRIBUTIONS                              |
 +--------------------------+--------------------+-------------------+---------------------+
@@ -76,7 +78,7 @@ We implement a **modular operational profiling strategy** using Docker Compose p
 
 ### Negative
 - **Sequential Execution**: Real-time Flink streaming and heavy Spark batch transformations cannot run concurrently at full scale on an 8 GB machine; they must be tested sequentially or with scaled-down concurrency.
-- **Profile Switching**: Operators must use profile flags (e.g., `docker compose --profile stream up`) when testing specific components.
+- **Profile Switching**: Operators must use profile flags (e.g., `scripts/profile-up.sh stream`, i.e. Helm `-f infra/profiles/stream.yaml`) when testing specific components.
 
 ## Alternatives Considered
 - **Cloud-Only Sandbox (AWS/GCP)**: Rejected because it violates Constraint RC-01 (100% open source and local independence) and introduces cloud billing friction.
@@ -84,4 +86,4 @@ We implement a **modular operational profiling strategy** using Docker Compose p
 
 ## Compliance & Verification
 - **Functional Requirements**: Satisfies RF-23, RF-24, and RNF-07.
-- **Verification**: Verified by polling `docker stats --no-stream` across all profile activations during `./scripts/demo.sh`.
+- **Verification**: DEFERRED on K8s — `scripts/demo.sh` runs the local Python flow only (no containers, no `docker stats`); per-profile RAM stays a declared target in `infra/profiles/*.yaml`, measurable only on the kind cluster (`scripts/setup.sh`).

@@ -24,7 +24,7 @@ We select a **Hybrid Lambda + Kappa Architecture** that synthesizes the strength
    - **Batch Layer (Lambda)**: Powered by **Apache Spark 3.5**. Ingests relational snapshots from PostgreSQL, transforms raw data across Bronze and Silver Medallion tiers, and produces dimensional Gold models with high computational efficiency.
    - **Speed / Stream Layer (Kappa)**: Powered by **Apache Flink 1.18**. Ingests high-velocity JSON events from Apache Kafka, computes 5-minute tumbling window metrics, and writes streaming buffers directly to Apache Iceberg.
 2. **Kappa-Style Historical Replay (RF-10)**:
-   - Both the batch pipelines (`gold_aggregation.py` recomputes Gold fully from Silver on every run — that full recomputation *is* the Lambda replay; no `--replay` flag exists) and the streaming pipelines (cursor-free full-log replay via `flink_orders_stream.py --replay`) support idempotent historical recomputation. If business algorithms change, data can be reprocessed from Bronze or the event log without altering raw historical records.
+   - Both the batch pipelines (`gold_aggregation.py` recomputes Gold fully from Silver on every run — that full recomputation *is* the Lambda replay; no `--replay` flag exists) and the streaming pipelines (cursor-free full-log replay via `flink_orders_stream.py --start-offset earliest` / `--replay`, i.e. `rake stream:replay`) support idempotent historical recomputation. If business algorithms change, data can be reprocessed from Bronze or the event log without altering raw historical records.
 3. **Unified Serving Layer (Trino)**:
    - Rather than maintaining complex dual-view reconciliation in application code, the serving layer executes a unified SQL query (`src/use_cases/query_serving.py`, mirrored in `pipelines/serving/unified_view.sql` for Trino). The query fuses both tiers with a `UNION ALL` plus an anti-join: historical data is served from the Gold batch tables, while stream rows only fill `(order_date, status)` keys **absent** from batch — the exact batch values win on collision, which guarantees zero record duplication (no date-boundary heuristic).
 
@@ -50,8 +50,8 @@ We select a **Hybrid Lambda + Kappa Architecture** that synthesizes the strength
                      \                                  /
                       v                                v
      +------------------------------------------------------------------+
-     |                 Trino Unified Serving Layer                      |
-     |       (serving.ventas.revenue_unified: UNION ALL with Filter)    |
+      |                 Trino Unified Serving Layer                      |
+      |   (iceberg.serving.sales_unified_revenue: UNION ALL with anti-join)  |
      +------------------------------------------------------------------+
 ```
 
@@ -59,7 +59,7 @@ We select a **Hybrid Lambda + Kappa Architecture** that synthesizes the strength
 
 ### Positive
 - **Optimal Engine Allocation**: Heavy relational transformations, deduplication, and PII masking are handled by Spark, which excels at memory-efficient batch processing. Event-driven windowing is handled by Flink, which excels at low-latency streaming.
-- **Single Query Interface**: Consumers query a standard Trino view (`serving.ventas.revenue_unified`) without needing to understand the underlying physical storage or whether data originated from batch or stream.
+- **Single Query Interface**: Consumers query a standard Trino view (`iceberg.serving.sales_unified_revenue`) without needing to understand the underlying physical storage or whether data originated from batch or stream.
 - **Idempotency & Replayability**: Reprocessing historical data does not require manual pipeline recreation; the stream pipeline recomputes deterministically with `--replay`, and every Gold run is already a full recomputation.
 - **Zero Double-Counting**: An anti-join on `(order_date, status)` in the serving SQL prevents overlapping records between Gold batch partitions and active stream buffers (batch wins on collision).
 
@@ -73,4 +73,4 @@ We select a **Hybrid Lambda + Kappa Architecture** that synthesizes the strength
 
 ## Compliance & Verification
 - **Functional Requirements**: Satisfies RF-03, RF-04, RF-10, and RF-11.
-- **Verification**: Verified via `pipelines/serving/unified_view.sql` and the automated test scenario in `scripts/demo.sh`.
+- **Verification**: Verified via `pipelines/serving/unified_view.sql` and the local end-to-end flow in `scripts/demo.sh` (pure-Python drivers + `pytest`; K8s Spark/Flink engines are a deployment target, not the executor).

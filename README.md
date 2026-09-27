@@ -94,16 +94,16 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 | :--- | :--- | :--- |
 | **Medallion Architecture** | Apache Iceberg + MinIO S3 | [`pipelines/medallion/bronze_ingestion.py`](pipelines/medallion/bronze_ingestion.py)<br>[`pipelines/medallion/silver_transform.py`](pipelines/medallion/silver_transform.py)<br>[`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) |
 | **Lakehouse Table Format** | Apache Iceberg v2 Specification | Snappy-compressed Parquet data with snapshot isolation, hidden partitioning, and time-travel capability. |
-| **Lakehouse Catalog** | Apache Polaris (incubating) | REST catalog on port `8181` mapped in [`pipelines/serving/catalog_registration.py`](pipelines/serving/catalog_registration.py). |
+| **Lakehouse Catalog** | Apache Polaris (incubating) | REST catalog (Polaris default port `8181` in the K8s profile) synced via [`pipelines/serving/catalog_registration.py`](pipelines/serving/catalog_registration.py) — which reads `POLARIS_URL`/`MARQUEZ_URL` from the environment and registers only tables actually produced by the core use cases. |
 | **Lambda Architecture** | Spark Batch + Flink Streaming | Unified querying via `UNION ALL` in [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql). |
-| **Kappa Architecture** | Kafka Replay + Flink Streaming | Historical offset rewind and `--replay` backfill in [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py). |
+| **Kappa Architecture** | Kafka Replay + Flink Streaming | Full-log replay via `--replay` / `--start-offset earliest` in [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (or `rake stream:replay`). Batch needs no replay flag: every `gold_aggregation.py` run is already a full recomputation from Silver. |
 | **Serving Layer** | Trino SQL Query Engine | Single SQL interface over batch and streaming buffers with sub-3s P99 latency. |
 | **Data Mesh** | Domain Autonomy Layout | Segregated domain boundaries in [`domains/sales`](domains/sales), [`domains/marketing`](domains/marketing), and [`domains/finance`](domains/finance). |
 | **Data Products** | Product Manifests (`product.yaml`) | Machine-readable manifests specifying owners, metadata, SLAs, and ports. |
 | **Data Contracts** | Bitol ODCS (`contract.yaml`) | Authoritative schemas, quality rules, and backward-compatibility policies. |
 | **Data Fabric & Lineage** | OpenLineage + Marquez | Automated runtime metadata harvesting and DAG lineage visualization on port `5000`. |
 | **Data Quality Gates** | Great Expectations | Gatekeeper script [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) blocking failed runs. |
-| **Data Governance** | GDPR PII Masking Engine | Irreversible SHA-256 email hashing and name initial truncation before Gold tier. |
+| **Data Governance** | GDPR PII Masking Engine | Irreversible SHA-256 email hashing and name initial truncation enforced in [`src/domain/privacy.py`](src/domain/privacy.py) and applied by [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) before Gold tier (driven by [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py)). |
 
 ---
 
@@ -198,6 +198,7 @@ State lives in `data/` (git-ignored SQLite + lineage audit log). Reset with `rm 
 ```
 poc_data_engineering/
 ├── README.md                                  # Root architectural documentation & quickstart
+├── Rakefile                                   # Cross-platform task runner (demo, medallion, stream, serving, test, lint)
 ├── LICENSE                                    # MIT License (100% Open Source)
 ├── data-generator/                            # S1: Synthetic data generators
 │   ├── oltp_seed.py                          # PostgreSQL relational seeder (Faker, psycopg2)
@@ -214,10 +215,19 @@ poc_data_engineering/
 │   │           ├── contract.yaml
 │   │           ├── product.yaml
 │   │           └── schema.json
-│   └── marketing/                            # Marketing domain
-│       └── data-products/
-│           ├── campaigns/                    # Campaigns data product
-│           └── leads/                        # Leads & conversion data product
+│   ├── marketing/                            # Marketing domain
+│   │   └── data-products/
+│   │       ├── campaigns/                    # Campaigns data product
+│   │       └── leads/                        # Leads & conversion data product
+│   └── finance/                              # Finance domain (downstream consumer: budgets, closings)
+├── src/                                       # Hexagonal core: domain, use cases, ports, adapters, container
+├── tests/                                     # Unit + integration tests (RF acceptance scenarios)
+├── scripts/                                   # Operational scripts (demo.sh, profile-up/down, setup)
+├── governance/                                # Data contracts validation (contract_validator.py), policies, schemas
+├── infra/                                     # K8s deployment target: helm charts per subsystem + kind + profiles
+│   ├── helm/                                 # One chart per subsystem (s1-ingestion … s8-ops)
+│   ├── kind/                                 # Local kind cluster config + setup script
+│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/demo)
 ├── pipelines/                                 # S3, S4, S5: Processing & Serving pipelines
 │   ├── medallion/                            # S3: Spark Batch Medallion pipelines
 │   │   ├── bronze_ingestion.py               # PostgreSQL -> Iceberg Bronze snapshot
@@ -252,33 +262,36 @@ poc_data_engineering/
 
 ## Acceptance Criteria Overview (RF-01 to RF-25)
 
+> Canonical numbering: [`srs.txt`](srs.txt) §5 is the source of truth. The table below follows it
+> (the legacy English `docs/srs.md` uses a different RF numbering — see the NOTICE at the top of that file).
+
 | Req ID | Requirement Summary | Priority | Implementation Component |
 | :--- | :--- | :---: | :--- |
-| **RF-01** | Synthetic OLTP data generation (PostgreSQL 50k orders, 1k clients) | `[M]` | [`data-generator/oltp_seed.py`](data-generator/oltp_seed.py) |
-| **RF-02** | Real-time event generation (Kafka clickstream with rate limiting) | `[M]` | [`data-generator/event_producer.py`](data-generator/event_producer.py) |
-| **RF-03** | Batch ingestion from PostgreSQL to Iceberg Bronze | `[M]` | [`pipelines/medallion/bronze_ingestion.py`](pipelines/medallion/bronze_ingestion.py) |
-| **RF-04** | Real-time streaming ingestion from Kafka to Iceberg via Flink | `[M]` | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) |
-| **RF-05** | Raw data preservation in append-only Bronze Lakehouse | `[M]` | Bronze tables on MinIO S3 object storage |
-| **RF-06** | Data cleansing, typing, and deduplication in Silver layer | `[M]` | [`pipelines/medallion/silver_transform.py`](pipelines/medallion/silver_transform.py) |
-| **RF-07** | Gold layer business aggregations and dimensional modeling | `[M]` | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) |
-| **RF-08** | ACID Lakehouse transactions, snapshots, and time-travel | `[M]` | Apache Iceberg v2 open table format |
-| **RF-09** | Centralized REST catalog metadata management | `[M]` | Apache Polaris (incubating) REST catalog |
-| **RF-10** | Kappa-style historical replay & reprocessing capability | `[S]` | `--replay` flag in batch + Kafka offset rewind |
-| **RF-11** | Unified serving layer merging historical batch & real-time stream | `[M]` | [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql) in Trino |
-| **RF-12** | Interactive ad-hoc cross-domain analytical SQL querying | `[S]` | Trino federated queries across domain catalogs |
-| **RF-13** | Domain decentralization and autonomous boundaries | `[M]` | Segregated workspaces in `domains/*` |
-| **RF-14** | Formal Data Product manifests defining ownership and SLAs | `[M]` | `product.yaml` descriptors |
-| **RF-15** | Declarative Data Contracts adhering to Bitol ODCS v2 | `[M]` | `contract.yaml` files across all products |
-| **RF-16** | Automated contract backward compatibility verification | `[M]` | Pre-flight schema validation checks |
-| **RF-17** | End-to-end automated metadata and lineage harvesting | `[M]` | OpenLineage emitters to Marquez API |
-| **RF-18** | Automated quality gates blocking corrupted pipeline runs | `[M]` | [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) |
-| **RF-19** | Automated GDPR PII masking (SHA-256 email hashing) | `[M]` | PII masking logic in `gold_aggregation.py` |
-| **RF-20** | Policy-as-code governance enforcement | `[S]` | Kyverno container admission policies |
-| **RF-21** | Asset-based workflow orchestration (Software-Defined Assets) | `[M]` | Dagster asset DAG & scheduler |
-| **RF-22** | Infrastructure and pipeline monitoring telemetry | `[M]` | Prometheus scrapers & Grafana dashboards |
-| **RF-23** | Execution profiling optimizing for 8 GB RAM constraint | `[M]` | Docker Compose profiles (`platform`, `stream`, `batch`) |
-| **RF-24** | Automated end-to-end interactive demo validation script | `[M]` | [`scripts/demo.sh`](scripts/demo.sh) |
-| **RF-25** | Complete production-grade technical documentation & ADRs | `[M]` | Directory [`docs/`](docs/) |
+| **RF-01** | Ingesta OLTP periódica e idempotente hacia Bronze | `[M]` | [`pipelines/medallion/bronze_ingestion.py`](pipelines/medallion/bronze_ingestion.py) |
+| **RF-02** | Ingesta de eventos de dominio en el log con timestamp y procedencia | `[M]` | [`data-generator/event_producer.py`](data-generator/event_producer.py), [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) |
+| **RF-03** | Separación lógica estricta Bronze → Silver → Gold, sin saltos | `[M]` | [`pipelines/medallion/`](pipelines/medallion/) |
+| **RF-04** | Silver: limpieza, tipado, deduplicación y validaciones sobre Bronze | `[M]` | [`pipelines/medallion/silver_transform.py`](pipelines/medallion/silver_transform.py) |
+| **RF-05** | Gold: métricas/agregados de negocio listos para consumo | `[M]` | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) |
+| **RF-06** | Quality gates entre capas: si no cumplen umbrales, no se publica y se notifica | `[M]` | [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) |
+| **RF-07** | ACID, time travel y evolución de esquema controlada | `[M]` | Apache Iceberg in K8s profile; SQLite adapter with row-version time travel locally (`src/adapters/storage/`) |
+| **RF-08** | Batch layer: recálculo completo del histórico, programado y manual | `[M]` | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) (full recomputation from Silver on every run) |
+| **RF-09** | Stream layer: agregados en ventana con latencia ≤ 5 s | `[M]` | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (5-min tumbling windows) |
+| **RF-10** | Kappa: regenerar resultados releyendo el log desde su origen | `[M]` | `rake stream:replay` / `--start-offset earliest` / `--replay` in [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py); batch needs no flag (full recompute by design) |
+| **RF-11** | Serving layer: una única consulta fusiona batch exacto + ventana reciente | `[M]` | [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql) + [`pipelines/serving/run_serving_query.py`](pipelines/serving/run_serving_query.py) |
+| **RF-12** | Reproceso completo de cualquier capa sin pérdida de consistencia | `[S]` | Full stream replay + Gold full recomputation (idempotent rewrites) |
+| **RF-13** | Publicación declarativa de productos por dominio | `[M]` | `product.yaml` manifests in [`domains/`](domains/) |
+| **RF-14** | Productos encontrables y autoexplicativos en catálogo | `[M]` | `product.yaml` + Marquez catalog in K8s profile (`infra/helm/s7-fabric`) |
+| **RF-15** | Contratos máquina-legibles validados; ruptura bloquea publicación y alerta | `[M]` | [`governance/contract_validator.py`](governance/contract_validator.py) (also enforced in CI) |
+| **RF-16** | Consumo cross-dominio self-service sin intermediación del productor | `[M]` | Serving layer ([`pipelines/serving/`](pipelines/serving/)) |
+| **RF-17** | Políticas globales federadas aplicadas automáticamente (dueño, PII, nombres) | `[S]` | [`governance/policies/`](governance/policies/) + Kyverno in K8s (`infra/helm/s6-mesh`) |
+| **RF-18** | Cuotas/aislamiento por dominio en la plataforma compartida | `[S]` | [`infra/helm/s6-mesh/`](infra/helm/s6-mesh/) (K8s `ResourceQuota`/`LimitRange` per domain) |
+| **RF-19** | Linaje end-to-end consultable, alimentado automáticamente | `[M]` | [`lineage/`](lineage/) + Marquez (local audit trail `data/lineage_audit.jsonl`) |
+| **RF-20** | Metadatos activos: alertas ante cambios de esquema o degradación de calidad | `[S]` | [`lineage/config/`](lineage/config/) alert service (K8s profile) |
+| **RF-21** | Seguridad/clasificación embebida en el flujo, no en documentación externa | `[S]` | [`src/domain/privacy.py`](src/domain/privacy.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) (SHA-256 email hashing, name masking) |
+| **RF-22** | Pipelines orquestables: programables, a demanda, con estado observable | `[M]` | [`Rakefile`](Rakefile) tasks + Dagster assets ([`pipelines/orchestration/`](pipelines/orchestration/)) |
+| **RF-23** | Panel único: estado de pipelines, lag de stream, cumplimiento de calidad | `[S]` | Grafana/Prometheus assets in [`infra/helm/s8-ops/`](infra/helm/s8-ops/) selected via [`infra/profiles/`](infra/profiles/) (no docker-compose exists in this repo) |
+| **RF-24** | Comando único de demo end-to-end reproducible | `[M]` | [`scripts/demo.sh`](scripts/demo.sh) / `rake demo` |
+| **RF-25** | Documentación de arquitectura apta para portfolio | `[M]` | Directory [`docs/`](docs/) |
 
 ---
 

@@ -13,19 +13,19 @@ This document provides a comprehensive, bidirectional mapping between the founda
 
 | Modern Data Concept | Key Theoretical Tenet | Repository Implementation | Primary Files & Artifacts |
 | :--- | :--- | :--- | :--- |
-| **Medallion Architecture** | Progressive raw-to-refined data curation across Bronze, Silver, and Gold tiers. | Multi-tier Iceberg tables stored on MinIO object storage. | [`pipelines/medallion/bronze_ingestion.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/bronze_ingestion.py)<br>[`pipelines/medallion/silver_transform.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/silver_transform.py)<br>[`pipelines/medallion/gold_aggregation.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/gold_aggregation.py) |
-| **Lakehouse Table Format** | ACID transactions, snapshot isolation, partition evolution, and time-travel on object storage. | Apache Iceberg v2 open specification with Parquet columnar storage. | Spark Iceberg Catalog config in [`pipelines/medallion/bronze_ingestion.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/bronze_ingestion.py)<br>Catalog metadata sync in [`pipelines/serving/catalog_registration.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/serving/catalog_registration.py) |
-| **Lakehouse REST Catalog** | Open, engine-agnostic metadata management decoupling catalog service from storage. | Apache Polaris (incubating) REST catalog. | [`pipelines/serving/catalog_registration.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/serving/catalog_registration.py)<br>Trino catalog configuration |
-| **Lambda Architecture** | Separate batch (accuracy) and speed (latency) processing layers unified at query time. | Spark batch ETL + Flink streaming windowing joined via Trino views. | [`pipelines/serving/unified_view.sql`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/serving/unified_view.sql)<br>[`docs/architecture/adr/ADR-001-lambda-kappa-hybrid.md`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/docs/architecture/adr/ADR-001-lambda-kappa-hybrid.md) |
-| **Kappa Architecture** | Everything is an event stream; historical backfills executed via stream replay. | Consumer-cursor rewinds + full-log replay (`flink_orders_stream.py --replay`); batch side = full Gold recomputation on every run (no flag needed). | [`pipelines/stream/flink_orders_stream.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/stream/flink_orders_stream.py)<br>[`pipelines/medallion/gold_aggregation.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/gold_aggregation.py) |
-| **Unified Serving Layer** | Single SQL query surface abstracting storage topology and data freshness latency. | One anti-join SQL (`UNION ALL` + `NOT EXISTS` on `(order_date, status)`; batch wins, no double counting) — Trino if `TRINO_HOST`, else embedded SQLite. | [`pipelines/serving/unified_view.sql`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/serving/unified_view.sql) |
-| **Data Mesh** | Decentralized domain ownership, data as a product, and self-serve platform. | Domain-segregated repositories (`sales`, `marketing`, `finance`). | [`domains/sales/`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/sales/)<br>[`domains/marketing/`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/marketing/)<br>[`docs/architecture/adr/ADR-003-multi-domain-mesh.md`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/docs/architecture/adr/ADR-003-multi-domain-mesh.md) |
-| **Data Products** | Autonomous data delivery nodes with code, metadata, schemas, SLAs, and ports. | Standardized `product.yaml` descriptors and schema specifications. | [`domains/sales/data-products/orders/product.yaml`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/sales/data-products/orders/product.yaml)<br>[`domains/marketing/data-products/campaigns/product.yaml`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/marketing/data-products/campaigns/product.yaml) |
-| **Data Contracts** | Declarative producer-consumer agreements defining schema, quality rules, and terms. | Bitol Open Data Contract Standard (ODCS) YAML specifications. | [`domains/sales/data-products/orders/contract.yaml`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/sales/data-products/orders/contract.yaml)<br>[`domains/marketing/data-products/campaigns/contract.yaml`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/marketing/data-products/campaigns/contract.yaml) |
-| **Data Fabric & Lineage** | Active metadata harvesting generating dynamic, end-to-end lineage graphs. | OpenLineage Spark/Flink listeners emitting events to Marquez. | OpenLineage emitters in [`pipelines/medallion/bronze_ingestion.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/bronze_ingestion.py)<br>Marquez client in [`pipelines/serving/catalog_registration.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/serving/catalog_registration.py) |
-| **Data Quality Gates** | Programmatic test suites blocking pipeline progression upon quality threshold breaches. | Fail-closed engine over Great-Expectations-format suites (missing suite / unknown type / empty data also block). | [`quality/gates/run_quality_gate.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/quality/gates/run_quality_gate.py)<br>[`quality/expectations/silver_orders_suite.json`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/quality/expectations/silver_orders_suite.json) |
-| **Privacy & Governance** | GDPR Article 25 privacy-by-design, pseudonymization, and PII cryptographic hashing. | SHA-256 email hashing, name initial masking, and year-only truncation before Gold tier. | [`pipelines/medallion/gold_aggregation.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/gold_aggregation.py)<br>PII tags in `contract.yaml` |
-| **Modern Orchestration** | Software-Defined Assets (SDAs) tracking data lineage, materializations, and freshness. | Dagster asset graph coordinating pipelines and profiles. | Dagster asset definitions & execution profiles in [`docs/architecture/overview.md`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/docs/architecture/overview.md) |
+| **Medallion Architecture** | Progressive raw-to-refined data curation across Bronze, Silver, and Gold tiers. | Multi-tier Iceberg tables stored on MinIO object storage. | [`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py)<br>[`pipelines/medallion/silver_transform.py`](../pipelines/medallion/silver_transform.py)<br>[`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py) |
+| **Lakehouse Table Format** | ACID transactions, snapshot isolation, partition evolution, and time-travel on object storage. | Apache Iceberg v2 open specification with Parquet columnar storage. | Spark Iceberg Catalog config in [`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py)<br>Catalog metadata sync in [`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py) |
+| **Lakehouse REST Catalog** | Open, engine-agnostic metadata management decoupling catalog service from storage. | Apache Polaris (incubating) REST catalog. | [`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py)<br>Trino catalog configuration |
+| **Lambda Architecture** | Separate batch (accuracy) and speed (latency) processing layers unified at query time. | Spark batch ETL + Flink streaming windowing joined via Trino views. | [`pipelines/serving/unified_view.sql`](../pipelines/serving/unified_view.sql)<br>[`docs/architecture/adr/ADR-001-lambda-kappa-hybrid.md`](architecture/adr/ADR-001-lambda-kappa-hybrid.md) |
+| **Kappa Architecture** | Everything is an event stream; historical backfills executed via stream replay. | Consumer-cursor rewinds + full-log replay (`flink_orders_stream.py --replay`); batch side = full Gold recomputation on every run (no flag needed). | [`pipelines/stream/flink_orders_stream.py`](../pipelines/stream/flink_orders_stream.py)<br>[`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py) |
+| **Unified Serving Layer** | Single SQL query surface abstracting storage topology and data freshness latency. | One anti-join SQL (`UNION ALL` + `NOT EXISTS` on `(order_date, status)`; batch wins, no double counting) — Trino if `TRINO_HOST`, else embedded SQLite. | [`pipelines/serving/unified_view.sql`](../pipelines/serving/unified_view.sql) |
+| **Data Mesh** | Decentralized domain ownership, data as a product, and self-serve platform. | Domain-segregated repositories (`sales`, `marketing`, `finance`). | [`domains/sales/`](../domains/sales/)<br>[`domains/marketing/`](../domains/marketing/)<br>[`docs/architecture/adr/ADR-003-multi-domain-mesh.md`](architecture/adr/ADR-003-multi-domain-mesh.md) |
+| **Data Products** | Autonomous data delivery nodes with code, metadata, schemas, SLAs, and ports. | Standardized `product.yaml` descriptors and schema specifications. | [`domains/sales/data-products/orders/product.yaml`](../domains/sales/data-products/orders/product.yaml)<br>[`domains/marketing/data-products/campaigns/product.yaml`](../domains/marketing/data-products/campaigns/product.yaml) |
+| **Data Contracts** | Declarative producer-consumer agreements defining schema, quality rules, and terms. | Bitol Open Data Contract Standard (ODCS) YAML specifications. | [`domains/sales/data-products/orders/contract.yaml`](../domains/sales/data-products/orders/contract.yaml)<br>[`domains/marketing/data-products/campaigns/contract.yaml`](../domains/marketing/data-products/campaigns/contract.yaml) |
+| **Data Fabric & Lineage** | Active metadata harvesting generating dynamic, end-to-end lineage graphs. | OpenLineage Spark/Flink listeners emitting events to Marquez. | OpenLineage emitters in [`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py)<br>Marquez client in [`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py) |
+| **Data Quality Gates** | Programmatic test suites blocking pipeline progression upon quality threshold breaches. | Fail-closed engine over Great-Expectations-format suites (missing suite / unknown type / empty data also block). | [`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)<br>[`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json) |
+| **Privacy & Governance** | GDPR Article 25 privacy-by-design, pseudonymization, and PII cryptographic hashing. | SHA-256 email hashing, name initial masking, and year-only truncation before Gold tier. | [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py)<br>PII tags in `contract.yaml` |
+| **Modern Orchestration** | Software-Defined Assets (SDAs) tracking data lineage, materializations, and freshness. | Dagster asset graph coordinating pipelines and profiles. | Dagster asset definitions & execution profiles in [`docs/architecture/overview.md`](architecture/overview.md) |
 
 ---
 
@@ -37,9 +37,9 @@ This document provides a comprehensive, bidirectional mapping between the founda
   - **Silver**: Conformed, cleansed, deduplicated, and enriched tier adhering to standardized data types and business validation rules.
   - **Gold**: Consumption-ready, aggregated dimensional models and metrics optimized for business intelligence and reporting.
 - **Repository Implementation**:
-  - **Bronze Ingestion** ([`pipelines/medallion/bronze_ingestion.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/bronze_ingestion.py)): Connects to PostgreSQL, extracts source tables without schema alteration, appends technical audit columns (`_ingested_at`, `_source`, `_batch_id`), and commits them to Iceberg tables located at `s3a://lakehouse/bronze/`.
-  - **Silver Transformation** ([`pipelines/medallion/silver_transform.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/silver_transform.py)): Reads Bronze records, strips leading/trailing whitespace, converts dates and decimals to contractual types, removes duplicate orders using window functions (`ROW_NUMBER() OVER (PARTITION BY id ORDER BY _ingested_at DESC)`), and checks referential integrity between orders and customers.
-  - **Gold Aggregation** ([`pipelines/medallion/gold_aggregation.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/gold_aggregation.py)): Reads Silver tables, performs business-level grouping (e.g., daily sales by order status, customer segment lifetime value), applies PII masking, and publishes to `gold.*`.
+  - **Bronze Ingestion** ([`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py)): Connects to PostgreSQL, extracts source tables without schema alteration, appends technical audit columns (`_ingested_at`, `_source`, `_batch_id`), and commits them to Iceberg tables located at `s3a://lakehouse/bronze/`.
+  - **Silver Transformation** ([`pipelines/medallion/silver_transform.py`](../pipelines/medallion/silver_transform.py)): Reads Bronze records, strips leading/trailing whitespace, converts dates and decimals to contractual types, removes duplicate orders using window functions (`ROW_NUMBER() OVER (PARTITION BY id ORDER BY _ingested_at DESC)`), and checks referential integrity between orders and customers.
+  - **Gold Aggregation** ([`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py)): Reads Silver tables, performs business-level grouping (e.g., daily sales by order status, customer segment lifetime value), applies PII masking, and publishes to `gold.*`.
 
 ---
 
@@ -53,7 +53,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
     ```
   - **Hidden Partitioning**: Partition transforms (e.g., `days(order_date)`) are tracked within Iceberg metadata, eliminating the need for user queries to include redundant partition columns in WHERE clauses.
 - **Repository Implementation**:
-  - Configured in Spark via `SparkSessionBuilder` in [`pipelines/medallion/bronze_ingestion.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/bronze_ingestion.py):
+  - Configured in Spark via `SparkSessionBuilder` in [`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py):
     ```python
     .config("spark.sql.catalog.polaris", "org.apache.iceberg.spark.SparkCatalog")
     .config("spark.sql.catalog.polaris.type", "rest")
@@ -66,7 +66,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 - **Theoretical Concept**: Earlier data lakes relied on the legacy Hive Metastore (HMS), which suffered from slow Thrift RPCs, single-point-of-failure relational database backends, and tight coupling to the Apache Hadoop ecosystem. The Apache Iceberg REST Catalog specification defines an open, lightweight HTTP/REST interface for discovering and committing table metadata.
 - **Repository Implementation**:
   - **Apache Polaris**: Deployed as a lightweight container on port `8181`.
-  - **Catalog Registration Script** ([`pipelines/serving/catalog_registration.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/serving/catalog_registration.py)): Uses `PolarisClient` to authenticate, register namespaces (`sales`, `marketing`, `finance`, `stream`), inspect table metadata, and publish table URIs to Marquez and Data Product manifests.
+  - **Catalog Registration Script** ([`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py)): Uses `PolarisClient` to authenticate, register namespaces (`sales`, `marketing`, `finance`, `stream`), inspect table metadata, and publish table URIs to Marquez and Data Product manifests.
 
 ---
 
@@ -76,9 +76,9 @@ This document provides a comprehensive, bidirectional mapping between the founda
   - **Kappa Architecture**: Eliminates dual codebases by executing all transformations through stream processing and replaying historical logs for backfills.
   - **Hybrid Approach**: Employs Spark batch for complex, multi-year relational dimensional models and Flink streaming for low-latency operational metrics, while ensuring both engines support historical replay (Kappa principle).
 - **Repository Implementation**:
-  - **Batch Pipeline**: [`pipelines/medallion/gold_aggregation.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/gold_aggregation.py) aggregates historical orders daily.
-  - **Stream Pipeline**: [`pipelines/stream/flink_orders_stream.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/stream/flink_orders_stream.py) consumes Kafka events, applies 5-minute tumbling event-time windows, and writes to `stream.sales.orders_windowed`.
-  - **Unified Serving View** ([`pipelines/serving/unified_view.sql`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/serving/unified_view.sql)):
+  - **Batch Pipeline**: [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py) aggregates historical orders daily.
+  - **Stream Pipeline**: [`pipelines/stream/flink_orders_stream.py`](../pipelines/stream/flink_orders_stream.py) consumes Kafka events, applies 5-minute tumbling event-time windows, and writes to `stream.sales.orders_windowed`.
+  - **Unified Serving View** ([`pipelines/serving/unified_view.sql`](../pipelines/serving/unified_view.sql)):
     ```sql
     CREATE OR REPLACE VIEW serving.sales.unified_revenue AS
     -- Historical batch layer (T+1 latency, guaranteed accuracy)
@@ -104,8 +104,8 @@ This document provides a comprehensive, bidirectional mapping between the founda
   3. **Self-Serve Data Infrastructure**: Domains utilize shared compute and storage platforms without relying on centralized data teams.
   4. **Federated Computational Governance**: Security, privacy, and quality standards are codified into automated platform policies.
 - **Repository Implementation**:
-  - Domain isolation: [`domains/sales/`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/sales/) and [`domains/marketing/`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/marketing/).
-  - Product Manifest ([`domains/sales/data-products/orders/product.yaml`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/sales/data-products/orders/product.yaml)):
+  - Domain isolation: [`domains/sales/`](../domains/sales/) and [`domains/marketing/`](../domains/marketing/).
+  - Product Manifest ([`domains/sales/data-products/orders/product.yaml`](../domains/sales/data-products/orders/product.yaml)):
     Defines metadata, data steward contacts, business SLAs (freshness, latency), data classification, input sources, and output ports (Iceberg tables and Trino views).
 
 ---
@@ -113,7 +113,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 ### 6. Declarative Data Contracts (Bitol ODCS)
 - **Theoretical Concept**: A Data Contract is a formal, machine-readable agreement between a data producer and downstream data consumers. It defines the authoritative schema, semantic constraints, SLAs, compatibility rules, and legal/security terms, preventing unexpected schema drift from breaking downstream analytics.
 - **Repository Implementation**:
-  - Authoritative Contract ([`domains/sales/data-products/orders/contract.yaml`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/domains/sales/data-products/orders/contract.yaml)):
+  - Authoritative Contract ([`domains/sales/data-products/orders/contract.yaml`](../domains/sales/data-products/orders/contract.yaml)):
     - **Schema Constraints**:
       - `id`: integer, required, unique, min 1.
       - `total_amount`: decimal(10,2), required, min 0.01, max 99999.99.
@@ -133,8 +133,8 @@ This document provides a comprehensive, bidirectional mapping between the founda
   - **OpenLineage & Marquez**:
     - Every pipeline use case emits OpenLineage run events (`COMPLETE`/`FAIL`) via `LineagePublisherPort` (`src/adapters/lineage/marquez_lineage.py`): events are POSTed to Marquez when reachable and **always** appended to the local audit trail `data/lineage_audit.jsonl`.
     - Marquez records dataset facets, input/output schemas, and parent-child run relationships.
-  - **Quality Gates (Great-Expectations-format suites)** ([`quality/gates/run_quality_gate.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/quality/gates/run_quality_gate.py)):
-    - Evaluates JSON test suites ([`quality/expectations/silver_orders_suite.json`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/quality/expectations/silver_orders_suite.json)) with the built-in fail-closed engine (`src/adapters/quality/expectation_engine.py`) — not the Great Expectations library.
+  - **Quality Gates (Great-Expectations-format suites)** ([`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)):
+    - Evaluates JSON test suites ([`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json)) with the built-in fail-closed engine (`src/adapters/quality/expectation_engine.py`) — not the Great Expectations library.
     - Blocks pipeline progression with exit code `1` if the quality score is below threshold (missing suite, unknown expectation type, or empty data also block); optionally emits alert payloads to webhooks.
 
 ---
@@ -142,7 +142,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 ### 8. GDPR Privacy Compliance & Cryptographic Masking
 - **Theoretical Concept**: GDPR Article 25 ("Data protection by design and by default") and Article 32 ("Security of processing") mandate that personal data must not be exposed in analytical stores where it is not strictly required for business calculations.
 - **Repository Implementation**:
-  - Implemented in [`pipelines/medallion/gold_aggregation.py`](file:///c:/Users/ssanchez/Documents/poc_data_engineering/pipelines/medallion/gold_aggregation.py):
+  - Implemented in [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py):
     - **Customer Email**: Transformed via irreversible SHA-256 cryptographic hash (`SHA2(email, 256)`).
     - **Customer Name**: Masked to first name and last initial only (e.g., "Alice S.").
     - **Registration Date**: Truncated to registration year (`YEAR(registration_date)`).

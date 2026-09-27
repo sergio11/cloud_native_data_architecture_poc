@@ -7,6 +7,8 @@
 --   merges historical batch data (Gold Lakehouse) with real-time stream
 --   data (Speed tables) without leaking internal storage architecture.
 --   Uses standard 3-part ANSI SQL identifiers: <catalog>.<schema>.<table>
+--   Stream windows (5-min tumbling grain) are aggregated to day grain
+--   (order_date, status) BEFORE the anti-join so each key appears once.
 --
 -- Note (VIEW 1):
 --   sales_unified_revenue is the SQL equivalent of
@@ -26,8 +28,9 @@ CREATE SCHEMA IF NOT EXISTS iceberg.finance;
 
 -- ---------------------------------------------------------------------------
 -- VIEW 1: iceberg.serving.sales_unified_revenue (RF-11)
--- Same semantics as QueryServingUseCase: batch exact values win, stream rows
--- only fill (order_date, status) keys absent from batch - no double counting.
+-- Same semantics as QueryServingUseCase: batch exact values win, stream
+-- windows merged to day grain only fill (order_date, status) keys absent
+-- from batch - no double counting, no duplicate keys.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW iceberg.serving.sales_unified_revenue AS
 
@@ -51,13 +54,16 @@ FROM (
 
     UNION ALL
 
-    -- 2. Near Real-Time Stream Layer (Speed) - only keys ABSENT from batch
+    -- 2. Near Real-Time Stream Layer (Speed) - windows merged to day grain,
+    -- only keys ABSENT from batch
     SELECT
         s.order_date                                 AS order_date,
         s.status                                     AS status,
-        s.window_orders                              AS total_orders,
-        s.window_revenue                             AS total_revenue,
-        s.avg_order_value                            AS avg_order_value,
+        SUM(CAST(s.window_orders AS BIGINT))         AS total_orders,
+        SUM(CAST(s.window_revenue AS DECIMAL(14,2))) AS total_revenue,
+        SUM(CAST(s.window_revenue AS DECIMAL(14,2)))
+            / NULLIF(SUM(CAST(s.window_orders AS BIGINT)), 0)
+                                                     AS avg_order_value,
         'stream_speed'                               AS source_tier
     FROM stream.sales.orders_windowed s
     WHERE NOT EXISTS (
@@ -66,6 +72,7 @@ FROM (
         WHERE b.order_date = s.order_date
           AND b.status = s.status
     )
+    GROUP BY s.order_date, s.status
 ) unified
 ORDER BY order_date DESC, status DESC;
 

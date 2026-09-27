@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 from src.domain.entities import QualityAssertionResult, QualityGateEvaluation
@@ -37,9 +38,24 @@ logger = logging.getLogger("adapter.quality.engine")
 FAIL_CLOSED_RULE = "fail_closed"
 FAIL_CLOSED_MARKER = "no data / no assertions to evaluate"
 
+# Shared signature of every per-type handler:
+# (records, kwargs, mostly, col, col_key) -> (success, observed, details, column).
+_ExpectationHandler = Callable[
+    [list[dict[str, Any]], dict[str, Any], float, Any, str],
+    tuple[bool, Any, str, Any],
+]
+
 
 class ExpectationEngineAdapter(QualityEnginePort):
-    """Evaluates Great Expectations JSON suites against records (fail-closed, RF-06)."""
+    """Evaluates Great Expectations JSON suites against records (fail-closed, RF-06).
+
+    Open/Closed design: ``evaluate_suite`` dispatches each expectation through
+    the handler map instead of an if/elif chain. To support a new expectation
+    type, add one small ``_eval_*`` method with the shared handler signature
+    (preserving the null/``mostly``/fail-closed conventions from the module
+    docstring) and register it with one map entry — the core loop is never
+    modified.
+    """
 
     def evaluate_suite(
         self,
@@ -88,6 +104,15 @@ class ExpectationEngineAdapter(QualityEnginePort):
         failures: list[QualityAssertionResult] = []
         unsupported = False
 
+        handlers: dict[str, _ExpectationHandler] = {
+            "expect_column_values_to_not_be_null": self._eval_not_null,
+            "expect_column_values_to_be_unique": self._eval_unique,
+            "expect_column_values_to_be_in_set": self._eval_in_set,
+            "expect_column_values_to_be_between": self._eval_between,
+            "expect_column_values_to_match_regex": self._eval_regex,
+            "expect_table_row_count_to_be_between": self._eval_row_count,
+        }
+
         for exp in expectations:
             exp_type = exp.get("expectation_type") or ""
             kwargs = exp.get("kwargs") or {}
@@ -98,78 +123,8 @@ class ExpectationEngineAdapter(QualityEnginePort):
             details = ""
             observed: Any = None
 
-            if exp_type == "expect_column_values_to_not_be_null":
-                nulls = sum(1 for r in records if r.get(col_key) is None or str(r.get(col_key)).strip() == "")
-                success = (nulls / len(records)) <= (1.0 - mostly)
-                observed = f"{nulls} nulls ({nulls / len(records):.1%})"
-                details = (
-                    f"mostly={mostly}: null/blank fraction must be <= {1.0 - mostly:.2f} "
-                    "(nulls counted over all rows)"
-                )
-
-            elif exp_type == "expect_column_values_to_be_unique":
-                vals = [r.get(col_key) for r in records if r.get(col_key) is not None]
-                dups = len(vals) - len(set(vals))
-                success = dups == 0
-                observed = f"{dups} duplicates"
-                details = "nulls are ignored for uniqueness; duplicate non-null values fail"
-
-            elif exp_type == "expect_column_values_to_be_in_set":
-                val_set = set(kwargs.get("value_set") or [])
-                invalids = sum(1 for r in records if r.get(col_key) not in val_set)
-                success = (invalids / len(records)) <= (1.0 - mostly)
-                observed = f"{invalids} outside allowed set"
-                details = (
-                    f"mostly={mostly}: values outside value_set must be <= {1.0 - mostly:.2f}; "
-                    "nulls count as invalid unless None is explicitly in value_set"
-                )
-
-            elif exp_type == "expect_column_values_to_be_between":
-                min_v = kwargs.get("min_value")
-                max_v = kwargs.get("max_value")
-                out_of_bounds = 0
-                for r in records:
-                    val = r.get(col_key)
-                    if val is None:
-                        continue
-                    try:
-                        fval = float(val)
-                        if min_v is not None and fval < min_v:
-                            out_of_bounds += 1
-                        elif max_v is not None and fval > max_v:
-                            out_of_bounds += 1
-                    except (ValueError, TypeError):
-                        out_of_bounds += 1
-                success = (out_of_bounds / len(records)) <= (1.0 - mostly)
-                observed = f"{out_of_bounds} values out of bounds [{min_v}, {max_v}]"
-                details = (
-                    f"mostly={mostly}: non-null values outside [{min_v}, {max_v}] must be "
-                    f"<= {1.0 - mostly:.2f}; nulls are skipped (not bounds-checked); "
-                    "non-numeric values count as out of bounds"
-                )
-
-            elif exp_type == "expect_column_values_to_match_regex":
-                regex_pat = re.compile(kwargs.get("regex") or ".*")
-                non_matches = sum(1 for r in records if not regex_pat.match(str(r.get(col_key, ""))))
-                success = (non_matches / len(records)) <= (1.0 - mostly)
-                observed = f"{non_matches} regex non-matches"
-                details = (
-                    f"mostly={mostly}: regex non-match fraction must be <= {1.0 - mostly:.2f} "
-                    "(match anchored at start of value)"
-                )
-
-            elif exp_type == "expect_table_row_count_to_be_between":
-                col = None
-                min_rows = kwargs.get("min_value")
-                max_rows = kwargs.get("max_value")
-                count = len(records)
-                success = (min_rows is None or count >= min_rows) and (
-                    max_rows is None or count <= max_rows
-                )
-                observed = f"{count} rows (expected between {min_rows} and {max_rows})"
-                details = "row count bounds are inclusive; None means unbounded"
-
-            else:
+            handler = handlers.get(exp_type)
+            if handler is None:
                 # Unknown expectation type: fail closed - the engine cannot verify it.
                 success = False
                 unsupported = True
@@ -182,6 +137,8 @@ class ExpectationEngineAdapter(QualityEnginePort):
                     "Unsupported expectation type '%s' in suite '%s'; failing closed.",
                     exp_type, suite_name
                 )
+            else:
+                success, observed, details, col = handler(records, kwargs, mostly, col, col_key)
 
             if success:
                 passed_count += 1
@@ -209,3 +166,121 @@ class ExpectationEngineAdapter(QualityEnginePort):
             passed=passed,
             failures=failures,
         )
+
+    def _eval_not_null(
+        self,
+        records: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        mostly: float,
+        col: Any,
+        col_key: str,
+    ) -> tuple[bool, Any, str, Any]:
+        nulls = sum(1 for r in records if r.get(col_key) is None or str(r.get(col_key)).strip() == "")
+        success = (nulls / len(records)) <= (1.0 - mostly)
+        observed = f"{nulls} nulls ({nulls / len(records):.1%})"
+        details = (
+            f"mostly={mostly}: null/blank fraction must be <= {1.0 - mostly:.2f} "
+            "(nulls counted over all rows)"
+        )
+        return success, observed, details, col
+
+    def _eval_unique(
+        self,
+        records: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        mostly: float,
+        col: Any,
+        col_key: str,
+    ) -> tuple[bool, Any, str, Any]:
+        vals = [r.get(col_key) for r in records if r.get(col_key) is not None]
+        dups = len(vals) - len(set(vals))
+        success = dups == 0
+        observed = f"{dups} duplicates"
+        details = "nulls are ignored for uniqueness; duplicate non-null values fail"
+        return success, observed, details, col
+
+    def _eval_in_set(
+        self,
+        records: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        mostly: float,
+        col: Any,
+        col_key: str,
+    ) -> tuple[bool, Any, str, Any]:
+        val_set = set(kwargs.get("value_set") or [])
+        invalids = sum(1 for r in records if r.get(col_key) not in val_set)
+        success = (invalids / len(records)) <= (1.0 - mostly)
+        observed = f"{invalids} outside allowed set"
+        details = (
+            f"mostly={mostly}: values outside value_set must be <= {1.0 - mostly:.2f}; "
+            "nulls count as invalid unless None is explicitly in value_set"
+        )
+        return success, observed, details, col
+
+    def _eval_between(
+        self,
+        records: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        mostly: float,
+        col: Any,
+        col_key: str,
+    ) -> tuple[bool, Any, str, Any]:
+        min_v = kwargs.get("min_value")
+        max_v = kwargs.get("max_value")
+        out_of_bounds = 0
+        for r in records:
+            val = r.get(col_key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+                if min_v is not None and fval < min_v:
+                    out_of_bounds += 1
+                elif max_v is not None and fval > max_v:
+                    out_of_bounds += 1
+            except (ValueError, TypeError):
+                out_of_bounds += 1
+        success = (out_of_bounds / len(records)) <= (1.0 - mostly)
+        observed = f"{out_of_bounds} values out of bounds [{min_v}, {max_v}]"
+        details = (
+            f"mostly={mostly}: non-null values outside [{min_v}, {max_v}] must be "
+            f"<= {1.0 - mostly:.2f}; nulls are skipped (not bounds-checked); "
+            "non-numeric values count as out of bounds"
+        )
+        return success, observed, details, col
+
+    def _eval_regex(
+        self,
+        records: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        mostly: float,
+        col: Any,
+        col_key: str,
+    ) -> tuple[bool, Any, str, Any]:
+        regex_pat = re.compile(kwargs.get("regex") or ".*")
+        non_matches = sum(1 for r in records if not regex_pat.match(str(r.get(col_key, ""))))
+        success = (non_matches / len(records)) <= (1.0 - mostly)
+        observed = f"{non_matches} regex non-matches"
+        details = (
+            f"mostly={mostly}: regex non-match fraction must be <= {1.0 - mostly:.2f} "
+            "(match anchored at start of value)"
+        )
+        return success, observed, details, col
+
+    def _eval_row_count(
+        self,
+        records: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        mostly: float,
+        col: Any,
+        col_key: str,
+    ) -> tuple[bool, Any, str, Any]:
+        min_rows = kwargs.get("min_value")
+        max_rows = kwargs.get("max_value")
+        count = len(records)
+        success = (min_rows is None or count >= min_rows) and (
+            max_rows is None or count <= max_rows
+        )
+        observed = f"{count} rows (expected between {min_rows} and {max_rows})"
+        details = "row count bounds are inclusive; None means unbounded"
+        return success, observed, details, None

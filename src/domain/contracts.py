@@ -16,8 +16,6 @@ in either real repository shape and normalised transparently:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from enum import Enum
 from typing import Any
 
@@ -101,25 +99,6 @@ _FORMAT_SUBTYPES: dict[str, str] = {
     "datetime": "datetime",
     "time": "time",
 }
-
-
-@dataclass(frozen=True)
-class FieldSpecification:
-    name: str
-    data_type: str
-    required: bool = False
-    description: str = ""
-
-
-@dataclass
-class ContractSpecification:
-    name: str
-    version: str
-    domain: str
-    data_product: str
-    compatibility_mode: CompatibilityMode
-    fields: list[FieldSpecification]
-    quality_thresholds: dict[str, float] = dataclass_field(default_factory=dict)
 
 
 def _canonical_type(raw_type: Any, fmt: Any = None) -> str:

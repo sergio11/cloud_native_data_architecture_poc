@@ -15,20 +15,20 @@ Centralized monolithic data architectures (such as centralized data warehouses o
 To eliminate these failure modes, we adopt the principles of **Data Mesh**: domain ownership, data as a product, self-serve data infrastructure, and federated computational governance.
 
 ## Decision
-We organize the data architecture around three autonomous business domains (**Ventas**, **Marketing**, **Finanzas**) and mandate that all published data assets be encapsulated as **Data Products** governed by formal, declarative **Data Contracts**.
+We organize the data architecture around three autonomous business domains (**Sales**, **Marketing**, **Finance**) and mandate that all published data assets be encapsulated as **Data Products** governed by formal, declarative **Data Contracts**.
 
 ### Architectural Implementation
 
 #### 1. Domain Decentralization (RF-13)
 The codebase and data assets are segregated strictly by domain boundaries:
-- `domains/ventas`: Owns customer transactions, orders (`pedidos`), line items, and fulfillment lifecycles.
-- `domains/marketing`: Owns multi-channel campaigns (`campanas`), lead generation (`leads`), and web clickstream telemetry (`navegacion`).
-- `domains/finanzas`: Owns revenue recognition models, margin aggregations, and cross-domain financial reconciliation.
+- `domains/sales`: Owns customer transactions, orders, line items, and fulfillment lifecycles.
+- `domains/marketing`: Owns multi-channel campaigns, lead generation (`leads`), and web clickstream telemetry.
+- `domains/finance`: Owns revenue recognition models, margin aggregations, and cross-domain financial reconciliation.
 
 #### 2. Data Product Encapsulation (RF-14)
 Each published analytical dataset is modeled as an autonomous Data Product with a standardized directory layout and descriptor (`product.yaml`):
 ```
-domains/ventas/data-products/pedidos/
+domains/sales/data-products/orders/
 ├── product.yaml        # Manifest: ownership, metadata, SLA, output ports
 ├── contract.yaml       # Formal Data Contract (Bitol ODCS v2)
 └── schema.json         # JSON Schema Draft-07 specification
@@ -47,20 +47,20 @@ Every data product must maintain an authoritative `contract.yaml` compliant with
 
 ```
  +-------------------------------------------------------------------------------+
- |                               DOMAIN: VENTAS                                  |
- |  Product: pedidos                                                             |
- |  - Manifest: product.yaml (Owner: equipo-ventas@empresa.com)                  |
- |  - Contract: contract.yaml (v1.2.0, BACKWARD compatibility, PII tags)         |
- |  - Schema:   schema.json (Draft-07)                                           |
- |  - Output:   Iceberg table: silver.ventas.pedidos                             |
+  |                               DOMAIN: SALES                                   |
+  |  Product: orders                                                              |
+  |  - Manifest: product.yaml (Owner: equipo-sales@empresa.com)                   |
+  |  - Contract: contract.yaml (v1.2.0, BACKWARD compatibility, PII tags)         |
+  |  - Schema:   schema.json (Draft-07)                                           |
+  |  - Output:   Iceberg table: silver.sales.orders                               |
  +-------------------------------------------------------------------------------+
          |
          | Formal Data Contract Agreement (Bitol ODCS)
          v
  +-------------------------------------------------------------------------------+
  |                               CONSUMER DOMAINS                                |
- |  - Finanzas: Consumes gold_pedidos for P&L revenue calculations               |
- |  - Marketing: Consumes silver_pedidos for customer attribution & ROI          |
+  |  - Finance: Consumes gold.sales.daily_metrics for P&L revenue calculations    |
+  |  - Marketing: Consumes silver.sales.orders for customer attribution & ROI     |
  +-------------------------------------------------------------------------------+
 ```
 
@@ -82,4 +82,4 @@ Every data product must maintain an authoritative `contract.yaml` compliant with
 
 ## Compliance & Verification
 - **Functional Requirements**: Satisfies RF-13, RF-14, RF-15, RF-16, and RF-19.
-- **Verification**: Verified via schema inspection in `domains/ventas/data-products/pedidos/contract.yaml` and quality gate validation in `quality/gates/run_quality_gate.py`.
+- **Verification**: Verified via schema inspection in `domains/sales/data-products/orders/contract.yaml` and quality gate validation in `quality/gates/run_quality_gate.py`.

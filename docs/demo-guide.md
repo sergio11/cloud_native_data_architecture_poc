@@ -36,12 +36,16 @@ Before launching the demonstration, ensure your host environment satisfies the f
 | Component | Minimum Requirement | Recommended | Verification Command |
 | :--- | :--- | :--- | :--- |
 | **Operating System** | Linux, macOS, or Windows 11 (WSL2) | Ubuntu 22.04 LTS or macOS M-series | `uname -a` |
-| **Docker Engine** | Version 24.0+ | Version 26.0+ | `docker --version` |
-| **Docker Compose** | Version 2.20+ | Version 2.27+ | `docker compose version` |
-| **Memory Allocation** | 8 GB RAM allocated to Docker | 8 GB to 12 GB RAM | Docker Desktop -> Settings -> Resources |
+| **Python** | Version 3.11+ | Version 3.11 | `python --version` |
 | **Free Disk Space** | 20 GB available storage | 30 GB SSD storage | `df -h` |
-| **Python** | Version 3.10+ | Version 3.11 | `python3 --version` |
-| **Network Ports** | Available ports: `5432`, `9092`, `9000`, `9001`, `8181`, `5000`, `8080`, `3000` | No conflicting local daemons | `netstat -tuln` (Linux) / `Get-NetTCPConnection` (PowerShell) |
+| **Docker Engine** *(K8s profile only)* | Version 24.0+ — not required for the local profile | Version 26.0+ | `docker --version` |
+| **Docker Compose / kind** *(K8s profile only)* | Only needed to deploy `infra/helm` + `infra/profiles` | kind v0.20+ | `docker compose version` / `kind --version` |
+| **Memory Allocation** *(K8s profile only)* | 8 GB RAM allocated to Docker | 8 GB to 12 GB RAM | Docker Desktop -> Settings -> Resources |
+| **Network Ports** *(K8s profile only)* | Available ports: `5432`, `9092`, `9000`, `9001`, `8181`, `5000`, `8080`, `3000` | No conflicting local daemons | `netstat -tuln` (Linux) / `Get-NetTCPConnection` (PowerShell) |
+
+> The local profile (default) needs **only Python 3.11+** — no containers required.
+> Docker / Kubernetes / Trino / Marquez / Dagster / MinIO apply exclusively to the
+> K8s profile (`infra/helm`, `infra/profiles`).
 
 ---
 
@@ -169,38 +173,50 @@ python quality/gates/run_quality_gate.py \
   --table silver.sales.orders \
   --threshold 0.95
 ```
-*Output*:
+*Output* (real run against the current `data/` state, trimmed — rich-table
+borders omitted):
 ```text
-┌────────────────────────────────────────────────────────┐
-│           DATA QUALITY GATE VALIDATION REPORT          │
-├──────────────────────┬─────────────┬──────────┬────────┤
-│ Rule ID & Check Name │ Evaluated   │ Observed │ Status │
-├──────────────────────┼─────────────┼──────────┼────────┤
-│ QR-001 Completeness  │ >= 0.98     │ 1.00     │ [PASS] │
-│ QR-002 PK Uniqueness │ == 1.00     │ 1.00     │ [PASS] │
-│ QR-003 Amount Range  │ [0.01, 100k]│ 100.0%   │ [PASS] │
-│ QR-004 Status Enum   │ Approved    │ 100.0%   │ [PASS] │
-└──────────────────────┴─────────────┴──────────┴────────┘
-Overall Score: 100.0% (Threshold: 95.0%) -> GATE PASSED (Exit Code: 0)
+Expectation Suite Evaluation: silver_orders_suite
+| Rule / Assertion       | Target Column | Status | Details                   |
+| All Suite Expectations | *             | PASS   | 100% assertions satisfied |
+
+Quality Gate Summary
+  Table: silver.sales.orders
+  Suite: silver_orders_suite
+  Passed: 8 / 8 assertions
+  Pass Rate: 100.0% (Threshold: 95.0%)
+  Gate Verdict: PASSED
+(exit code 0)
 ```
 
-#### Test 3.2: Simulating a Data Contract Breach (Failing Gate)
-Run the quality gate with an artificially high threshold or corrupt data flag:
+#### Test 3.2: Strict-threshold run (same data, threshold 1.0)
+Re-run the gate with a strict 100% threshold (there is no
+`--simulate-corrupt-data` flag — the CLI only accepts `--suite`, `--table`,
+`--threshold`, plus optional `--input-file`/`--marquez-url`/`--output-dir` options):
 ```bash
 python quality/gates/run_quality_gate.py \
   --suite quality/expectations/silver_orders_suite.json \
   --table silver.sales.orders \
-  --threshold 1.0 \
-  --simulate-corrupt-data
+  --threshold 1.0
 ```
-*Output*:
+*Output* (real run against the current `data/` state, trimmed):
 ```text
-[ERROR] Rule QR-003 Failed! Found 14 records with negative 'total_amount'.
-[CRITICAL] Quality Gate Breach: Observed score 92.4% < Threshold 100.0%!
-[ALERT] Emitting OpenLineage FAILED event to http://marquez:5000
-[ALERT] Dispatching incident notification to webhook...
-[ABORT] Pipeline progression halted. Exit code: 1
+Expectation Suite Evaluation: silver_orders_suite
+| Rule / Assertion       | Target Column | Status | Details                   |
+| All Suite Expectations | *             | PASS   | 100% assertions satisfied |
+
+Quality Gate Summary
+  Table: silver.sales.orders
+  Suite: silver_orders_suite
+  Passed: 8 / 8 assertions
+  Pass Rate: 100.0% (Threshold: 100.0%)
+  Gate Verdict: PASSED
+(exit code 0)
 ```
+On the current clean data the strict run also passes. A real breach (e.g. null
+primary keys, see `test_rf06_*` in `tests/integration/test_rf_acceptance.py`)
+fails the gate with exit code 1, emits a lineage `FAIL` event when a
+Marquez/webhook URL is configured, and blocks pipeline progression.
 
 ---
 

@@ -27,7 +27,7 @@ We select **Apache Iceberg (v2 specification)** as the authoritative Lakehouse o
    - Enforces column-level statistics (min/max bounds, null counts) within metadata files, enabling Trino to skip non-matching files without opening Parquet footers.
 2. **Apache Polaris REST Catalog**:
    - An open-source, multi-engine catalog implementing the standard Iceberg REST OpenAPI specification.
-   - Serves as the single source of truth for namespace hierarchies (`ventas`, `marketing`, `finanzas`, `stream`) and table commit points.
+    - Serves as the single source of truth for namespace hierarchies (`sales`, `marketing`, `finance`, `stream`) and table commit points.
    - Eliminates legacy Hive Metastore / Thrift dependencies, running as a lightweight container consuming ~512 MB RAM.
    - Allows Spark, Flink, and Trino to use an identical catalog interface (`type: rest`, URI `http://polaris:8181`).
 3. **MinIO Object Storage**:
@@ -74,4 +74,4 @@ We select **Apache Iceberg (v2 specification)** as the authoritative Lakehouse o
 
 ## Compliance & Verification
 - **Functional Requirements**: Satisfies RF-05, RF-06, RF-07, RF-08, and RF-09.
-- **Verification**: Verified via `pipelines/serving/catalog_registration.py` and Trino snapshot queries (`SELECT * FROM "gold.ventas.metricas_diarias$snapshots"`).
+- **Verification**: Verified via `pipelines/serving/catalog_registration.py` and Trino snapshot queries (`SELECT * FROM "gold.sales.daily_metrics$snapshots"`).

@@ -5,6 +5,9 @@ Wires domain use cases with infrastructure adapters according to Dependency Inve
 
 from __future__ import annotations
 
+import functools
+import os
+
 from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
@@ -22,52 +25,116 @@ from src.use_cases.validate_contract import ValidateContractUseCase
 
 
 class Container:
-    """Dependency injection container assembling hexagonal components."""
+    """Dependency injection container assembling hexagonal components.
+
+    Construction is side-effect free: instantiating ``Container`` (including
+    the module-level ``container`` singleton) only stores configuration
+    strings. Every adapter and use case is built lazily via
+    :func:`functools.cached_property` on first attribute access, so
+    ``import src.container`` creates no files, directories or databases.
+    Public attribute names are stable so all drivers keep working unchanged.
+    """
 
     def __init__(
         self,
         db_path: str = "data/lakehouse.db",
         marquez_url: str | None = None,
         repo_root: str = ".",
+        event_db_path: str | None = None,
+        lineage_audit_path: str | None = None,
     ) -> None:
-        # Outbound Adapters
-        self.storage = LakehouseStorageAdapter(db_path=db_path)
-        self.source = OltpSourceAdapter()
-        self.stream_broker = EventStreamAdapter()
-        self.lineage = MarquezLineageAdapter(marquez_url=marquez_url)
-        self.quality_engine = ExpectationEngineAdapter()
-        self.serving_sql = SqlServingAdapter(db_path=db_path)
-        self.domain_catalog = FsDomainCatalogAdapter(repo_root=repo_root)
+        self._db_path = db_path
+        self._marquez_url = marquez_url
+        self._repo_root = repo_root
+        # Hermetic defaults: sibling files of the lakehouse DB, so a Container
+        # pointed at tmp_path never writes under the repository's data/ dir.
+        # For the default db_path these resolve to the historical data/ paths.
+        base_dir = os.path.dirname(db_path) or "."
+        self._event_db_path = event_db_path or os.path.join(base_dir, "event_log.db")
+        self._lineage_audit_path = lineage_audit_path or os.path.join(base_dir, "lineage_audit.jsonl")
 
-        # Inbound Use Cases
-        self.ingest_bronze = IngestBronzeUseCase(
+    # Outbound Adapters (lazy)
+    @functools.cached_property
+    def storage(self) -> LakehouseStorageAdapter:
+        return LakehouseStorageAdapter(db_path=self._db_path)
+
+    @functools.cached_property
+    def source(self) -> OltpSourceAdapter:
+        return OltpSourceAdapter()
+
+    @functools.cached_property
+    def stream_broker(self) -> EventStreamAdapter:
+        return EventStreamAdapter(db_path=self._event_db_path)
+
+    @functools.cached_property
+    def lineage(self) -> MarquezLineageAdapter:
+        return MarquezLineageAdapter(
+            marquez_url=self._marquez_url,
+            audit_file_path=self._lineage_audit_path,
+        )
+
+    @functools.cached_property
+    def quality_engine(self) -> ExpectationEngineAdapter:
+        return ExpectationEngineAdapter()
+
+    @functools.cached_property
+    def serving_sql(self) -> SqlServingAdapter:
+        return SqlServingAdapter(db_path=self._db_path)
+
+    @functools.cached_property
+    def domain_catalog(self) -> FsDomainCatalogAdapter:
+        return FsDomainCatalogAdapter(repo_root=self._repo_root)
+
+    # Inbound Use Cases (lazy)
+    @functools.cached_property
+    def ingest_bronze(self) -> IngestBronzeUseCase:
+        return IngestBronzeUseCase(
             source=self.source,
             storage=self.storage,
             lineage=self.lineage,
         )
-        self.cleanse_silver = CleanseSilverUseCase(
+
+    @functools.cached_property
+    def cleanse_silver(self) -> CleanseSilverUseCase:
+        return CleanseSilverUseCase(
             storage=self.storage,
             quality_engine=self.quality_engine,
             lineage=self.lineage,
         )
-        self.aggregate_gold = AggregateGoldUseCase(
+
+    @functools.cached_property
+    def aggregate_gold(self) -> AggregateGoldUseCase:
+        return AggregateGoldUseCase(
             storage=self.storage,
             lineage=self.lineage,
+            quality_engine=self.quality_engine,
         )
-        self.process_stream = ProcessStreamUseCase(
+
+    @functools.cached_property
+    def process_stream(self) -> ProcessStreamUseCase:
+        return ProcessStreamUseCase(
             broker=self.stream_broker,
             storage=self.storage,
             lineage=self.lineage,
         )
-        self.query_serving = QueryServingUseCase(
+
+    @functools.cached_property
+    def query_serving(self) -> QueryServingUseCase:
+        return QueryServingUseCase(
             query_executor=self.serving_sql,
         )
-        self.validate_contract = ValidateContractUseCase(catalog=self.domain_catalog)
-        self.run_quality_gate = RunQualityGateUseCase(
+
+    @functools.cached_property
+    def validate_contract(self) -> ValidateContractUseCase:
+        return ValidateContractUseCase(catalog=self.domain_catalog)
+
+    @functools.cached_property
+    def run_quality_gate(self) -> RunQualityGateUseCase:
+        return RunQualityGateUseCase(
             storage=self.storage,
             quality_engine=self.quality_engine,
         )
 
 
-# Global default container instance
+# Global default container instance (lazy: no filesystem side effects on import)
 container = Container()

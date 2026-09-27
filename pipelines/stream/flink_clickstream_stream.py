@@ -39,7 +39,6 @@ def main() -> None:
     parser.add_argument("--topic", default=os.getenv("KAFKA_CLICKSTREAM_TOPIC", "marketing.clickstream.raw"))
     parser.add_argument("--target-table", default="stream.marketing.clickstream_windowed")
     parser.add_argument("--start-offset", default="latest", choices=["earliest", "latest"])
-    parser.add_argument("--marquez-url", default=os.getenv("MARQUEZ_URL", "http://localhost:5000"))
     args = parser.parse_args()
 
     replay_mode = args.start_offset == "earliest"

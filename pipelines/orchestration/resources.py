@@ -3,11 +3,17 @@ Dagster custom resources for the Modern Data Architecture POC.
 Provides connectors to Apache Spark, Apache Flink, Marquez/OpenLineage, and Great Expectations.
 """
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING, Any
 
 import requests
 from dagster import ConfigurableResource
+
+if TYPE_CHECKING:
+    from src.domain.entities import QualityGateEvaluation
 
 logger = logging.getLogger("dagster.resources")
 
@@ -17,7 +23,7 @@ class SparkResource(ConfigurableResource):
     master_url: str = "k8s://https://kubernetes.default.svc"
     spark_image: str = "docker.io/apache/spark:3.5.0-scala2.12-java17-python3"
 
-    def submit_job(self, script_path: str, args: list = None) -> bool:
+    def submit_job(self, script_path: str, args: list[str] | None = None) -> bool:
         raise NotImplementedError("K8s profile only: Spark job submission is not wired in the local profile")
 
 
@@ -33,7 +39,7 @@ class MarquezResource(ConfigurableResource):
     """Resource to query OpenLineage/Marquez metadata graph and alerts."""
     marquez_url: str = "http://marquez.platform.svc:5000"
 
-    def get_dataset_lineage(self, namespace: str, dataset_name: str) -> dict:
+    def get_dataset_lineage(self, namespace: str, dataset_name: str) -> dict[str, Any]:
         url = f"{self.marquez_url}/api/v1/namespaces/{namespace}/datasets/{dataset_name}/lineage"
         try:
             resp = requests.get(url, timeout=5)
@@ -49,7 +55,7 @@ class GreatExpectationsResource(ConfigurableResource):
     suites_dir: str = "quality/expectations"
 
     @staticmethod
-    def _execute_quality_gate(table_name: str, suite_path: str, threshold: float):
+    def _execute_quality_gate(table_name: str, suite_path: str, threshold: float) -> QualityGateEvaluation:
         # Lazy import so Dagster only pays for the container when a gate actually runs.
         from src.container import container
 

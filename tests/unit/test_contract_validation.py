@@ -8,12 +8,12 @@ field normaliser, and the governance CLI delegator exit codes.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter
@@ -25,91 +25,16 @@ from src.domain.contracts import (
     validate_compatibility_mode,
 )
 from src.use_cases.validate_contract import ValidateContractUseCase
+from tests.helpers import contract_field as _field
+from tests.helpers import write_contract_product as _write_product
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_PATH = REPO_ROOT / "governance" / "contract_validator.py"
 
 
-def _field(name: str, field_type: str, required: bool = True) -> dict[str, Any]:
-    return {"name": name, "type": field_type, "required": required}
-
-
-def _write_product(
-    root: Path,
-    folder: str,
-    name: str,
-    contract_fields: list[dict[str, Any]],
-    schema_fields: list[dict[str, Any]],
-    *,
-    owner: str | None = "data-team@company.internal",
-    domain: str = "sales",
-) -> Path:
-    product_dir = root / "domains" / domain / "data-products" / folder
-    product_dir.mkdir(parents=True, exist_ok=True)
-
-    metadata: dict[str, Any] = {"name": name, "domain": domain, "version": "1.0.0"}
-    if owner is not None:
-        metadata["owner"] = owner
-    product = {
-        "apiVersion": "dataplatform.io/v1alpha1",
-        "kind": "DataProduct",
-        "metadata": metadata,
-        "spec": {
-            "description": f"Test data product {name}",
-            "classification": "internal",
-            "sla": {"freshness": "1h"},
-            "assets": [
-                {"name": f"gold_{name}", "type": "iceberg_table", "path": f"s3a://gold/{name}/"}
-            ],
-            "quality": {"suite": "quality/expectations/suite.json"},
-            "contract": "./contract.yaml",
-        },
-    }
-    (product_dir / "product.yaml").write_text(yaml.safe_dump(product), encoding="utf-8")
-
-    contract = {
-        "apiVersion": "datacontract.com/v1alpha1",
-        "kind": "DataContract",
-        "metadata": {
-            "name": f"{name}-contract",
-            "version": "1.0.0",
-            "domain": domain,
-            "data_product": name,
-            "owner": owner or "unknown@company.internal",
-        },
-        "spec": {
-            "description": f"Test contract for {name}",
-            "compatibility_mode": "BACKWARD",
-            "sla": {"freshness": "1h"},
-            "schema": {"format": "iceberg", "fields": contract_fields},
-            "quality": {"thresholds": {"completeness": 0.95}},
-        },
-    }
-    (product_dir / "contract.yaml").write_text(yaml.safe_dump(contract), encoding="utf-8")
-
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for field_def in schema_fields:
-        prop: dict[str, Any] = {"type": field_def["type"]}
-        if field_def.get("format"):
-            prop["format"] = field_def["format"]
-        properties[field_def["name"]] = prop
-        if field_def.get("required", True):
-            required.append(field_def["name"])
-    schema_doc = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-    }
-    (product_dir / "schema.json").write_text(json.dumps(schema_doc, indent=2), encoding="utf-8")
-    return product_dir
-
-
 def _validate(root: Path) -> dict[str, Any]:
     use_case = ValidateContractUseCase(catalog=FsDomainCatalogAdapter(str(root)))
-    return use_case.execute(repo_root=str(root))
+    return use_case.execute()
 
 
 def _errors_for(results: dict[str, Any], fragment: str) -> list[str]:
@@ -194,43 +119,57 @@ def test_broken_product_missing_owner_reported(tmp_path):
     assert any("Missing metadata.owner" in m for m in messages)
 
 
-def test_removed_field_blocks_publication(tmp_path):
+@pytest.mark.parametrize(
+    ("folder", "contract_fields", "schema_fields", "expected_groups"),
+    [
+        pytest.param(
+            "removed",
+            [_field("id", "integer"), _field("status", "string")],
+            [
+                {"name": "id", "type": "integer"},
+                {"name": "status", "type": "string"},
+                {"name": "legacy_note", "type": "string"},
+            ],
+            [("legacy_note", "removed"), ("schema.json",)],
+            id="removed_field",
+        ),
+        pytest.param(
+            "added",
+            _base_fields() + [_field("country", "string", required=True)],
+            _base_schema_fields(),
+            [("country", "required=true")],
+            id="new_required_field",
+        ),
+        pytest.param(
+            "retyped",
+            [
+                _field("id", "integer"),
+                _field("status", "integer"),
+                _field("total_amount", "decimal(12,2)"),
+                _field("created_at", "timestamp"),
+            ],
+            _base_schema_fields(),
+            [("status", "changed type")],
+            id="type_change",
+        ),
+    ],
+)
+def test_backward_incompatible_changes_block_publication(
+    tmp_path: Path,
+    folder: str,
+    contract_fields: list[dict[str, Any]],
+    schema_fields: list[dict[str, Any]],
+    expected_groups: list[tuple[str, ...]],
+) -> None:
     _write_product(tmp_path, "alpha", "alpha", _base_fields(), _base_schema_fields())
-    _write_product(
-        tmp_path,
-        "removed",
-        "removed",
-        [_field("id", "integer"), _field("status", "string")],
-        [
-            {"name": "id", "type": "integer"},
-            {"name": "status", "type": "string"},
-            {"name": "legacy_note", "type": "string"},
-        ],
-    )
+    _write_product(tmp_path, folder, folder, contract_fields, schema_fields)
 
     results = _validate(tmp_path)
 
     assert results["passed"] is False
-    messages = _errors_for(results, "removed/contract.yaml")
-    assert any("legacy_note" in m and "removed" in m for m in messages)
-    assert any("schema.json" in m for m in messages)
-
-
-def test_new_required_field_blocks_publication(tmp_path):
-    _write_product(tmp_path, "alpha", "alpha", _base_fields(), _base_schema_fields())
-    _write_product(
-        tmp_path,
-        "added",
-        "added",
-        _base_fields() + [_field("country", "string", required=True)],
-        _base_schema_fields(),
-    )
-
-    results = _validate(tmp_path)
-
-    assert results["passed"] is False
-    messages = _errors_for(results, "added/contract.yaml")
-    assert any("country" in m and "required=true" in m for m in messages)
+    messages = _errors_for(results, f"{folder}/contract.yaml")
+    for group in expected_groups:
+        assert any(all(fragment in m for fragment in group) for m in messages), messages
 
 
 def test_new_optional_field_is_allowed(tmp_path):
@@ -246,28 +185,6 @@ def test_new_optional_field_is_allowed(tmp_path):
     results = _validate(tmp_path)
 
     assert results["passed"] is True, results["errors"]
-
-
-def test_type_change_blocks_publication(tmp_path):
-    _write_product(tmp_path, "alpha", "alpha", _base_fields(), _base_schema_fields())
-    _write_product(
-        tmp_path,
-        "retyped",
-        "retyped",
-        [
-            _field("id", "integer"),
-            _field("status", "integer"),
-            _field("total_amount", "decimal(12,2)"),
-            _field("created_at", "timestamp"),
-        ],
-        _base_schema_fields(),
-    )
-
-    results = _validate(tmp_path)
-
-    assert results["passed"] is False
-    messages = _errors_for(results, "retyped/contract.yaml")
-    assert any("status" in m and "changed type" in m for m in messages)
 
 
 def test_missing_schema_json_blocks_backward_check(tmp_path):
@@ -306,66 +223,116 @@ def test_adapter_skips_malformed_files(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_evaluator_accepts_contract_and_jsonschema_shapes():
-    canonical = [
-        {"name": "id", "type": "integer", "required": True},
-        {"name": "amount", "type": "decimal(18,2)", "required": True},
-        {"name": "created_at", "type": "timestamp", "required": False},
-    ]
-    alternative = [
-        {"name": "id", "data_type": "integer", "nullable": False},
-        {"name": "amount", "data_type": "number", "nullable": False},
-        {"name": "created_at", "data_type": ["string", "null"], "format": "date-time", "nullable": True},
-    ]
-
+@pytest.mark.parametrize(
+    ("prev_fields", "new_fields", "expected_passed", "expected_fragment"),
+    [
+        pytest.param(
+            [
+                {"name": "id", "type": "integer", "required": True},
+                {"name": "amount", "type": "decimal(18,2)", "required": True},
+                {"name": "created_at", "type": "timestamp", "required": False},
+            ],
+            [
+                {"name": "id", "data_type": "integer", "nullable": False},
+                {"name": "amount", "data_type": "number", "nullable": False},
+                {"name": "created_at", "data_type": ["string", "null"], "format": "date-time", "nullable": True},
+            ],
+            True,
+            None,
+            id="contract_and_jsonschema_shapes_compatible",
+        ),
+        pytest.param(
+            [{"name": "id", "type": "string", "required": True}],
+            [{"name": "id", "data_type": "integer", "nullable": False}],
+            False,
+            "changed type from 'string' to 'integer'",
+            id="alternative_shape_type_change",
+        ),
+    ],
+)
+def test_evaluator_backward_compatibility_shapes(
+    prev_fields: list[dict[str, Any]],
+    new_fields: list[dict[str, Any]],
+    expected_passed: bool,
+    expected_fragment: str | None,
+) -> None:
     passed, errors = ContractCompatibilityEvaluator.evaluate_backward_compatibility(
-        prev_fields=canonical, new_fields=alternative
+        prev_fields=prev_fields, new_fields=new_fields
     )
-    assert passed is True, errors
-    assert errors == []
+    assert passed is expected_passed
+    if expected_fragment is None:
+        assert errors == []
+    else:
+        assert any(expected_fragment in e for e in errors)
 
 
-def test_evaluator_flags_type_change_in_alternative_shape():
-    passed, errors = ContractCompatibilityEvaluator.evaluate_backward_compatibility(
-        prev_fields=[{"name": "id", "type": "string", "required": True}],
-        new_fields=[{"name": "id", "data_type": "integer", "nullable": False}],
-    )
-    assert passed is False
-    assert any("changed type from 'string' to 'integer'" in e for e in errors)
+@pytest.mark.parametrize(
+    ("contract", "expected"),
+    [
+        pytest.param(
+            {"spec": {"schema": {"fields": [{"name": "id", "type": "integer", "required": True}]}}},
+            [{"name": "id", "type": "integer", "required": True}],
+            id="spec_shape",
+        ),
+        pytest.param(
+            {"schema": {"fields": [{"name": "id"}]}},
+            [{"name": "id"}],
+            id="root_shape",
+        ),
+        pytest.param({}, [], id="missing"),
+    ],
+)
+def test_extract_contract_fields_cases(contract: dict[str, Any], expected: list[dict[str, Any]]) -> None:
+    assert extract_contract_fields(contract) == expected
 
 
-def test_extract_helpers_navigate_spec_and_root():
-    contract = {"spec": {"schema": {"fields": [{"name": "id", "type": "integer", "required": True}]}}}
-    assert extract_contract_fields(contract) == [{"name": "id", "type": "integer", "required": True}]
-    assert extract_contract_fields({"schema": {"fields": [{"name": "id"}]}}) == [{"name": "id"}]
-    assert extract_contract_fields({}) == []
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        pytest.param(
+            {"required": ["id"], "properties": {"id": {"type": "integer"}}},
+            [{"name": "id", "type": "integer", "required": True}],
+            id="jsonschema_shape",
+        ),
+        pytest.param(
+            {"spec": {"schema": {"fields": [{"name": "id"}]}}},
+            [{"name": "id"}],
+            id="spec_shape",
+        ),
+        pytest.param({}, [], id="missing"),
+    ],
+)
+def test_extract_schema_fields_cases(schema: dict[str, Any], expected: list[dict[str, Any]]) -> None:
+    assert extract_schema_fields(schema) == expected
 
-    schema = {"required": ["id"], "properties": {"id": {"type": "integer"}}}
-    assert extract_schema_fields(schema) == [{"name": "id", "type": "integer", "required": True}]
-    assert extract_schema_fields({"spec": {"schema": {"fields": [{"name": "id"}]}}}) == [
-        {"name": "id"}
-    ]
-    assert extract_schema_fields({}) == []
 
-
-def test_validate_compatibility_mode_rules():
+def test_supported_compatibility_modes() -> None:
     assert SUPPORTED_COMPATIBILITY_MODES == ["BACKWARD", "FORWARD", "FULL", "NONE"]
 
-    ok, errors = validate_compatibility_mode({"spec": {"compatibility_mode": "BACKWARD"}})
-    assert ok is True and errors == []
 
-    ok, errors = validate_compatibility_mode(
-        {"spec": {"compatibility": {"policy": "FULL"}}}
-    )
-    assert ok is True and errors == []
-
-    ok, errors = validate_compatibility_mode({"spec": {}})
-    assert ok is False
-    assert any("Missing compatibility policy" in e for e in errors)
-
-    ok, errors = validate_compatibility_mode({"spec": {"compatibility_mode": "Sideways"}})
-    assert ok is False
-    assert any("Unsupported compatibility mode 'SIDEWAYS'" in e for e in errors)
+@pytest.mark.parametrize(
+    ("contract", "expected_ok", "expected_fragment"),
+    [
+        pytest.param({"spec": {"compatibility_mode": "BACKWARD"}}, True, None, id="explicit_backward"),
+        pytest.param({"spec": {"compatibility": {"policy": "FULL"}}}, True, None, id="nested_policy"),
+        pytest.param({"spec": {}}, False, "Missing compatibility policy", id="missing_policy"),
+        pytest.param(
+            {"spec": {"compatibility_mode": "Sideways"}},
+            False,
+            "Unsupported compatibility mode 'SIDEWAYS'",
+            id="unsupported_mode",
+        ),
+    ],
+)
+def test_validate_compatibility_mode_rules(
+    contract: dict[str, Any], expected_ok: bool, expected_fragment: str | None
+) -> None:
+    ok, errors = validate_compatibility_mode(contract)
+    assert ok is expected_ok
+    if expected_fragment is None:
+        assert errors == []
+    else:
+        assert any(expected_fragment in e for e in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -416,28 +383,30 @@ def test_cli_repo_mode_blocks_incompatible_contract(tmp_path):
     assert "changed type" in result.stderr
 
 
-def test_cli_legacy_two_file_mode(tmp_path):
+@pytest.mark.parametrize(
+    ("breaking", "expected_code", "expected_fragments"),
+    [
+        pytest.param(False, 0, ["BACKWARD compatibility check passed successfully."], id="compatible"),
+        pytest.param(True, 1, ["BACKWARD COMPATIBILITY VIOLATION", "status"], id="breaking_removed_field"),
+    ],
+)
+def test_cli_legacy_two_file_mode(
+    tmp_path: Path, breaking: bool, expected_code: int, expected_fragments: list[str]
+) -> None:
     prev_fields = [_field("id", "integer"), _field("status", "string")]
-    new_fields_removed = [_field("id", "integer")]
+    new_fields = [_field("id", "integer")] if breaking else list(prev_fields)
     base_contract = {"spec": {"schema": {"fields": prev_fields}}}
 
     prev_file = tmp_path / "prev_contract.yaml"
     prev_file.write_text(yaml.safe_dump(base_contract), encoding="utf-8")
 
-    compatible = tmp_path / "new_contract.yaml"
-    compatible.write_text(
-        yaml.safe_dump({"spec": {"schema": {"fields": prev_fields}}}), encoding="utf-8"
-    )
-    breaking = tmp_path / "breaking_contract.yaml"
-    breaking.write_text(
-        yaml.safe_dump({"spec": {"schema": {"fields": new_fields_removed}}}), encoding="utf-8"
+    new_file = tmp_path / "new_contract.yaml"
+    new_file.write_text(
+        yaml.safe_dump({"spec": {"schema": {"fields": new_fields}}}), encoding="utf-8"
     )
 
-    ok = _run_cli("--file", str(compatible), "--prev-file", str(prev_file))
-    assert ok.returncode == 0, ok.stderr
-    assert "BACKWARD compatibility check passed successfully." in ok.stderr
+    result = _run_cli("--file", str(new_file), "--prev-file", str(prev_file))
 
-    bad = _run_cli("--file", str(breaking), "--prev-file", str(prev_file))
-    assert bad.returncode == 1
-    assert "BACKWARD COMPATIBILITY VIOLATION" in bad.stderr
-    assert "status" in bad.stderr
+    assert result.returncode == expected_code, result.stderr
+    for fragment in expected_fragments:
+        assert fragment in result.stderr

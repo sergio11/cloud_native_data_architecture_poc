@@ -16,6 +16,7 @@ from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.domain.exceptions import QualityGateBreachError, SuiteNotFoundError
 from src.use_cases.cleanse_silver import CleanseSilverUseCase
 from src.use_cases.run_quality_gate import RunQualityGateUseCase
+from tests.helpers import StubLineage
 
 
 class StubStorage:
@@ -48,28 +49,6 @@ class StubStorage:
 
     def list_versions(self, table_name: str) -> list[dict[str, Any]]:
         return []
-
-
-class StubLineage:
-    """Minimal in-memory LineagePublisherPort stub recording emitted events."""
-
-    def __init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
-
-    def emit_job_event(
-        self,
-        job_name: str,
-        inputs: list[str],
-        outputs: list[str],
-        status: str = "COMPLETE",
-    ) -> bool:
-        self.events.append({
-            "job_name": job_name,
-            "inputs": list(inputs),
-            "outputs": list(outputs),
-            "status": status,
-        })
-        return True
 
 
 def _write_suite(tmp_path, name: str, expectations: list[dict[str, Any]]) -> str:

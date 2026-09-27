@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
@@ -223,3 +226,67 @@ def test_empty_log_returns_empty(tmp_path: Path):
     assert result["status"] == "NO_EVENTS"
     assert result["windows_written"] == 0
     assert storage.table_exists(TARGET_TABLE) is False  # nothing written, nothing fabricated
+
+
+def test_write_failure_does_not_advance_cursor(tmp_path: Path):
+    """Regression: the cursor must advance only after a successful speed-table write.
+
+    Simulates a crash between recompute and cursor commit (storage raises on the
+    first write). The failed run must leave the cursor untouched so a second
+    execution still materializes the pending windows instead of NO_EVENTS.
+    """
+    real_storage = LakehouseStorageAdapter(db_path=str(tmp_path / "lakehouse.db"))
+    broker = EventStreamAdapter(db_path=str(tmp_path / "event_log.db"))
+    lineage = MarquezLineageAdapter(
+        marquez_url="http://127.0.0.1:1",
+        audit_file_path=str(tmp_path / "lineage.jsonl"),
+    )
+
+    class FlakyStorage:
+        """Delegates to the real storage but fails the first write on purpose."""
+
+        def __init__(self, delegate: LakehouseStorageAdapter) -> None:
+            self._delegate = delegate
+            self._fail_next = True
+
+        def write_table(self, table_name: str, records: list[dict[str, Any]], mode: str = "append") -> int:
+            if self._fail_next:
+                self._fail_next = False
+                raise RuntimeError("simulated speed-table write failure")
+            return self._delegate.write_table(table_name, records, mode=mode)
+
+        def read_table(self, table_name: str, limit: int | None = None, version: int | None = None):
+            return self._delegate.read_table(table_name, limit=limit, version=version)
+
+        def table_exists(self, table_name: str) -> bool:
+            return self._delegate.table_exists(table_name)
+
+        def get_table_schema(self, table_name: str) -> list[str]:
+            return self._delegate.get_table_schema(table_name)
+
+        def list_versions(self, table_name: str):
+            return self._delegate.list_versions(table_name)
+
+    use_case = ProcessStreamUseCase(broker=broker, storage=FlakyStorage(real_storage), lineage=lineage)  # type: ignore[arg-type]
+    topic = "unit.cursor_after_write"
+
+    broker.publish_event(topic, "1", {
+        "timestamp": "2026-01-15T12:01:00+00:00", "status": "confirmed",
+        "total_amount": 50.0, "order_date": "2026-01-15",
+    })
+    broker.publish_event(topic, "2", {
+        "timestamp": "2026-01-15T12:02:00+00:00", "status": "confirmed",
+        "total_amount": 70.0, "order_date": "2026-01-15",
+    })
+
+    with pytest.raises(RuntimeError, match="simulated speed-table write failure"):
+        use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
+
+    result = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
+    assert result["status"] == "SUCCESS"
+    assert result["events_consumed"] == 2  # cursor was NOT falsely advanced by the failed run
+    assert result["windows_generated"] == 1
+    rows = real_storage.read_table(TARGET_TABLE)
+    assert len(rows) == 1
+    assert int(rows[0]["window_orders"]) == 2
+    assert float(rows[0]["window_revenue"]) == 120.0

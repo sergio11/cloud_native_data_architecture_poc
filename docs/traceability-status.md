@@ -8,7 +8,7 @@
 > reason stated. Status counts at the bottom.
 
 Evidence commands:
-- `python -m pytest tests -q` — full suite (64 tests: 54 unit + 10 integration)
+- `python -m pytest tests --collect-only -q -p no:cacheprovider` — full suite (107 tests: 95 unit + 12 integration)
 - `python -m pytest tests/integration -q` — RF acceptance scenarios
 - `rake demo` — RF-24 end-to-end (local profile: Python + SQLite, no cluster)
 
@@ -32,16 +32,16 @@ Evidence commands:
 | RF-12 [S] | Reproceso completo de cualquier capa sin inconsistencia | **PARTIAL** | Replay de stream + recomputación Gold + lecturas versionadas: VERIFIED. Re-ejecución medallion completa sin duplicados: VERIFIED (`test_full_demo_flow`). Sin comando único de reproceso Bronze→Gold en una invocación. |
 | RF-13 [M] | Publicación declarativa de productos por dominio | **PARTIAL** | Los 6 productos existen como manifiestos declarativos (`domains/**/product.yaml`) y validan sin tocar el núcleo (`test_valid_product_set_passes`). No hay pipeline de "publicación" con registro: el manifiesto **es** la publicación en el perfil local. |
 | RF-14 [M] | Productos encontrables y autoexplicativos en catálogo | **PARTIAL** | Manifiestos autoexplicativos (dueño, SLA, clasificación, esquema, linaje declarado): sí. Catálogo buscable con UI: solo perfil K8s (Marquez); en local, el catálogo es el árbol `domains/` + validación. |
-| RF-15 [M] | Contratos máquina-legibles validados; ruptura bloquea | **VERIFIED** | `test_rf15_governance_cli_blocks_field_rename_and_passes_clean_tree` + 15 tests en `test_contract_validation.py` (eliminación/cambio de tipo/campo requerido ⇒ bloqueo, exit 1). Nota: el bloqueo actúa en ejecución/validación; **no hay pipeline CI** que lo imponga en merge). |
+| RF-15 [M] | Contratos máquina-legibles validados; ruptura bloquea | **VERIFIED** | `test_rf15_governance_cli_blocks_field_rename_and_passes_clean_tree` + 15 tests en `test_contract_validation.py` (eliminación/cambio de tipo/campo requerido ⇒ bloqueo, exit 1). Umbrales de contrato por dimensión (`spec.quality.thresholds`: completeness/uniqueness/validity) aplicados por `evaluate_and_enforce` + BACKWARD: `test_quality_dimension_rates.py` (9 tests: `extract_quality_thresholds`, `dimension_rates`, veto fail-closed). Nota: el bloqueo actúa en ejecución/validación; **no hay pipeline CI** que lo imponga en merge). |
 | RF-16 [M] | Consumo cross-dominio self-service | **PARTIAL** | Cualquier consumidor puede consultar el serving sin intermediación (`test_rf11`, `test_full_demo_flow`). Sin capa de control de acceso: es apertura total, no self-service gobernado. |
 | RF-17 [S] | Políticas globales federadas aplicadas automáticamente | **PARTIAL** | Dueño/clasificación/nombres/modo de compatibilidad se exigen en validación (`test_broken_product_missing_owner_reported`). Admisión en despliegue (Kyverno): solo values, sin templates — DEFERRED a K8s. |
 | RF-18 [S] | Cuotas/aislamiento por dominio | **DEFERRED** | `ResourceQuota`/`LimitRange` por dominio existen en el chart `s6-mesh` (perfil K8s). Sin enforcement en perfil local. |
 | RF-19 [M] | Linaje end-to-end consultable, alimentado automáticamente | **VERIFIED** | `test_rf19_lineage_records_connected_bronze_to_gold_chain` (cadena bronze→silver→gold conectada en `data/lineage_audit.jsonl`; grafo UI solo en K8s/Marquez). |
-| RF-20 [S] | Metadatos activos: alertas ante cambios/degradación | **PARTIAL** | `lineage/config/lineage_webhook_service.py` + `alert-rules.yaml` existen y son desplegables vía `s7-fabric`, pero **no forman parte del flujo `rake demo` ni tienen tests**. |
+| RF-20 [S] | Metadatos activos: alertas ante cambios/degradación | **PARTIAL** | `tests/unit/test_lineage_webhook_rules.py` (3 tests herméticos: `alert-rules.yaml` gobierna las decisiones del RuleEngine — quality-breach, failure, SLA-freshness). Las acciones de notificación del YAML no se ejecutan (alertas = registro local) y el despliegue vía `s7-fabric` arranca un stub; **fuera del flujo `rake demo`**. |
 | RF-21 [S] | Seguridad/clasificación embebida en el flujo | **PARTIAL** | Pseudonimización PII embebida en el flujo Gold: VERIFIED (`test_gdpr_privacy_policy`, columnas `email_hash`/`name_masked` en `test_full_demo_flow`). Sin RBAC en tiempo de ejecución. |
 | RF-22 [M] | Pipelines orquestables con estado observable | **VERIFIED** | Tareas `rake` observables bajo demanda + definiciones Dagster + exit codes 0/1/2 en gates. |
 | RF-23 [S] | Panel único (pipelines, lag, calidad) | **DEFERRED** | Assets de Grafana/Prometheus en `infra/helm/s8-ops`, pero **el chart no tiene templates**: ningún dashboard desplegado. |
-| RF-24 [M] | Comando único de demo reproducible | **VERIFIED** | `rake demo` (y `scripts/demo.sh`): ingesta → producto → consumo → tests; flujo F1–F6 cubierto e2e por `test_full_demo_flow`. |
+| RF-24 [M] | Comando único de demo reproducible | **VERIFIED** | `rake demo` (fuente única de verdad; `scripts/demo.sh` es un wrapper fino que delega en `rake demo`): ingesta → producto → consumo → tests; flujo F1–F6 cubierto e2e por `test_full_demo_flow`. |
 | RF-25 [M] | Documentación de arquitectura apta para portfolio | **VERIFIED** | `docs/architecture/overview.md` (perfil local vs K8s), ADRs, `docs/concepts-to-components.md`, este informe. |
 
 **Counts — RF:** VERIFIED **14** · PARTIAL **9** · DEFERRED **2** · OUT OF SCOPE **0**
@@ -75,3 +75,6 @@ Evidence commands:
 5. Telemetría (Prometheus/Grafana), catálogo UI (Marquez) y admisión (Kyverno) son **perfil K8s**, no verificados aquí.
 6. `flink_clickstream_stream.py` agrega ventanas del topic clickstream; métricas funnel/sesión están fuera de alcance (SRS §1.2).
 7. La fusión del serving es por clave, no por recencia: una fila stream cuya `(order_date, status)` ya existe en batch queda ensombrecida aunque sea más reciente (regla batch-wins, RF-11). El stream aporta claves ausentes del batch (datos posteriores a la última recomputación con fecha/estado nuevos).
+8. Solo se exigen las dimensiones del contrato que la suite mide: si el contrato declara un umbral (p.ej. `uniqueness`) para una dimensión que la suite no evalúa, esa dimensión se omite (ver `evaluate_and_enforce`: `measurable`). Caso conocido: `uniqueness` en agregados Gold con clave compuesta no es medible — el engine solo soporta unicidad single-column (`expect_column_values_to_be_unique` sobre una columna).
+9. `quality.assertions` del DSL del contrato (p.ej. `total_amount >= 0` en `orders/contract.yaml`) siguen siendo declarativas: ningún código las compila a expectaciones del engine; solo los umbrales `spec.quality.thresholds` se aplican.
+10. `scripts/demo.sh` es ahora un wrapper fino que delega en `rake demo` (fuente única de verdad).

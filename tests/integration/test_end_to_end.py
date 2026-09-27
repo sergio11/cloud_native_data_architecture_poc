@@ -53,7 +53,11 @@ def _run_medallion_chain(world) -> dict:
         results["cleanse"][entity] = world.cleanse_silver.execute(
             entity, quality_threshold=0.95, suite_path=suite
         )
-    results["gold"] = world.aggregate_gold.execute("all")
+    results["gold"] = world.aggregate_gold.execute(
+        "all",
+        daily_metrics_suite=world.gold_daily_metrics_suite,
+        customers_suite=world.gold_customers_suite,
+    )
     return results
 
 

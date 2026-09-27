@@ -25,6 +25,48 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 
 > **Two execution profiles** share the same hexagonal core (`src/`): the **local profile** (default — pure Python + SQLite, verified by `rake demo` / `rake test`) and the **K8s profile** (`infra/helm`, `infra/profiles` — deployment target). See [`docs/architecture/overview.md`](docs/architecture/overview.md) and the honest RF-by-RF report [`docs/traceability-status.md`](docs/traceability-status.md).
 
+### Verified scope & known K8s placeholders
+
+> **The K8s profile (`infra/helm`, `infra/profiles`) is a *deployment target
+> not verified in this environment*.** Everything marked VERIFIED in
+> [`docs/traceability-status.md`](docs/traceability-status.md) was proven in
+> the local profile (Python + SQLite) via `rake demo` / `rake test`. Honest
+> list of known K8s placeholders (details in `docs/architecture/overview.md`,
+> "What exists vs. what is wired"):
+> - `s8-ops` has no `templates/` — Grafana/Prometheus values, dashboard JSON
+>   and alerts exist as assets, but **no dashboard is deployed**.
+> - `s7-fabric` runs `python http.server` as the alert-service container, not
+>   the real alert service (`lineage/config/lineage_webhook_service.py`).
+> - The `s1-ingestion` CronJob only `echo`s an ingestion cycle (no real load).
+> - `infra/profiles/*.yaml` are NOT valid Helm overlays: no template reads
+>   `.Values.subsystems`.
+> - Spark (`s3-batch`) / Flink (`s4-stream`) jobs reference script paths that
+>   do not exist inside the container images (no in-repo Dockerfile ships the
+>   repo scripts into those images).
+> - Kyverno is declared in `s6-mesh/values.yaml` but **no Kyverno template is
+>   installed from `infra/`** (admission control not rendered).
+> - Views 2–3 of `pipelines/serving/unified_view.sql` (marketing / finance)
+>   reference tables no pipeline produces, and the Trino views init-job only
+>   creates schemas — it does **not** apply the SQL views.
+> - `pipelines/serving/catalog_registration.py` requires `POLARIS_URL` /
+>   `POLARIS_TOKEN` / `MARQUEZ_URL` (K8s-only services; it exits non-zero
+>   without them).
+
+**Event backend (local profile).** `src/adapters/streaming/event_stream.py`
+uses the embedded SQLite WAL log (`data/event_log.db`) by default; when
+`KAFKA_BOOTSTRAP_SERVERS` is set and non-empty, Kafka becomes the canonical
+backend with fail-fast semantics (unreachable broker raises `RuntimeError` —
+never a silent SQLite fallback; no double writes).
+
+**Quality-threshold precedence.** Per-dimension contract thresholds
+(`spec.quality.thresholds` in `contract.yaml`: `completeness`, `uniqueness`,
+`validity`) govern the gate verdict and the global fallback (`0.95`) is
+ignored once any declared dimension is measurable; the `--threshold` flag of
+`silver_transform.py` (and of the standalone `run_quality_gate.py`) only
+applies when the contract declares no thresholds (implemented in
+`src/domain/quality_gate.py::evaluate_and_enforce`, thresholds extracted by
+`src/domain/contracts.py::extract_quality_thresholds`).
+
 ### Strategic Objectives
 - **Pedagogical Reference**: Provide a clear, hands-on demonstration showing how theoretical data architecture concepts translate into production-grade open-source code.
 - **Technical Architecture Portfolio**: Offer an end-to-end, documented platform featuring automated verification, strict schema compatibility rules, GDPR PII pseudonymization, and comprehensive Architecture Decision Records (ADRs).
@@ -172,7 +214,7 @@ rake medallion:all                # RF-01..RF-07 (bronze -> silver -> gold)
 rake stream:orders                # RF-09 speed layer (auto-seeds demo events if log empty)
 rake stream:replay                # RF-10 full Kappa replay
 rake serving:query                # RF-11 unified query
-rake test                         # unit + integration (64 tests)
+rake test                         # unit + integration (107 tests: 95 unit + 12 integration)
 rake test:coverage                # with coverage report
 rake lint                         # ruff
 rake typecheck                    # mypy on src/

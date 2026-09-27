@@ -16,9 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import requests
 
-from src.adapters.lineage import marquez_lineage
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
@@ -26,26 +24,8 @@ from src.domain.exceptions import QualityGateBreachError
 from src.use_cases.aggregate_gold import AggregateGoldUseCase
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-@pytest.fixture(autouse=True)
-def _hermetic_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keeps every Gold gate test offline and CWD-independent.
-
-    * Marquez HTTP POST fails instantly instead of burning the adapter's
-      socket timeout on every lineage emit (the local audit-trail path is
-      still exercised on every emit).
-    * CWD is pinned to the repo root so the default relative suite paths
-      (quality/expectations/...) resolve exactly like production drivers.
-    """
-
-    def _unreachable_post(*args: Any, **kwargs: Any) -> Any:
-        raise requests.exceptions.ConnectionError(
-            "network disabled: unit tests must be hermetic"
-        )
-
-    monkeypatch.setattr(marquez_lineage.requests, "post", _unreachable_post)
-    monkeypatch.chdir(REPO_ROOT)
+GOLD_DAILY_SUITE = str(REPO_ROOT / "quality" / "expectations" / "gold_daily_metrics_suite.json")
+GOLD_CUSTOMERS_SUITE = str(REPO_ROOT / "quality" / "expectations" / "gold_customers_suite.json")
 
 
 @pytest.fixture
@@ -119,7 +99,11 @@ def test_gold_gate_blocks_on_breach(world):
     storage.write_table("silver.sales.customers", _valid_customers())
 
     with pytest.raises(QualityGateBreachError) as exc_info:
-        world["use_case"].execute("all")
+        world["use_case"].execute(
+            "all",
+            daily_metrics_suite=GOLD_DAILY_SUITE,
+            customers_suite=GOLD_CUSTOMERS_SUITE,
+        )
 
     assert exc_info.value.pass_rate < exc_info.value.threshold
     # Breaching target blocked BEFORE any write: table never created/empty.
@@ -146,7 +130,11 @@ def test_gold_gate_passes_happy_path(world):
     ])
     storage.write_table("silver.sales.customers", _valid_customers())
 
-    result = world["use_case"].execute("all")
+    result = world["use_case"].execute(
+        "all",
+        daily_metrics_suite=GOLD_DAILY_SUITE,
+        customers_suite=GOLD_CUSTOMERS_SUITE,
+    )
 
     assert result["status"] == "SUCCESS"
     # (2026-09-25, confirmed), (2026-09-25, pending), (2026-09-26, shipped).

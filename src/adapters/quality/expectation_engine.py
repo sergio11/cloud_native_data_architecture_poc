@@ -38,6 +38,18 @@ logger = logging.getLogger("adapter.quality.engine")
 FAIL_CLOSED_RULE = "fail_closed"
 FAIL_CLOSED_MARKER = "no data / no assertions to evaluate"
 
+# Quality dimension per supported expectation type. Unsupported types map to no
+# dimension: they still force ``passed=False`` (fail-closed) without skewing a
+# dimension ratio.
+DIMENSION_BY_EXPECTATION: dict[str, str] = {
+    "expect_column_values_to_not_be_null": "completeness",
+    "expect_table_row_count_to_be_between": "completeness",
+    "expect_column_values_to_be_unique": "uniqueness",
+    "expect_column_values_to_be_in_set": "validity",
+    "expect_column_values_to_be_between": "validity",
+    "expect_column_values_to_match_regex": "validity",
+}
+
 # Shared signature of every per-type handler:
 # (records, kwargs, mostly, col, col_key) -> (success, observed, details, column).
 _ExpectationHandler = Callable[
@@ -103,6 +115,8 @@ class ExpectationEngineAdapter(QualityEnginePort):
         passed_count = 0
         failures: list[QualityAssertionResult] = []
         unsupported = False
+        dimension_total: dict[str, int] = {}
+        dimension_passed: dict[str, int] = {}
 
         handlers: dict[str, _ExpectationHandler] = {
             "expect_column_values_to_not_be_null": self._eval_not_null,
@@ -140,6 +154,12 @@ class ExpectationEngineAdapter(QualityEnginePort):
             else:
                 success, observed, details, col = handler(records, kwargs, mostly, col, col_key)
 
+            dimension = DIMENSION_BY_EXPECTATION.get(exp_type)
+            if dimension is not None:
+                dimension_total[dimension] = dimension_total.get(dimension, 0) + 1
+                if success:
+                    dimension_passed[dimension] = dimension_passed.get(dimension, 0) + 1
+
             if success:
                 passed_count += 1
             else:
@@ -156,6 +176,10 @@ class ExpectationEngineAdapter(QualityEnginePort):
         # Threshold governs the verdict, but fail-closed conditions (unsupported
         # expectation types) force passed=False regardless of the arithmetic.
         passed = (pass_rate >= threshold) and not unsupported
+        dimension_rates = {
+            dimension: round(dimension_passed.get(dimension, 0) / total, 4)
+            for dimension, total in dimension_total.items()
+        }
         return QualityGateEvaluation(
             suite_name=suite_name,
             table_name=table_name,
@@ -165,6 +189,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
             threshold=threshold,
             passed=passed,
             failures=failures,
+            dimension_rates=dimension_rates,
         )
 
     def _eval_not_null(

@@ -23,7 +23,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 | **Data Products** | Autonomous data delivery nodes with code, metadata, schemas, SLAs, and ports. | Standardized `product.yaml` descriptors and schema specifications. | [`domains/sales/data-products/orders/product.yaml`](../domains/sales/data-products/orders/product.yaml)<br>[`domains/marketing/data-products/campaigns/product.yaml`](../domains/marketing/data-products/campaigns/product.yaml) |
 | **Data Contracts** | Declarative producer-consumer agreements defining schema, quality rules, and terms. | Bitol Open Data Contract Standard (ODCS) YAML specifications. | [`domains/sales/data-products/orders/contract.yaml`](../domains/sales/data-products/orders/contract.yaml)<br>[`domains/marketing/data-products/campaigns/contract.yaml`](../domains/marketing/data-products/campaigns/contract.yaml) |
 | **Data Fabric & Lineage** | Active metadata harvesting generating dynamic, end-to-end lineage graphs. | OpenLineage Spark/Flink listeners emitting events to Marquez. | OpenLineage emitters in [`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py)<br>Marquez client in [`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py) |
-| **Data Quality Gates** | Programmatic test suites blocking pipeline progression upon quality threshold breaches. | Fail-closed engine over Great-Expectations-format suites (missing suite / unknown type / empty data also block). | [`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)<br>[`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json) |
+| **Data Quality Gates** | Programmatic test suites blocking pipeline progression upon quality threshold breaches. | Fail-closed engine over Great-Expectations-format suites (missing suite / unknown type / empty data also block). Contract `spec.quality.thresholds` govern per dimension over the `0.95` fallback. | [`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)<br>[`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json) |
 | **Privacy & Governance** | GDPR Article 25 privacy-by-design, pseudonymization, and PII cryptographic hashing. | SHA-256 email hashing, name initial masking, and year-only truncation before Gold tier. | [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py)<br>PII tags in `contract.yaml` |
 | **Modern Orchestration** | Software-Defined Assets (SDAs) tracking data lineage, materializations, and freshness. | Dagster asset graph coordinating pipelines and profiles. | Dagster asset definitions & execution profiles in [`docs/architecture/overview.md`](architecture/overview.md) |
 
@@ -39,7 +39,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 - **Repository Implementation**:
   - **Bronze Ingestion** ([`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py)): Connects to PostgreSQL, extracts source tables without schema alteration, appends technical audit columns (`_ingested_at`, `_source`, `_batch_id`), and commits them to Iceberg tables located at `s3a://lakehouse/bronze/`.
   - **Silver Transformation** ([`pipelines/medallion/silver_transform.py`](../pipelines/medallion/silver_transform.py)): Reads Bronze records, strips leading/trailing whitespace, converts dates and decimals to contractual types, removes duplicate orders using window functions (`ROW_NUMBER() OVER (PARTITION BY id ORDER BY _ingested_at DESC)`), and checks referential integrity between orders and customers.
-  - **Gold Aggregation** ([`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py)): Reads Silver tables, performs business-level grouping (e.g., daily sales by order status, customer segment lifetime value), applies PII masking, and publishes to `gold.*`.
+  - **Gold Aggregation** ([`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py)): Reads Silver tables, performs business-level grouping (e.g., daily sales by order status, customer segment lifetime value), applies PII masking, and publishes to `gold.*`. Publishing is gated by the required suites `quality/expectations/gold_daily_metrics_suite.json` / `gold_customers_suite.json` (a missing suite blocks the run).
 
 ---
 
@@ -77,7 +77,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
   - **Hybrid Approach**: Employs Spark batch for complex, multi-year relational dimensional models and Flink streaming for low-latency operational metrics, while ensuring both engines support historical replay (Kappa principle).
 - **Repository Implementation**:
   - **Batch Pipeline**: [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py) aggregates historical orders daily.
-  - **Stream Pipeline**: [`pipelines/stream/flink_orders_stream.py`](../pipelines/stream/flink_orders_stream.py) consumes Kafka events, applies 5-minute tumbling event-time windows, and writes to `stream.sales.orders_windowed`.
+  - **Stream Pipeline**: [`pipelines/stream/flink_orders_stream.py`](../pipelines/stream/flink_orders_stream.py) consumes events, applies 5-minute tumbling event-time windows, and writes to `stream.sales.orders_windowed`. Event backend: SQLite WAL by default; Kafka is canonical only when `KAFKA_BOOTSTRAP_SERVERS` is set (fail-fast, `src/adapters/streaming/event_stream.py`).
   - **Unified Serving View** ([`pipelines/serving/unified_view.sql`](../pipelines/serving/unified_view.sql)):
     ```sql
     CREATE OR REPLACE VIEW serving.sales.unified_revenue AS
@@ -136,6 +136,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
   - **Quality Gates (Great-Expectations-format suites)** ([`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)):
     - Evaluates JSON test suites ([`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json)) with the built-in fail-closed engine (`src/adapters/quality/expectation_engine.py`) — not the Great Expectations library.
     - Blocks pipeline progression with exit code `1` if the quality score is below threshold (missing suite, unknown expectation type, or empty data also block); optionally emits alert payloads to webhooks.
+    - Threshold precedence: per-dimension contract thresholds (`spec.quality.thresholds`) govern the verdict via `src/domain/quality_gate.py::evaluate_and_enforce`; the global/`--threshold` value (default `0.95`) applies only when the contract is silent, and contract dimensions the suite does not measure are skipped.
 
 ---
 

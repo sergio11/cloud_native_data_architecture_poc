@@ -27,10 +27,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import requests
 
 from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter
-from src.adapters.lineage import marquez_lineage
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.serving.sql_serving import SqlServingAdapter
@@ -49,6 +47,8 @@ QUALITY_DIR = REPO_ROOT / "quality" / "expectations"
 
 ORDERS_SUITE = str(QUALITY_DIR / "silver_orders_suite.json")
 CUSTOMERS_SUITE = str(QUALITY_DIR / "silver_customers_suite.json")
+GOLD_DAILY_SUITE = str(QUALITY_DIR / "gold_daily_metrics_suite.json")
+GOLD_CUSTOMERS_SUITE = str(QUALITY_DIR / "gold_customers_suite.json")
 
 
 def _demo_orders() -> list[dict[str, Any]]:
@@ -119,26 +119,6 @@ class DeterministicOltpSource:
         return [dict(row) for row in rows]
 
 
-@pytest.fixture(autouse=True)
-def _hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keeps every integration test offline and CWD-independent.
-
-    * Marquez HTTP POST fails instantly (ConnectionError) instead of burning
-      the adapter's 2s socket timeout on every lineage emit.
-    * No Trino / PostgreSQL fallback can trigger: the env vars that enable
-      those backends are removed for the duration of the test.
-    """
-
-    def _unreachable_post(*args: Any, **kwargs: Any) -> Any:
-        raise requests.exceptions.ConnectionError(
-            "network disabled: integration tests must be hermetic"
-        )
-
-    monkeypatch.setattr(marquez_lineage.requests, "post", _unreachable_post)
-    monkeypatch.delenv("TRINO_HOST", raising=False)
-    monkeypatch.delenv("PGPASSWORD", raising=False)
-
-
 @pytest.fixture
 def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
     """Isolated hexagonal world wired exactly like ``src.container.Container``
@@ -182,6 +162,8 @@ def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
         source=source,
         orders_suite=ORDERS_SUITE,
         customers_suite=CUSTOMERS_SUITE,
+        gold_daily_metrics_suite=GOLD_DAILY_SUITE,
+        gold_customers_suite=GOLD_CUSTOMERS_SUITE,
         demo_orders=DEMO_ORDERS,
         demo_customers=DEMO_CUSTOMERS,
         lineage_events=_lineage_events,
@@ -189,10 +171,10 @@ def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
             source=source, storage=storage, lineage=lineage
         ),
         cleanse_silver=CleanseSilverUseCase(
-            storage=storage, quality_engine=quality_engine, lineage=lineage
+            storage=storage, quality_engine=quality_engine, lineage=lineage, catalog=domain_catalog
         ),
         aggregate_gold=AggregateGoldUseCase(
-            storage=storage, lineage=lineage, quality_engine=quality_engine
+            storage=storage, lineage=lineage, quality_engine=quality_engine, catalog=domain_catalog
         ),
         process_stream=ProcessStreamUseCase(
             broker=broker, storage=storage, lineage=lineage

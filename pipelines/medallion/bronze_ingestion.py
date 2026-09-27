@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bronze_ingestion")
 
-SUPPORTED_ENTITIES = ["orders", "customers", "order_items", "campaigns"]
+SUPPORTED_ENTITIES = ["orders", "customers"]
 
 
 def main() -> None:
@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument(
         "--entity",
         default="orders",
-        choices=["orders", "customers", "order_items", "campaigns", "all"],
+        choices=["orders", "customers", "all"],
         help="Operational entity to ingest into Bronze tier",
     )
     args = parser.parse_args()

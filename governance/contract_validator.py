@@ -67,7 +67,7 @@ def run_legacy_comparison(new_file: str, prev_file: str) -> int:
 def run_repo_validation(repo_root: str) -> int:
     """Full RF-15 repository validation via the use case (container-free wiring)."""
     use_case = ValidateContractUseCase(catalog=FsDomainCatalogAdapter(repo_root))
-    results: dict[str, Any] = use_case.execute(repo_root=repo_root)
+    results: dict[str, Any] = use_case.execute()
 
     logger.info(
         "Found %d DataProduct manifests and %d DataContract files",

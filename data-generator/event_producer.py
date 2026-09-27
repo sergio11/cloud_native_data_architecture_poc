@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -91,7 +92,7 @@ def _get_faker():
     """Lazily loads Faker so importing this module never requires faker.
 
     Returns a Faker instance when the package is installed, else None so
-    callers keep running in stdout-simulation mode on stdlib random/uuid.
+    callers keep running in --simulate mode on stdlib random/uuid.
     """
     try:
         from faker import Faker
@@ -139,16 +140,27 @@ def generate_clickstream_event(session_id: str, customer_id: Optional[int]) -> C
 @click.option("--topic-clickstream", default=DEFAULT_TOPIC_CLICKSTREAM, help="Kafka topic for clickstream")
 @click.option("--rate", default=DEFAULT_RATE, type=int, help="Events per second")
 @click.option("--duration", default=10, type=int, help="Execution duration in seconds")
-def main(bootstrap_servers, topic_orders, topic_clickstream, rate, duration):
+@click.option("--simulate", is_flag=True, default=False,
+              help="Print generated events to stdout (one JSON line per event) without requiring Kafka")
+def main(bootstrap_servers, topic_orders, topic_clickstream, rate, duration, simulate):
     logger.info("Starting event producer to %s...", bootstrap_servers)
     logger.info("Publishing to topics: '%s' and '%s' at %d events/sec", topic_orders, topic_clickstream, rate)
 
-    try:
-        from confluent_kafka import Producer
-        producer = Producer({"bootstrap.servers": bootstrap_servers})
-    except Exception:
-        producer = None
-        logger.info("Confluent Kafka library not active or broker offline; running in stdout simulation mode.")
+    producer = None
+    if simulate:
+        logger.info("Running in --simulate mode: printing events to stdout, Kafka not required.")
+    else:
+        try:
+            from confluent_kafka import Producer
+            producer = Producer({"bootstrap.servers": bootstrap_servers})
+        except Exception as exc:
+            logger.error(
+                "Kafka unavailable at '%s': %s. Start the broker, check --bootstrap-servers, "
+                "or re-run with --simulate to print events to stdout without Kafka.",
+                bootstrap_servers,
+                exc,
+            )
+            sys.exit(1)
 
     end_time = time.time() + duration
     events_sent = 0
@@ -158,7 +170,10 @@ def main(bootstrap_servers, topic_orders, topic_clickstream, rate, duration):
         order_evt = generate_order_event(random.randint(1, 100000), random.randint(1, 1000))
         click_evt = generate_clickstream_event(random.choice(sessions), random.choice([None, random.randint(1, 1000)]))
 
-        if producer:
+        if simulate:
+            click.echo(json.dumps(order_evt.to_dict()))
+            click.echo(json.dumps(click_evt.to_dict()))
+        elif producer:
             try:
                 producer.produce(topic_orders, key=str(order_evt.order_id), value=json.dumps(order_evt.to_dict()))
                 producer.produce(topic_clickstream, key=click_evt.session_id, value=json.dumps(click_evt.to_dict()))

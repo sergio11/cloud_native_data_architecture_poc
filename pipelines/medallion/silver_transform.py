@@ -35,7 +35,13 @@ def main() -> None:
         choices=["orders", "customers", "all"],
         help="Entity to cleanse and promote to Silver tier",
     )
-    parser.add_argument("--threshold", default=0.95, type=float, help="Quality gate pass threshold (0.0 to 1.0)")
+    parser.add_argument(
+        "--threshold",
+        default=None,
+        type=float,
+        help="Quality gate pass threshold (0.0 to 1.0); when omitted, the entity contract thresholds govern "
+        "per dimension, falling back to 0.95 when the contract is silent",
+    )
     args = parser.parse_args()
 
     entities = ["orders", "customers"] if args.entity == "all" else [args.entity]

@@ -11,7 +11,6 @@ row is fixed so the suite is reproducible.
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import sys
@@ -19,9 +18,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from src.domain.exceptions import QualityGateBreachError
+from tests.helpers import contract_field as _field
+from tests.helpers import write_contract_product as _write_product
 
 CLI_PATH = Path(__file__).resolve().parents[2] / "governance" / "contract_validator.py"
 
@@ -90,79 +90,6 @@ def _window_sort_key(row: dict[str, Any]) -> Any:
     return (row["window_start"], row["status"])
 
 
-def _field(name: str, field_type: str, required: bool = True) -> dict[str, Any]:
-    return {"name": name, "type": field_type, "required": required}
-
-
-def _write_product(
-    root: Path,
-    folder: str,
-    name: str,
-    contract_fields: list[dict[str, Any]],
-    schema_fields: list[dict[str, Any]],
-) -> Path:
-    """Materialises a minimal valid DataProduct trio (product/contract/schema)."""
-    product_dir = root / "domains" / "sales" / "data-products" / folder
-    product_dir.mkdir(parents=True, exist_ok=True)
-
-    product = {
-        "apiVersion": "dataplatform.io/v1alpha1",
-        "kind": "DataProduct",
-        "metadata": {
-            "name": name,
-            "domain": "sales",
-            "version": "1.0.0",
-            "owner": "data-team@company.internal",
-        },
-        "spec": {
-            "description": f"RF-15 acceptance product {name}",
-            "classification": "internal",
-            "sla": {"freshness": "1h"},
-            "assets": [
-                {"name": f"gold_{name}", "type": "iceberg_table", "path": f"s3a://gold/{name}/"}
-            ],
-            "quality": {"suite": "quality/expectations/suite.json"},
-            "contract": "./contract.yaml",
-        },
-    }
-    (product_dir / "product.yaml").write_text(yaml.safe_dump(product), encoding="utf-8")
-
-    contract = {
-        "apiVersion": "datacontract.com/v1alpha1",
-        "kind": "DataContract",
-        "metadata": {
-            "name": f"{name}-contract",
-            "version": "1.0.0",
-            "domain": "sales",
-            "data_product": name,
-            "owner": "data-team@company.internal",
-        },
-        "spec": {
-            "description": f"RF-15 acceptance contract for {name}",
-            "compatibility_mode": "BACKWARD",
-            "sla": {"freshness": "1h"},
-            "schema": {"format": "iceberg", "fields": contract_fields},
-            "quality": {"thresholds": {"completeness": 0.95}},
-        },
-    }
-    (product_dir / "contract.yaml").write_text(yaml.safe_dump(contract), encoding="utf-8")
-
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for field_def in schema_fields:
-        properties[field_def["name"]] = {"type": field_def["type"]}
-        required.append(field_def["name"])
-    schema_doc = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-    }
-    (product_dir / "schema.json").write_text(json.dumps(schema_doc, indent=2), encoding="utf-8")
-    return product_dir
-
-
 def _run_governance_cli(repo_root: Path) -> subprocess.CompletedProcess:
     """The exact CLI entry point the Rakefile / demo.sh invoke (RF-15)."""
     return subprocess.run(
@@ -192,9 +119,12 @@ def test_rf06_null_breach_blocks_silver_and_alerts_via_lineage(world, tmp_path: 
     with pytest.raises(QualityGateBreachError) as exc_info:
         world.cleanse_silver.execute("orders", quality_threshold=0.95, suite_path=suite_path)
 
-    assert exc_info.value.threshold == 0.95
     assert exc_info.value.pass_rate < 0.95
     assert "silver.sales.orders" in str(exc_info.value)
+    # The orders contract declares quality thresholds, so the breach is raised
+    # on the failing contract dimension (precedence over the global 0.95).
+    assert "validity" in str(exc_info.value)
+    assert exc_info.value.pass_rate < exc_info.value.threshold
 
     # Then: nothing was promoted to Silver.
     assert world.storage.table_exists("silver.sales.orders") is False
@@ -481,7 +411,11 @@ def test_rf19_lineage_records_connected_bronze_to_gold_chain(world) -> None:
         result = world.cleanse_silver.execute(entity, quality_threshold=0.95, suite_path=suite)
         assert result["status"] == "SUCCESS"
 
-    assert world.aggregate_gold.execute("all")["status"] == "SUCCESS"
+    assert world.aggregate_gold.execute(
+        "all",
+        daily_metrics_suite=world.gold_daily_metrics_suite,
+        customers_suite=world.gold_customers_suite,
+    )["status"] == "SUCCESS"
 
     events = world.lineage_events()
     job_names = [e["job"]["name"] for e in events]

@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Try importing YAML, fallback to embedded parser if missing
 try:
@@ -78,9 +78,7 @@ class DatasetFacet(BaseModel):
     version: Optional[Dict[str, Any]] = None
     extra_facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
-    class Config:
-        populate_by_name = True
-        extra = "allow"
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
 
 class Dataset(BaseModel):
@@ -99,8 +97,7 @@ class OpenLineageEvent(BaseModel):
     producer: Optional[str] = "openlineage-client"
     schemaURL: Optional[str] = None
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class AlertItem(BaseModel):

@@ -11,6 +11,9 @@ import json
 import logging
 import os
 import sqlite3
+import time
+import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,16 +22,35 @@ from src.ports.outbound import EventBrokerPort
 
 logger = logging.getLogger("adapter.streaming.event_stream")
 
+KAFKA_ENV_VAR = "KAFKA_BOOTSTRAP_SERVERS"
+_POLL_TIMEOUT_SECONDS = 1.0
+_MAX_EMPTY_POLLS = 2
+_POLL_BUDGET_SECONDS = 30.0
+
 
 class EventStreamAdapter(EventBrokerPort):
     """
     Event broker adapter supporting Kafka and an embedded local WAL event log.
     Ensures persistent replayability (RF-10) and durable consumer cursors so
     incremental consumption never returns already-processed events twice.
+
+    Backend selection is driven by the ``KAFKA_BOOTSTRAP_SERVERS`` environment
+    variable: when it is set and non-empty the adapter talks ONLY to Kafka,
+    otherwise it uses ONLY the embedded SQLite log (no double writes and no
+    silent fallbacks). ``confluent_kafka`` is imported lazily inside the Kafka
+    code paths so the SQLite profile never requires the package. An optional
+    ``consumer_factory`` seam (a callable receiving the consumer config dict
+    and returning a ``confluent_kafka.Consumer``-like object) allows tests to
+    inject a fake consumer.
     """
 
-    def __init__(self, db_path: str = "data/event_log.db") -> None:
+    def __init__(
+        self,
+        db_path: str = "data/event_log.db",
+        consumer_factory: Callable[..., Any] | None = None,
+    ) -> None:
         self._db_path = db_path
+        self._consumer_factory = consumer_factory
         Path(os.path.dirname(db_path) or ".").mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -53,25 +75,47 @@ class EventStreamAdapter(EventBrokerPort):
             """)
             conn.commit()
 
-    def publish_event(self, topic: str, key: str, payload: dict[str, Any]) -> bool:
-        # 1. Try Kafka if broker is active (never silent on failure - RF-10)
-        try:
-            from confluent_kafka import Producer
-            producer = Producer({"bootstrap.servers": os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")})
-            producer.produce(topic, key=str(key), value=json.dumps(payload))
-            producer.poll(0)
-            producer.flush(1)
-        except Exception as exc:
-            logger.warning("Kafka publish skipped (%s); persisting to local event log", exc)
+    def _kafka_bootstrap(self) -> str | None:
+        """Returns the configured Kafka bootstrap servers, or None for the SQLite backend."""
+        value = os.getenv(KAFKA_ENV_VAR)
+        if value is None or not value.strip():
+            return None
+        return value.strip()
 
-        # 2. Persist to local immutable event log (guarantees Kappa replay RF-10)
+    def publish_event(self, topic: str, key: str, payload: dict[str, Any]) -> bool:
+        """Publishes to the selected backend only (Kafka when configured, else SQLite)."""
+        bootstrap = self._kafka_bootstrap()
+        if bootstrap is not None:
+            self._publish_to_kafka(bootstrap, topic, key, payload)
+            return True
+        self._publish_to_sqlite(topic, key, payload)
+        return True
+
+    def _publish_to_sqlite(self, topic: str, key: str, payload: dict[str, Any]) -> None:
+        # Persist to local immutable event log (guarantees Kappa replay RF-10)
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO event_log (topic, key, payload, published_at) VALUES (?, ?, ?, ?);",
-                (topic, str(key), json.dumps(payload), datetime.now(UTC).isoformat())
+                (topic, str(key), json.dumps(payload), datetime.now(UTC).isoformat()),
             )
             conn.commit()
-        return True
+
+    def _publish_to_kafka(self, bootstrap: str, topic: str, key: str, payload: dict[str, Any]) -> None:
+        """Publishes a single event to Kafka, failing fast without any SQLite fallback."""
+        from confluent_kafka import Producer
+
+        try:
+            producer = Producer({"bootstrap.servers": bootstrap})
+            producer.produce(topic, key=str(key), value=json.dumps(payload))
+            producer.poll(0)
+            pending = producer.flush(10)
+            if pending:
+                raise RuntimeError(f"timed out delivering 1 event to topic '{topic}'")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Kafka publish failed for topic '{topic}' (bootstrap='{bootstrap}'); "
+                f"check or unset {KAFKA_ENV_VAR} to use the local event log: {exc}"
+            ) from exc
 
     def consume_events(
         self,
@@ -87,7 +131,24 @@ class EventStreamAdapter(EventBrokerPort):
         the highest offset returned, in the same transaction.
         replay=True: reads the full topic log from offset 0 (ascending) and
         never touches consumer cursors. Never fabricates events when empty.
+
+        Backend selection: Kafka when ``KAFKA_BOOTSTRAP_SERVERS`` is set and
+        non-empty (consuming ONLY from Kafka), SQLite otherwise. An
+        unreachable Kafka broker raises ``RuntimeError`` (fail-fast, never a
+        silent fallback to SQLite).
         """
+        bootstrap = self._kafka_bootstrap()
+        if bootstrap is not None:
+            return self._consume_from_kafka(bootstrap, topic, max_messages, replay, consumer_group)
+        return self._consume_from_sqlite(topic, max_messages, replay, consumer_group)
+
+    def _consume_from_sqlite(
+        self,
+        topic: str,
+        max_messages: int | None,
+        replay: bool,
+        consumer_group: str,
+    ) -> list[dict[str, Any]]:
         with sqlite3.connect(self._db_path) as conn:
             if replay:
                 query = "SELECT offset, payload FROM event_log WHERE topic = ? ORDER BY offset ASC"
@@ -133,6 +194,122 @@ class EventStreamAdapter(EventBrokerPort):
             except (TypeError, json.JSONDecodeError) as exc:
                 logger.warning(
                     "Skipping corrupt event payload at offset %s on topic '%s': %s",
-                    offset, topic, exc,
+                    offset,
+                    topic,
+                    exc,
                 )
         return events
+
+    def _consume_from_kafka(
+        self,
+        bootstrap: str,
+        topic: str,
+        max_messages: int | None,
+        replay: bool,
+        consumer_group: str,
+    ) -> list[dict[str, Any]]:
+        """Consumes from Kafka preserving the EventBrokerPort cursor semantics.
+
+        Incremental runs use ``group.id=<consumer_group>`` with
+        ``auto.offset.reset=latest`` and explicitly commit every consumed
+        offset. Replay runs use an ephemeral group id with
+        ``auto.offset.reset=earliest`` and never commit, so consumer cursors
+        are left untouched.
+        """
+        if replay:
+            group_id = f"{consumer_group}-replay-{uuid.uuid4().hex}"
+            auto_reset = "earliest"
+        else:
+            group_id = consumer_group
+            auto_reset = "latest"
+        config: dict[str, Any] = {
+            "bootstrap.servers": bootstrap,
+            "group.id": group_id,
+            "enable.auto.commit": False,
+            "auto.offset.reset": auto_reset,
+        }
+        try:
+            if self._consumer_factory is not None:
+                consumer: Any = self._consumer_factory(config)
+            else:
+                from confluent_kafka import Consumer
+
+                consumer = Consumer(config)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Kafka broker unreachable (bootstrap='{bootstrap}'); "
+                f"check or unset {KAFKA_ENV_VAR} to use the local event log: {exc}"
+            ) from exc
+
+        try:
+            try:
+                consumer.list_topics(timeout=5)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Kafka broker unreachable (bootstrap='{bootstrap}'); "
+                    f"check or unset {KAFKA_ENV_VAR} to use the local event log: {exc}"
+                ) from exc
+            consumer.subscribe([topic])
+
+            collected: list[tuple[int, dict[str, Any]]] = []
+            consumed: list[Any] = []
+            empty_streak = 0
+            limit = int(max_messages) if max_messages is not None else None
+            started = time.monotonic()
+            while True:
+                if limit is not None and len(collected) >= limit:
+                    break
+                if empty_streak >= _MAX_EMPTY_POLLS:
+                    break
+                if time.monotonic() - started >= _POLL_BUDGET_SECONDS:
+                    logger.warning(
+                        "Kafka poll budget exhausted on topic '%s'; returning %d events", topic, len(collected)
+                    )
+                    break
+                message = consumer.poll(_POLL_TIMEOUT_SECONDS)
+                if message is None:
+                    empty_streak += 1
+                    continue
+                if message.error():
+                    logger.warning("Skipping Kafka error on topic '%s': %s", topic, message.error())
+                    empty_streak += 1
+                    continue
+                empty_streak = 0
+                consumed.append(message)
+                raw = message.value()
+                if raw is None:
+                    logger.warning(
+                        "Skipping Kafka tombstone at offset %s on topic '%s'", message.offset(), topic
+                    )
+                    continue
+                try:
+                    text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    payload = json.loads(text)
+                except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        "Skipping corrupt event payload at offset %s on topic '%s': %s",
+                        message.offset(),
+                        topic,
+                        exc,
+                    )
+                    continue
+                collected.append((int(message.offset()), payload))
+
+            collected.sort(key=lambda item: item[0])
+            if not replay:
+                # Explicitly commit every consumed offset (including skipped
+                # corrupt frames, mirroring the SQLite cursor which advances
+                # past them) in ascending order — the order of the returned
+                # events — so poison pills are never redelivered forever.
+                consumed.sort(key=lambda message: int(message.offset()))
+                for message in consumed:
+                    try:
+                        consumer.commit(message=message)
+                    except Exception as exc:
+                        logger.warning("Kafka commit failed on topic '%s': %s", topic, exc)
+            return [payload for _, payload in collected]
+        finally:
+            try:
+                consumer.close()
+            except Exception as exc:
+                logger.warning("Error closing Kafka consumer for topic '%s': %s", topic, exc)

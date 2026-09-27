@@ -9,18 +9,10 @@ from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.source.oltp_source import OltpSourceAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
 from src.use_cases.cleanse_silver import CleanseSilverUseCase
+from tests.helpers import StubLineage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SILVER_ORDERS_SUITE = str(REPO_ROOT / "quality" / "expectations" / "silver_orders_suite.json")
-
-
-class _StubLineage:
-    def __init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
-
-    def emit_job_event(self, job_name: str, inputs: list[str], outputs: list[str], status: str = "COMPLETE") -> bool:
-        self.events.append({"job_name": job_name, "inputs": list(inputs), "outputs": list(outputs), "status": status})
-        return True
 
 
 def _bronze_order_row(id: int, total: float, batch: str, ingested_at: str, **overrides: Any) -> dict[str, Any]:
@@ -48,7 +40,7 @@ def test_silver_keeps_latest_snapshot(tmp_path: Path) -> None:
     ]
     assert storage.write_table("bronze.sales.orders", raw, mode="append") == len(raw)
 
-    uc = CleanseSilverUseCase(storage=storage, quality_engine=ExpectationEngineAdapter(), lineage=_StubLineage())
+    uc = CleanseSilverUseCase(storage=storage, quality_engine=ExpectationEngineAdapter(), lineage=StubLineage())
     res = uc.execute("orders", suite_path=SILVER_ORDERS_SUITE)
     assert res["status"] == "SUCCESS"
 

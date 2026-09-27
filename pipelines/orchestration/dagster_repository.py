@@ -5,6 +5,8 @@ Quality gates execution, and Kappa streaming replay triggers.
 All asset names, tables, and job definitions are in English.
 """
 
+from __future__ import annotations
+
 from dagster import (
     AssetIn,
     AssetSelection,
@@ -26,13 +28,13 @@ from pipelines.orchestration.resources import (
 # -------------------------------------------------------------------------
 
 @asset(group_name="medallion_bronze", description="Raw order transactions ingested idempotently from PostgreSQL")
-def bronze_orders(spark: SparkResource) -> dict:
+def bronze_orders(spark: SparkResource) -> dict[str, str]:
     spark.submit_job("pipelines/medallion/bronze_ingestion.py", ["--entity", "orders"])
     return {"table": "bronze.sales.orders", "status": "ingested"}
 
 
 @asset(group_name="medallion_bronze", description="Raw customer master records from OLTP")
-def bronze_customers(spark: SparkResource) -> dict:
+def bronze_customers(spark: SparkResource) -> dict[str, str]:
     spark.submit_job("pipelines/medallion/bronze_ingestion.py", ["--entity", "customers"])
     return {"table": "bronze.sales.customers", "status": "ingested"}
 
@@ -42,7 +44,9 @@ def bronze_customers(spark: SparkResource) -> dict:
     ins={"bronze_orders": AssetIn()},
     description="Cleaned, typed, deduplicated orders with quality gates applied"
 )
-def silver_orders(bronze_orders, spark: SparkResource, ge: GreatExpectationsResource) -> dict:
+def silver_orders(
+    bronze_orders: dict[str, str], spark: SparkResource, ge: GreatExpectationsResource
+) -> dict[str, str]:
     spark.submit_job("pipelines/medallion/silver_transform.py", ["--entity", "orders"])
     passed = ge.run_suite("quality/expectations/silver_orders_suite.json", "silver.sales.orders")
     if not passed:
@@ -58,7 +62,9 @@ def silver_orders(bronze_orders, spark: SparkResource, ge: GreatExpectationsReso
     ins={"bronze_customers": AssetIn()},
     description="Conformed customer dimensions with PII pseudonymization"
 )
-def silver_customers(bronze_customers, spark: SparkResource, ge: GreatExpectationsResource) -> dict:
+def silver_customers(
+    bronze_customers: dict[str, str], spark: SparkResource, ge: GreatExpectationsResource
+) -> dict[str, str]:
     spark.submit_job("pipelines/medallion/silver_transform.py", ["--entity", "customers"])
     passed = ge.run_suite("quality/expectations/silver_customers_suite.json", "silver.sales.customers")
     if not passed:
@@ -74,7 +80,9 @@ def silver_customers(bronze_customers, spark: SparkResource, ge: GreatExpectatio
     ins={"silver_orders": AssetIn(), "silver_customers": AssetIn()},
     description="Curated daily sales metrics and revenue aggregations for serving"
 )
-def gold_daily_metrics(silver_orders, silver_customers, spark: SparkResource) -> dict:
+def gold_daily_metrics(
+    silver_orders: dict[str, str], silver_customers: dict[str, str], spark: SparkResource
+) -> dict[str, str]:
     spark.submit_job("pipelines/medallion/gold_aggregation.py", ["--target", "daily_metrics"])
     return {"table": "gold.sales.daily_metrics", "status": "published"}
 

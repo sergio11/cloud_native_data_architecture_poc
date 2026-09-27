@@ -271,6 +271,41 @@ def validate_compatibility_mode(contract_data: dict[str, Any]) -> tuple[bool, li
     return True, []
 
 
+def extract_quality_thresholds(contract_data: dict[str, Any]) -> dict[str, float] | None:
+    """Extracts declared per-dimension quality thresholds from a contract document.
+
+    Reads ``spec.quality.thresholds`` and returns only the declared keys of
+    ``{"completeness", "uniqueness", "validity"}`` as floats in [0, 1].
+    Unknown keys are ignored. Returns None when the quality/thresholds block
+    is missing, is not a mapping, declares none of the known dimensions with
+    a valid value, or holds any out-of-range/non-numeric value for a known
+    dimension (booleans never count as numbers).
+    """
+    if not isinstance(contract_data, dict):
+        return None
+    spec_raw = contract_data.get("spec")
+    if not isinstance(spec_raw, dict):
+        return None
+    quality_raw = spec_raw.get("quality")
+    if not isinstance(quality_raw, dict):
+        return None
+    thresholds_raw = quality_raw.get("thresholds")
+    if not isinstance(thresholds_raw, dict):
+        return None
+    extracted: dict[str, float] = {}
+    for dimension in ("completeness", "uniqueness", "validity"):
+        if dimension not in thresholds_raw:
+            continue
+        value = thresholds_raw[dimension]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        rate = float(value)
+        if not 0.0 <= rate <= 1.0:
+            return None
+        extracted[dimension] = rate
+    return extracted or None
+
+
 class ContractCompatibilityEvaluator:
     """Domain service for verifying schema evolution and contract compatibility."""
 

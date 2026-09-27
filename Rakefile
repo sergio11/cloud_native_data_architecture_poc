@@ -97,7 +97,7 @@ namespace :medallion do
   desc 'Run Silver layer deduplication, conformance, and quality gates'
   task :silver do
     puts "\n\e[33m[Step 4/8] Running Silver Layer: Cleansing & Quality Gates (RF-06)...\e[0m"
-    sh 'python pipelines/medallion/silver_transform.py --entity all --threshold 0.95'
+    sh 'python pipelines/medallion/silver_transform.py --entity all'
     puts "\e[32mSilver promotion verified.\e[0m"
   end
 

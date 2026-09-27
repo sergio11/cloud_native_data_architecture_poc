@@ -187,3 +187,12 @@ class DomainCatalogPort(Protocol):
     def list_schemas(self) -> list[tuple[str, dict[str, Any]]]:
         """Returns (source_file_path, parsed schema.json) pairs, sorted by path."""
         ...
+
+    def load_governance_schema(self, schema_filename: str) -> dict[str, Any] | None:
+        """Loads a governance JSON-schema document by filename.
+
+        Reads ``<repo_root>/governance/schemas/<schema_filename>``. Returns None
+        when the file is missing or invalid (the adapter logs a warning); the
+        validation use case then runs structural checks only.
+        """
+        ...

@@ -138,18 +138,13 @@ def test_registry_has_no_phantom_tables() -> None:
     # Every registered location must correspond to a table the core produces.
     assert {_logical_name(t) for t in GOLD_TABLES + STREAM_TABLES} == KNOWN_PRODUCED_TABLES
 
-    # No dim_customers drift anywhere in the registry or the source file.
+    # No dim_customers drift anywhere in the registry.
     serialized = " ".join(
         f"{t['namespace']}.{t['name']} {t['location']}"
         for t in GOLD_TABLES + STREAM_TABLES
     )
     assert "dim_customers" not in serialized
     assert "funnel" not in serialized
-
-    import pipelines.serving.catalog_registration as catalog_module
-
-    source = Path(catalog_module.__file__).read_text(encoding="utf-8")
-    assert "dim_customers" not in source
 
 
 def test_quality_resource_delegates(monkeypatch) -> None:

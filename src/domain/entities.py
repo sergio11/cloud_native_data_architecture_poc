@@ -11,27 +11,6 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class Customer:
-    """Customer entity within the Sales domain."""
-    id: int
-    name: str
-    email: str
-    segment: str
-    registration_date: str
-    created_at: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "email": self.email,
-            "segment": self.segment,
-            "registration_date": self.registration_date,
-            "created_at": self.created_at,
-        }
-
-
-@dataclass(frozen=True)
 class DailySalesMetrics:
     """Curated business aggregation for the Gold tier."""
     order_date: str
@@ -72,3 +51,5 @@ class QualityGateEvaluation:
     threshold: float
     passed: bool
     failures: list[QualityAssertionResult] = field(default_factory=list)
+    # Pass ratio per quality dimension present in the suite (e.g. completeness).
+    dimension_rates: dict[str, float] = field(default_factory=dict)

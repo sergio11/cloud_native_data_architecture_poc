@@ -9,10 +9,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-import requests
 
 from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter
-from src.adapters.lineage import marquez_lineage
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.serving.sql_serving import SqlServingAdapter
@@ -27,22 +25,6 @@ from src.use_cases.query_serving import QueryServingUseCase
 from src.use_cases.validate_contract import ValidateContractUseCase
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-@pytest.fixture(autouse=True)
-def _hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keeps every use-case test offline: Marquez HTTP POST fails instantly
-    instead of burning the adapter's socket timeout on every lineage emit,
-    and no Trino / PostgreSQL backend can trigger."""
-
-    def _unreachable_post(*args, **kwargs):
-        raise requests.exceptions.ConnectionError(
-            "network disabled: unit tests must be hermetic"
-        )
-
-    monkeypatch.setattr(marquez_lineage.requests, "post", _unreachable_post)
-    monkeypatch.delenv("TRINO_HOST", raising=False)
-    monkeypatch.delenv("PGPASSWORD", raising=False)
 
 
 @pytest.fixture
@@ -99,7 +81,11 @@ def test_medallion_pipeline_flow(temp_lakehouse):
 
     # 3. Aggregate Gold
     aggregate_uc = AggregateGoldUseCase(storage=storage, lineage=lineage, quality_engine=quality)
-    gold_res = aggregate_uc.execute("daily_metrics")
+    gold_res = aggregate_uc.execute(
+        "daily_metrics",
+        daily_metrics_suite=str(REPO_ROOT / "quality" / "expectations" / "gold_daily_metrics_suite.json"),
+        customers_suite=str(REPO_ROOT / "quality" / "expectations" / "gold_customers_suite.json"),
+    )
     assert gold_res["status"] == "SUCCESS"
     assert gold_res["daily_metrics_rows"] > 0
 
@@ -114,8 +100,9 @@ def test_kappa_streaming_and_serving(temp_lakehouse):
     broker = temp_lakehouse["stream_broker"]
     lineage = temp_lakehouse["lineage"]
 
-    # 0. Seed deterministic events into the log (adapters never fabricate data)
-    now = datetime.now(UTC)
+    # 0. Seed deterministic events into the log (adapters never fabricate data).
+    # Fixed wall-clock (no datetime.now): flaky at UTC midnight otherwise.
+    now = datetime(2026, 9, 26, 10, 0, 0, tzinfo=UTC)
     for i in range(1, 6):
         broker.publish_event(
             topic="sales.orders.events",
@@ -169,7 +156,7 @@ def test_kappa_streaming_and_serving(temp_lakehouse):
 
 def test_contract_validation_use_case():
     validator = ValidateContractUseCase(catalog=FsDomainCatalogAdapter(str(REPO_ROOT)))
-    res = validator.execute(repo_root=str(REPO_ROOT))
+    res = validator.execute()
     assert res["products_evaluated"] >= 6
     assert res["contracts_evaluated"] >= 6
     assert res["passed"] is True

@@ -16,6 +16,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from src.domain.naming import bronze_table
 from src.ports.inbound import IngestBronzePort
 from src.ports.outbound import LakehouseStoragePort, LineagePublisherPort, OltpSourcePort
 
@@ -47,12 +48,32 @@ class IngestBronzeUseCase(IngestBronzePort):
         present).
         """
         batch_id = str(uuid.uuid4())
-        target_table = f"bronze.sales.{entity}"
+        target_table = bronze_table(entity)
         logger.info("Starting Bronze ingestion for entity '%s' (batch_id=%s)", entity, batch_id)
 
         # 1. Extract raw records from OLTP source
         records = self._source.extract_table(entity)
         logger.info("Extracted %d records from source table '%s'", len(records), entity)
+
+        # 1b. Honest empty ingestion: 0 source rows short-circuits to EMPTY
+        # (no write) while still emitting lineage like every other run.
+        if not records:
+            logger.warning("Source table '%s' returned 0 rows; reporting EMPTY without writing.", entity)
+            self._lineage.emit_job_event(
+                job_name=f"bronze_ingest_{entity}",
+                inputs=[f"postgresql.public.{entity}"],
+                outputs=[target_table],
+                status="COMPLETE",
+            )
+            return {
+                "entity": entity,
+                "target_table": target_table,
+                "batch_id": batch_id,
+                "rows_ingested": 0,
+                "rows_new": 0,
+                "idempotent_hit": False,
+                "status": "EMPTY",
+            }
 
         # 2. Append technical audit columns
         now_iso = datetime.now(UTC).isoformat()

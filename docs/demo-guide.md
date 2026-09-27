@@ -49,9 +49,9 @@ Before launching the demonstration, ensure your host environment satisfies the f
 
 ---
 
-## 3. Automated Execution via `scripts/demo.sh`
+## 3. Automated Execution via `rake demo` (`scripts/demo.sh` wrapper)
 
-The entire demonstration is automated via the executable script `scripts/demo.sh`.
+The entire demonstration is automated by the Rake task `rake demo` (single source of truth in the `Rakefile`); the executable script `scripts/demo.sh` is a thin wrapper that delegates to it (`exec rake demo "$@"`).
 
 ### Step 1: Clone and Navigate to Repository Root
 ```bash
@@ -64,13 +64,14 @@ cd poc_data_engineering
 chmod +x scripts/demo.sh
 ```
 
-### Step 3: Execute the Automated Demo Script
+### Step 3: Execute the Automated Demo (`rake demo`)
 ```bash
-./scripts/demo.sh
+rake demo
+# (equivalently: ./scripts/demo.sh on Git Bash / WSL2 / Linux / macOS —
+# thin wrapper delegating to `rake demo`)
 ```
-*(On Windows the same steps are available cross-platform via the Rakefile:
-`rake demo`. There is no `demo.ps1`; use `rake` or Git Bash/WSL2 for the
-shell script.)*
+*(On Windows use `rake demo` directly. There is no `demo.ps1`; use `rake` or
+Git Bash/WSL2 for the shell script.)*
 
 ### Expected Script Output Progression
 The script prints structured, color-coded status checkpoints (local profile —
@@ -217,6 +218,15 @@ On the current clean data the strict run also passes. A real breach (e.g. null
 primary keys, see `test_rf06_*` in `tests/integration/test_rf_acceptance.py`)
 fails the gate with exit code 1, emits a lineage `FAIL` event when a
 Marquez/webhook URL is configured, and blocks pipeline progression.
+
+> Threshold-precedence note: the standalone gate above applies `--threshold`
+> directly, but inside the Silver/Gold pipeline runs (`silver_transform.py`,
+> `gold_aggregation.py`) per-dimension contract thresholds
+> (`spec.quality.thresholds`) take precedence and the flag (default `0.95`)
+> is only a fallback when the contract is silent — see
+> `src/domain/quality_gate.py::evaluate_and_enforce`. Gold additionally
+> requires its suites (`quality/expectations/gold_daily_metrics_suite.json`,
+> `gold_customers_suite.json`); a missing suite blocks the run.
 
 ---
 

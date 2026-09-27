@@ -2,8 +2,8 @@
 oltp_seed.py - Synthetic OLTP relational data generator for PostgreSQL.
 Generates realistic e-commerce operational datasets:
   - customers:   1,000 records  (PII: name, email)
-  - orders:      50,000 records (last 90 days)
-  - order_items: 200,000 records
+  - orders:      1,000 records by default (last 90 days, configurable via --records)
+  - order_items: ~4,000 records by default (1-5 per order, scales with --records)
   - products:    500 records
   - campaigns:   100 records
 
@@ -116,12 +116,23 @@ DROP_ORDER = [
 
 
 def _connect(host: str, port: int, db: str, user: str, password: str) -> psycopg2.extensions.connection:
+    if psycopg2 is None:
+        logger.error("psycopg2 is not installed. Install it with: pip install psycopg2-binary")
+        sys.exit(1)
     try:
         conn = psycopg2.connect(host=host, port=port, dbname=db, user=user, password=password)
         conn.autocommit = False
         return conn
-    except psycopg2.OperationalError as exc:
-        logger.error("Failed to connect to PostgreSQL: %s", exc)
+    except Exception as exc:
+        logger.error(
+            "Failed to connect to PostgreSQL at %s:%d/%s as user '%s': %s. "
+            "Verify PostgreSQL is running and reachable, and check PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD.",
+            host,
+            port,
+            db,
+            user,
+            exc,
+        )
         sys.exit(1)
 
 
@@ -287,10 +298,17 @@ def seed_campaigns(conn: psycopg2.extensions.connection, n: int = 100) -> None:
 @click.option("--port", default=lambda: int(os.getenv("PGPORT", "5432")), type=int)
 @click.option("--db", default=lambda: os.getenv("PGDATABASE", "ecommerce"))
 @click.option("--user", default=lambda: os.getenv("PGUSER", "postgres"))
-@click.option("--password", default=lambda: os.getenv("PGPASSWORD", "postgres"))
+@click.option("--password", default=lambda: os.getenv("PGPASSWORD"),
+              help="PostgreSQL password (or set PGPASSWORD env var). No default: must be provided.")
 @click.option("--records", default=1000, type=int, help="Target order record count")
 @click.option("--recreate", is_flag=True, default=False)
 def main(host, port, db, user, password, records, recreate):
+    if psycopg2 is None:
+        logger.error("psycopg2 is not installed. Install it with: pip install psycopg2-binary")
+        sys.exit(1)
+    if not password:
+        logger.error("PostgreSQL password is required: set PGPASSWORD env var or pass --password explicitly.")
+        sys.exit(2)
     logger.info("Connecting to PostgreSQL at %s:%d/%s...", host, port, db)
     try:
         conn = _connect(host, port, db, user, password)
@@ -301,8 +319,11 @@ def main(host, port, db, user, password, records, recreate):
         seed_campaigns(conn, n=100)
         conn.close()
         logger.info("OLTP database seeding finished successfully.")
+    except SystemExit:
+        raise
     except Exception as e:
-        logger.warning("PostgreSQL seeding simulation mode (DB offline): %s", e)
+        logger.error("PostgreSQL seeding failed: %s. Verify PostgreSQL is running and reachable.", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

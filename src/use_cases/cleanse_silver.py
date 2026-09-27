@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.domain.entities import QualityGateEvaluation
-from src.domain.exceptions import QualityGateBreachError
+from src.domain.naming import bronze_table, silver_table
+from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD, evaluate_and_enforce, find_contract_thresholds
 from src.ports.inbound import CleanseSilverPort
-from src.ports.outbound import LakehouseStoragePort, LineagePublisherPort, QualityEnginePort
+from src.ports.outbound import DomainCatalogPort, LakehouseStoragePort, LineagePublisherPort, QualityEnginePort
 
 logger = logging.getLogger("use_case.cleanse_silver")
 
@@ -25,19 +25,21 @@ class CleanseSilverUseCase(CleanseSilverPort):
         storage: LakehouseStoragePort,
         quality_engine: QualityEnginePort,
         lineage: LineagePublisherPort,
+        catalog: DomainCatalogPort | None = None,
     ) -> None:
         self._storage = storage
         self._quality = quality_engine
         self._lineage = lineage
+        self._catalog = catalog
 
     def execute(
         self,
         entity: str,
-        quality_threshold: float = 0.95,
-        suite_path: str | None = None,
+        suite_path: str,
+        quality_threshold: float | None = None,
     ) -> dict[str, Any]:
-        source_table = f"bronze.sales.{entity}"
-        target_table = f"silver.sales.{entity}"
+        source_table = bronze_table(entity)
+        target_table = silver_table(entity)
         logger.info("Starting Silver transformation from '%s' to '%s'", source_table, target_table)
 
         # 1. Read raw records from Bronze
@@ -71,35 +73,31 @@ class CleanseSilverUseCase(CleanseSilverPort):
                 "suite_path is required: the driver must resolve the "
                 "quality/expectations suite path for the entity and pass it explicitly."
             )
-        actual_suite_path = suite_path
+        # Contract thresholds (data-products/<entity>/) govern per dimension and
+        # ignore the global threshold; the explicit threshold (or its 0.95
+        # default) is only a fallback when the contract is silent.
+        contract_thresholds = find_contract_thresholds(self._catalog, entity)
+        if contract_thresholds is not None and quality_threshold is not None:
+            logger.info(
+                "contract thresholds take precedence over explicit quality_threshold=%.2f for '%s'",
+                quality_threshold, target_table,
+            )
+        effective_threshold = quality_threshold if quality_threshold is not None else DEFAULT_QUALITY_THRESHOLD
         logger.info(
             "Evaluating Quality Gate suite '%s' (threshold=%.2f)...",
-            actual_suite_path, quality_threshold
+            suite_path, effective_threshold,
         )
-        quality_result: QualityGateEvaluation = self._quality.evaluate_suite(
-            records=deduped,
-            suite_path=actual_suite_path,
-            threshold=quality_threshold,
-            table_name=target_table,
+        quality_result = evaluate_and_enforce(
+            self._quality,
+            self._lineage,
+            deduped,
+            suite_path,
+            target_table,
+            f"silver_clean_{entity}",
+            [source_table],
+            effective_threshold,
+            contract_thresholds=contract_thresholds,
         )
-        if not quality_result.passed:
-            logger.error(
-                "Quality gate FAILED for '%s'! Pass rate: %.2f < %.2f. Blocking promotion.",
-                target_table, quality_result.pass_rate, quality_threshold
-            )
-            # RF-06 owner notification trail: record the FAILED run before raising.
-            self._lineage.emit_job_event(
-                job_name=f"silver_clean_{entity}",
-                inputs=[source_table],
-                outputs=[target_table],
-                status="FAIL",
-            )
-            raise QualityGateBreachError(
-                f"Quality gate breached for {target_table} "
-                f"(Pass rate: {quality_result.pass_rate:.2f} < threshold {quality_threshold:.2f})",
-                pass_rate=quality_result.pass_rate,
-                threshold=quality_threshold,
-            )
         logger.info("Quality gate PASSED (Pass rate: %.2f)", quality_result.pass_rate)
 
         # 4. Write conformed records to Silver tier

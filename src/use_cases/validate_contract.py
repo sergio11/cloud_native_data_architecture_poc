@@ -14,9 +14,8 @@ concern, no requirements files are managed here).
 
 from __future__ import annotations
 
-import json
 import logging
-import os
+from pathlib import PurePath
 from typing import Any
 
 from src.domain.contracts import (
@@ -29,22 +28,27 @@ from src.domain.contracts import (
 from src.ports.inbound import ValidateContractPort
 from src.ports.outbound import DomainCatalogPort
 
-try:
-    import jsonschema
-except ImportError:  # pragma: no cover - optional dependency
-    jsonschema = None
-
 logger = logging.getLogger("use_case.validate_contract")
+
+
+def _norm_path(path: str) -> str:
+    """Normalises a catalog path lexically (pure computation, no filesystem access)."""
+    return str(PurePath(path))
+
+
+def _parent_dir(path: str) -> str:
+    """Returns the parent directory of a catalog path (no filesystem access)."""
+    return str(PurePath(path).parent)
 
 
 class ValidateContractUseCase(ValidateContractPort):
     """Orchestrates validation of Bitol ODCS contracts and data products.
 
-    ``catalog`` is the REQUIRED DomainCatalogPort used to discover manifests.
-    Composition roots outside the core (``src.container.Container``, the
-    governance CLI delegator) inject ``FsDomainCatalogAdapter(repo_root)``;
-    the core never imports a concrete adapter itself (DIP). ``repo_root``
-    drives the governance-schema lookup.
+    ``catalog`` is the REQUIRED DomainCatalogPort used to discover manifests
+    and to load governance JSON schemas. Composition roots outside the core
+    (``src.container.Container``, the governance CLI delegator) inject
+    ``FsDomainCatalogAdapter(repo_root)``; the core never imports a concrete
+    adapter itself (DIP) and performs no filesystem I/O of its own.
     """
 
     def __init__(
@@ -56,7 +60,10 @@ class ValidateContractUseCase(ValidateContractPort):
         self._evaluator = evaluator or ContractCompatibilityEvaluator()
         self._warned_jsonschema = False
 
-    def execute(self, repo_root: str = ".") -> dict[str, Any]:
+    # NOTE (S2): ``repo_root`` was removed because the catalog owns the root.
+    # ``ValidateContractPort`` in src/ports/inbound.py no longer declares it
+    # (port synced by S3): the signatures match again, no ignore needed.
+    def execute(self) -> dict[str, Any]:
         catalog = self._catalog
 
         products = sorted(catalog.list_products(), key=lambda item: item[0])
@@ -75,22 +82,22 @@ class ValidateContractUseCase(ValidateContractPort):
             results["passed"] = False
             results["errors"].append(
                 {
-                    "file": os.path.join(repo_root, "domains"),
+                    "file": "domains",
                     "kind": "Discovery",
                     "errors": ["No data product manifests or data contracts discovered under domains/"],
                 }
             )
             return results
 
-        product_paths = {os.path.normpath(p) for p, _ in products}
-        contract_paths = {os.path.normpath(p) for p, _ in contracts}
+        product_paths = {_norm_path(p) for p, _ in products}
+        contract_paths = {_norm_path(p) for p, _ in contracts}
         schemas_by_dir = {
-            os.path.normpath(os.path.dirname(p)): (p, data) for p, data in schemas
+            _norm_path(_parent_dir(p)): (p, data) for p, data in schemas
         }
 
         # 1. Validate DataProduct manifests (structure + governance JSON schema)
         for path, data in products:
-            errs = self._validate_product(data, path, contract_paths, repo_root)
+            errs = self._validate_product(data, path, contract_paths)
             self._record(results, errs, path, kind="DataProduct")
             if not errs:
                 meta = data.get("metadata") or {}
@@ -107,12 +114,12 @@ class ValidateContractUseCase(ValidateContractPort):
         #      governance JSON schema, and BACKWARD evolution vs schema.json.
         for path, data in contracts:
             errs = self._validate_contract(
-                data, path, product_paths, schemas_by_dir, repo_root
+                data, path, product_paths, schemas_by_dir
             )
             self._record(results, errs, path, kind="DataContract")
             if not errs:
                 meta = data.get("metadata") or {}
-                paired = schemas_by_dir.get(os.path.normpath(os.path.dirname(path)))
+                paired = schemas_by_dir.get(_norm_path(_parent_dir(path)))
                 detail: dict[str, Any] = {
                     "file": path,
                     "status": "PASSED",
@@ -133,8 +140,7 @@ class ValidateContractUseCase(ValidateContractPort):
         self,
         data: dict[str, Any],
         path: str,
-        contract_paths: set,
-        repo_root: str,
+        contract_paths: set[str],
     ) -> list[str]:
         errs: list[str] = []
         meta_raw = data.get("metadata")
@@ -154,19 +160,22 @@ class ValidateContractUseCase(ValidateContractPort):
             errs.append("Missing spec.assets list")
 
         contract_ref = spec.get("contract")
-        sibling = os.path.join(os.path.dirname(path), "contract.yaml")
-        if not contract_ref and not os.path.exists(sibling):
+        parent = _parent_dir(path)
+        # A sibling that exists and parses is already in the catalog discovery
+        # set; otherwise the "missing or unreadable" message below covers it.
+        sibling = _norm_path(str(PurePath(parent, "contract.yaml")))
+        if not contract_ref and sibling not in contract_paths:
             errs.append("Missing spec.contract reference or sibling contract.yaml")
         else:
             target = (
-                os.path.normpath(os.path.join(os.path.dirname(path), str(contract_ref)))
+                _norm_path(str(PurePath(parent, str(contract_ref))))
                 if contract_ref
-                else os.path.normpath(sibling)
+                else sibling
             )
             if target not in contract_paths:
                 errs.append(f"Referenced contract.yaml missing or unreadable: {target}")
 
-        errs.extend(self._jsonschema_errors(data, "product-schema.json", path, repo_root))
+        errs.extend(self._jsonschema_errors(data, "product-schema.json", path))
         return errs
 
     # ------------------------------------------------------------------
@@ -176,9 +185,8 @@ class ValidateContractUseCase(ValidateContractPort):
         self,
         data: dict[str, Any],
         path: str,
-        product_paths: set,
+        product_paths: set[str],
         schemas_by_dir: dict[str, Any],
-        repo_root: str,
     ) -> list[str]:
         errs: list[str] = []
         meta_raw = data.get("metadata")
@@ -202,11 +210,9 @@ class ValidateContractUseCase(ValidateContractPort):
         _, mode_errs = validate_compatibility_mode(data)
         errs.extend(mode_errs)
 
-        errs.extend(self._jsonschema_errors(data, "contract-schema.json", path, repo_root))
+        errs.extend(self._jsonschema_errors(data, "contract-schema.json", path))
 
-        sibling_product = os.path.normpath(
-            os.path.join(os.path.dirname(path), "product.yaml")
-        )
+        sibling_product = _norm_path(str(PurePath(_parent_dir(path), "product.yaml")))
         if sibling_product not in product_paths:
             errs.append(f"Missing or unreadable sibling product.yaml: {sibling_product}")
 
@@ -220,9 +226,9 @@ class ValidateContractUseCase(ValidateContractPort):
         schemas_by_dir: dict[str, Any],
     ) -> list[str]:
         """RF-15 key rule: contract fields vs the sibling schema.json snapshot."""
-        paired = schemas_by_dir.get(os.path.normpath(os.path.dirname(path)))
+        paired = schemas_by_dir.get(_norm_path(_parent_dir(path)))
         if paired is None:
-            expected = os.path.join(os.path.dirname(path), "schema.json")
+            expected = str(PurePath(_parent_dir(path), "schema.json"))
             return [
                 f"Missing sibling schema.json for backward compatibility check: {expected}"
             ]
@@ -250,9 +256,10 @@ class ValidateContractUseCase(ValidateContractPort):
         data: dict[str, Any],
         schema_filename: str,
         file_path: str,
-        repo_root: str,
     ) -> list[str]:
-        if jsonschema is None:
+        try:
+            import jsonschema
+        except ImportError:
             if not self._warned_jsonschema:
                 logger.warning(
                     "jsonschema library not available; skipping governance "
@@ -260,13 +267,11 @@ class ValidateContractUseCase(ValidateContractPort):
                 )
                 self._warned_jsonschema = True
             return []
-        schema_path = os.path.join(repo_root, "governance", "schemas", schema_filename)
-        if not os.path.isfile(schema_path):
-            logger.warning("Governance schema not found: %s; skipping JSON-schema validation", schema_path)
+        # The governance schema dict comes from the catalog port: no file I/O here.
+        schema = self._catalog.load_governance_schema(schema_filename)
+        if schema is None:
             return []
         try:
-            with open(schema_path, encoding="utf-8") as handle:
-                schema = json.load(handle)
             validator = jsonschema.validators.validator_for(schema)(schema)
             messages = []
             for error in sorted(validator.iter_errors(data), key=lambda e: list(e.path)):

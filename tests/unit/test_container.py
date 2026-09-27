@@ -11,10 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-import requests
-
-from src.adapters.lineage import marquez_lineage
 from src.container import Container
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,21 +34,6 @@ ADAPTER_ATTRS = [
     "serving_sql",
     "domain_catalog",
 ]
-
-
-@pytest.fixture(autouse=True)
-def _hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keeps container tests offline: Marquez HTTP POST fails instantly and
-    no Trino / PostgreSQL backend can trigger (synthetic source fallback)."""
-
-    def _unreachable_post(*args, **kwargs):
-        raise requests.exceptions.ConnectionError(
-            "network disabled: unit tests must be hermetic"
-        )
-
-    monkeypatch.setattr(marquez_lineage.requests, "post", _unreachable_post)
-    monkeypatch.delenv("TRINO_HOST", raising=False)
-    monkeypatch.delenv("PGPASSWORD", raising=False)
 
 
 def _data_snapshot() -> dict[str, int]:

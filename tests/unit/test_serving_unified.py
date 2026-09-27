@@ -60,7 +60,8 @@ def _make_use_case(db_path: str) -> QueryServingUseCase:
     return QueryServingUseCase(query_executor=SqlServingAdapter(db_path=db_path))
 
 
-def test_batch_wins_no_double_count(tmp_path):
+def test_batch_wins_no_double_count(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRINO_HOST", raising=False)
     db_path = _setup_db(
         tmp_path,
         batch_rows=[("2026-09-20", "confirmed", "5", "1000.0", "200.0")],
@@ -90,7 +91,8 @@ def test_batch_wins_no_double_count(tmp_path):
     assert stream_only[0]["total_revenue"] == 300.0
 
 
-def test_order_date_filter_limit_and_types(tmp_path):
+def test_order_date_filter_limit_and_types(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRINO_HOST", raising=False)
     db_path = _setup_db(
         tmp_path,
         batch_rows=[
@@ -142,7 +144,8 @@ def test_fallback_logging(tmp_path, monkeypatch, caplog):
         adapter.execute_query("SELECT * FROM table_that_does_not_exist")
 
 
-def test_superseded_rows_excluded_when_column_present(tmp_path):
+def test_superseded_rows_excluded_when_column_present(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRINO_HOST", raising=False)
     db_path = _setup_db(
         tmp_path,
         batch_rows=[

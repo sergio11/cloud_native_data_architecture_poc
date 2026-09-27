@@ -7,22 +7,7 @@ from __future__ import annotations
 
 from src.domain.aggregations import BusinessAggregator
 from src.domain.contracts import ContractCompatibilityEvaluator
-from src.domain.entities import Customer
 from src.domain.privacy import PrivacyPolicy
-
-
-def test_customer_entity():
-    c = Customer(
-        id=1,
-        name="Alice Smith",
-        email="alice@example.com",
-        segment="premium",
-        registration_date="2024-01-01",
-        created_at="2024-01-01T00:00:00",
-    )
-    assert c.id == 1
-    assert c.segment == "premium"
-    assert c.to_dict()["email"] == "alice@example.com"
 
 
 def test_gdpr_privacy_policy():

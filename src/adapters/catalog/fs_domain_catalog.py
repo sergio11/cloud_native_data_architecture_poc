@@ -46,6 +46,39 @@ class FsDomainCatalogAdapter(DomainCatalogPort):
         """Returns (path, parsed schema.json) pairs, sorted by path."""
         return self._scan("schema.json", json.load)
 
+    def load_governance_schema(self, schema_filename: str) -> dict[str, Any] | None:
+        """Loads ``<repo_root>/governance/schemas/<schema_filename>`` as a dict.
+
+        Returns None (logging a warning) when the file is missing or invalid,
+        so the validation use case falls back to structural checks only.
+        """
+        schema_path = os.path.join(self._repo_root, "governance", "schemas", schema_filename)
+        try:
+            with open(schema_path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            logger.warning(
+                "Governance schema not found: %s; skipping JSON-schema validation",
+                schema_path,
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "Governance schema %s is invalid: %s; skipping JSON-schema validation",
+                schema_path,
+                exc,
+            )
+            return None
+        if not isinstance(data, dict):
+            logger.warning(
+                "Governance schema %s is invalid: root document is not a mapping (got %s); "
+                "skipping JSON-schema validation",
+                schema_path,
+                type(data).__name__,
+            )
+            return None
+        return data
+
     def _scan(
         self,
         filename: str,

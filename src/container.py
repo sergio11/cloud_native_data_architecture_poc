@@ -100,6 +100,7 @@ class Container:
             storage=self.storage,
             quality_engine=self.quality_engine,
             lineage=self.lineage,
+            catalog=self.domain_catalog,
         )
 
     @functools.cached_property
@@ -108,6 +109,7 @@ class Container:
             storage=self.storage,
             lineage=self.lineage,
             quality_engine=self.quality_engine,
+            catalog=self.domain_catalog,
         )
 
     @functools.cached_property

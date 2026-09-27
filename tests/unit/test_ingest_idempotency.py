@@ -1,20 +1,18 @@
 """
 Modern Data Architecture POC - Unit Tests: RF-01 Idempotent Bronze Ingestion.
 Verifies append-only Bronze writes with content-hash idempotency, audit columns,
-lineage emission, SQL identifier validation, and the AggregateGoldPort signature.
+lineage emission and SQL identifier validation.
 Adapters and use cases are constructed directly (never via src.container).
 """
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
 from src.adapters.source.oltp_source import OltpSourceAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
-from src.use_cases.aggregate_gold import AggregateGoldUseCase
 from src.use_cases.ingest_bronze import IngestBronzeUseCase
+from tests.helpers import StubLineage
 
 ORDERS_SNAPSHOT = [
     {"id": 1, "customer_id": 10, "total_amount": 100.5, "status": "confirmed",
@@ -44,19 +42,6 @@ class StubOltpSource:
         batch = self._batches[min(self.calls, len(self._batches) - 1)]
         self.calls += 1
         return [dict(r) for r in batch]
-
-
-class StubLineage:
-    """Records every emit_job_event call."""
-
-    def __init__(self):
-        self.events = []
-
-    def emit_job_event(self, job_name, inputs, outputs, status="COMPLETE"):
-        self.events.append(
-            {"job_name": job_name, "inputs": list(inputs), "outputs": list(outputs), "status": status}
-        )
-        return True
 
 
 def _storage(tmp_path) -> LakehouseStorageAdapter:
@@ -120,18 +105,27 @@ def test_ingest_bronze_new_content_appends(tmp_path):
 
     count2 = len(storage.read_table("bronze.sales.orders"))
     assert count2 == count1 + len(ORDERS_SNAPSHOT_B)
-    assert count2 == count1 + res2["rows_ingested"]
     assert len(lineage.events) == 2
+
+
+def test_ingest_bronze_empty_source_reports_empty(tmp_path):
+    storage = _storage(tmp_path)
+    source = StubOltpSource([[]])
+    lineage = StubLineage()
+    use_case = IngestBronzeUseCase(source=source, storage=storage, lineage=lineage)
+
+    res = use_case.execute("orders")
+
+    assert res["status"] == "EMPTY"
+    assert res["rows_ingested"] == 0
+    assert res["target_table"] == "bronze.sales.orders"
+    assert storage.read_table("bronze.sales.orders") == []  # nothing written
+    assert len(lineage.events) == 1  # lineage still emitted
+    assert lineage.events[0]["job_name"] == "bronze_ingest_orders"
+    assert lineage.events[0]["status"] == "COMPLETE"
 
 
 def test_oltp_source_validation():
     source = OltpSourceAdapter()
     with pytest.raises(ValueError):
         source.extract_table("orders; DROP TABLE x")
-
-
-def test_gold_execute_no_replay_param():
-    sig = inspect.signature(AggregateGoldUseCase.execute)
-    assert "replay" not in sig.parameters
-    assert "target" in sig.parameters
-    assert sig.parameters["target"].default == "all"

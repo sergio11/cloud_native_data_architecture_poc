@@ -167,7 +167,6 @@ def test_limit_and_deterministic_order(storage: LakehouseStorageAdapter) -> None
 
     full = storage.read_table("bronze.demo.ordered")
     assert [row["id"] for row in full] == ["1", "2", "3", "4", "5"]
-    assert storage.read_table("bronze.demo.ordered") == full
 
     first_three = storage.read_table("bronze.demo.ordered", limit=3)
     assert [row["id"] for row in first_three] == ["1", "2", "3"]

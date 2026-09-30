@@ -9,6 +9,8 @@ their table names from here instead of hardcoding dotted strings.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 #: Entity -> owning domain mapping (Data Mesh ownership).
 DOMAIN_OF_ENTITY: dict[str, str] = {
     "orders": "sales",
@@ -17,8 +19,29 @@ DOMAIN_OF_ENTITY: dict[str, str] = {
     "leads": "marketing",
 }
 
-#: Gold products modelled by the Gold tier.
-GOLD_PRODUCTS: tuple[str, ...] = ("daily_metrics", "customers")
+
+@dataclass(frozen=True)
+class GoldProduct:
+    """Gold product descriptor: the single source of truth for Gold routing.
+
+    ``name`` is the product key used by drivers (``"daily_metrics"``),
+    ``contract_entity`` the entity whose contract governs its quality gate
+    (contracts live under ``data-products/<entity>/``), and ``result_key``
+    the row-count key reported in the Gold result contract.
+    """
+
+    name: str
+    contract_entity: str
+    result_key: str
+
+
+#: Gold products modelled by the Gold tier (open for extension: adding a
+#: product means appending a descriptor here plus its publisher, without
+#: touching the aggregation control flow).
+GOLD_PRODUCTS: tuple[GoldProduct, ...] = (
+    GoldProduct(name="daily_metrics", contract_entity="orders", result_key="daily_metrics_rows"),
+    GoldProduct(name="customers", contract_entity="customers", result_key="customers_masked_rows"),
+)
 
 
 def bronze_table(entity: str) -> str:

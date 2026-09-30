@@ -25,7 +25,7 @@ from src.domain.contracts import (
     resolve_compatibility_mode,
     validate_compatibility_mode,
 )
-from src.ports.inbound import ValidateContractPort
+from src.ports.inbound import ValidateContractPort, ValidateContractResult
 from src.ports.outbound import DomainCatalogPort
 
 logger = logging.getLogger("use_case.validate_contract")
@@ -60,17 +60,14 @@ class ValidateContractUseCase(ValidateContractPort):
         self._evaluator = evaluator or ContractCompatibilityEvaluator()
         self._warned_jsonschema = False
 
-    # NOTE (S2): ``repo_root`` was removed because the catalog owns the root.
-    # ``ValidateContractPort`` in src/ports/inbound.py no longer declares it
-    # (port synced by S3): the signatures match again, no ignore needed.
-    def execute(self) -> dict[str, Any]:
+    def execute(self) -> ValidateContractResult:
         catalog = self._catalog
 
         products = sorted(catalog.list_products(), key=lambda item: item[0])
         contracts = sorted(catalog.list_contracts(), key=lambda item: item[0])
         schemas = sorted(catalog.list_schemas(), key=lambda item: item[0])
 
-        results: dict[str, Any] = {
+        results: ValidateContractResult = {
             "products_evaluated": len(products),
             "contracts_evaluated": len(contracts),
             "passed": True,
@@ -130,7 +127,6 @@ class ValidateContractUseCase(ValidateContractPort):
                 }
                 results["details"].append(detail)
 
-        results["passed"] = not results["errors"]
         return results
 
     # ------------------------------------------------------------------
@@ -259,6 +255,7 @@ class ValidateContractUseCase(ValidateContractPort):
     ) -> list[str]:
         try:
             import jsonschema
+            from jsonschema import exceptions as jsonschema_exceptions
         except ImportError:
             if not self._warned_jsonschema:
                 logger.warning(
@@ -278,16 +275,26 @@ class ValidateContractUseCase(ValidateContractPort):
                 location = "/".join(str(part) for part in error.path) or "(root)"
                 messages.append(f"JSON-schema violation at '{location}': {error.message}")
             return messages
+        except jsonschema_exceptions.SchemaError as exc:
+            # The governance schema itself is broken: fail closed by reporting
+            # it as a validation error instead of silently passing (RF-15).
+            logger.error(
+                "Governance JSON-schema '%s' is invalid; failing closed for %s: %s",
+                schema_filename, file_path, exc,
+            )
+            return [f"Governance JSON-schema '{schema_filename}' is invalid: {exc}"]
         except Exception as exc:
-            logger.warning("JSON-schema validation could not run for %s: %s", file_path, exc)
-            return []
+            # Any other validation-time failure (unresolvable $ref, library
+            # error, ...) must also block, never degrade to "no errors".
+            logger.error("JSON-schema validation could not run for %s: %s", file_path, exc)
+            return [f"JSON-schema validation could not run for {file_path}: {exc}"]
 
     # ------------------------------------------------------------------
     # Result bookkeeping
     # ------------------------------------------------------------------
     @staticmethod
     def _record(
-        results: dict[str, Any],
+        results: ValidateContractResult,
         errs: list[str],
         path: str,
         kind: str,

@@ -22,10 +22,11 @@ import re
 import sqlite3
 import threading
 import uuid
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Response, status
@@ -63,20 +64,20 @@ ALERT_RULES_PATH = os.getenv(
 class Job(BaseModel):
     namespace: str = "default"
     name: str
-    facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    facets: dict[str, Any] | None = Field(default_factory=dict)
 
 
 class Run(BaseModel):
     runId: str
-    facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    facets: dict[str, Any] | None = Field(default_factory=dict)
 
 
 class DatasetFacet(BaseModel):
-    schema_: Optional[Dict[str, Any]] = Field(default=None, alias="schema")
-    datasource: Optional[Dict[str, Any]] = None
-    dataQualityAssertions: Optional[Dict[str, Any]] = None
-    version: Optional[Dict[str, Any]] = None
-    extra_facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    schema_: dict[str, Any] | None = Field(default=None, alias="schema")
+    datasource: dict[str, Any] | None = None
+    dataQualityAssertions: dict[str, Any] | None = None
+    version: dict[str, Any] | None = None
+    extra_facets: dict[str, Any] | None = Field(default_factory=dict)
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
@@ -84,7 +85,7 @@ class DatasetFacet(BaseModel):
 class Dataset(BaseModel):
     namespace: str
     name: str
-    facets: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    facets: dict[str, Any] | None = Field(default_factory=dict)
 
 
 class OpenLineageEvent(BaseModel):
@@ -92,10 +93,10 @@ class OpenLineageEvent(BaseModel):
     eventTime: str
     run: Run
     job: Job
-    inputs: Optional[List[Dataset]] = Field(default_factory=list)
-    outputs: Optional[List[Dataset]] = Field(default_factory=list)
-    producer: Optional[str] = "openlineage-client"
-    schemaURL: Optional[str] = None
+    inputs: list[Dataset] | None = Field(default_factory=list)
+    outputs: list[Dataset] | None = Field(default_factory=list)
+    producer: str | None = "openlineage-client"
+    schemaURL: str | None = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -105,11 +106,11 @@ class AlertItem(BaseModel):
     rule_id: str
     rule_name: str
     severity: str
-    dataset_name: Optional[str] = None
-    job_name: Optional[str] = None
+    dataset_name: str | None = None
+    job_name: str | None = None
     summary: str
     description: str
-    details: Dict[str, Any] = Field(default_factory=dict)
+    details: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     status: str = "ACTIVE"
 
@@ -120,7 +121,7 @@ class IngestionResponse(BaseModel):
     job_name: str
     event_type: str
     alerts_triggered: int
-    alerts: List[Dict[str, Any]]
+    alerts: list[dict[str, Any]]
 
 
 # -----------------------------------------------------------------------------
@@ -142,9 +143,23 @@ class StorageManager:
         conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """Yields a managed connection that is always closed (no handle leaks).
+
+        Shares the lifecycle contract of ``src.adapters._sqlite``: commit on
+        clean exit, rollback on error, ``close()`` in all cases.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
         with self._lock:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS events (
@@ -209,12 +224,12 @@ class StorageManager:
                 )
 
     def insert_event(self, event: OpenLineageEvent, raw_json: str) -> None:
-        received_at = datetime.now(timezone.utc).isoformat()
+        received_at = datetime.now(UTC).isoformat()
         inputs_json = json.dumps([d.model_dump() for d in (event.inputs or [])])
         outputs_json = json.dumps([d.model_dump() for d in (event.outputs or [])])
 
         with self._lock:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO events (
@@ -236,8 +251,8 @@ class StorageManager:
                     ),
                 )
 
-    def get_dataset(self, dataset_key: str) -> Optional[Dict[str, Any]]:
-        with self._get_connection() as conn:
+    def get_dataset(self, dataset_key: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
             cursor = conn.execute(
                 "SELECT * FROM datasets WHERE dataset_key = ?",
                 (dataset_key,),
@@ -249,11 +264,11 @@ class StorageManager:
         self,
         namespace: str,
         name: str,
-        schema_dict: Optional[Dict[str, Any]],
+        schema_dict: dict[str, Any] | None,
         run_id: str,
         job_name: str,
         event_time: str,
-    ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+    ) -> tuple[bool, str | None, dict[str, Any] | None]:
         """Upsert dataset and detect schema changes.
 
         Returns (is_new_or_changed, previous_schema, new_schema).
@@ -263,7 +278,7 @@ class StorageManager:
         schema_hash = hashlib.sha256(schema_json.encode("utf-8")).hexdigest()
 
         with self._lock:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 existing = conn.execute(
                     "SELECT current_schema_json, schema_hash FROM datasets WHERE dataset_key = ?",
                     (dataset_key,),
@@ -349,7 +364,7 @@ class StorageManager:
 
     def insert_alert(self, alert: AlertItem) -> None:
         with self._lock:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO alerts (
@@ -376,7 +391,7 @@ class StorageManager:
         self, rule_id: str, identifier: str, window_seconds: int = 300
     ) -> bool:
         """Check if an identical alert was fired recently to avoid spam."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.execute(
                 """
                 SELECT created_at FROM alerts
@@ -391,22 +406,22 @@ class StorageManager:
 
             try:
                 alert_time = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
-                diff = (datetime.now(timezone.utc) - alert_time).total_seconds()
+                diff = (datetime.now(UTC) - alert_time).total_seconds()
                 return diff < window_seconds
             except Exception:
                 return False
 
     def query_alerts(
         self,
-        severity: Optional[str] = None,
-        rule_id: Optional[str] = None,
-        status: Optional[str] = None,
-        dataset: Optional[str] = None,
+        severity: str | None = None,
+        rule_id: str | None = None,
+        status: str | None = None,
+        dataset: str | None = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM alerts WHERE 1=1"
-        params: List[Any] = []
+        params: list[Any] = []
 
         if severity:
             query += " AND severity = ?"
@@ -424,7 +439,7 @@ class StorageManager:
         query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             rows = conn.execute(query, params).fetchall()
             result = []
             for r in rows:
@@ -434,8 +449,8 @@ class StorageManager:
                 result.append(item)
             return result
 
-    def get_alert_by_id(self, alert_id: str) -> Optional[Dict[str, Any]]:
-        with self._get_connection() as conn:
+    def get_alert_by_id(self, alert_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
             row = conn.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,)).fetchone()
             if not row:
                 return None
@@ -446,16 +461,16 @@ class StorageManager:
 
     def set_alert_status(self, alert_id: str, new_status: str) -> bool:
         with self._lock:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 cur = conn.execute(
                     "UPDATE alerts SET status = ? WHERE alert_id = ?",
                     (new_status.upper(), alert_id),
                 )
                 return cur.rowcount > 0
 
-    def get_dataset_lineage(self, dataset_name: str) -> Dict[str, Any]:
+    def get_dataset_lineage(self, dataset_name: str) -> dict[str, Any]:
         """Fetch lineage connections: all jobs consuming or producing this dataset."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             # Producers (where dataset in outputs)
             producers = conn.execute(
                 """
@@ -504,16 +519,16 @@ class StorageManager:
                 ],
             }
 
-    def list_datasets(self) -> List[Dict[str, Any]]:
-        with self._get_connection() as conn:
+    def list_datasets(self) -> list[dict[str, Any]]:
+        with self._connection() as conn:
             rows = conn.execute(
                 "SELECT dataset_key, namespace, name, schema_hash, last_updated_at, "
                 "last_job_name, total_events FROM datasets ORDER BY last_updated_at DESC"
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_stats(self) -> Dict[str, Any]:
-        with self._get_connection() as conn:
+    def get_stats(self) -> dict[str, Any]:
+        with self._connection() as conn:
             total_events = conn.execute("SELECT COUNT(*) as c FROM events").fetchone()["c"]
             total_datasets = conn.execute("SELECT COUNT(*) as c FROM datasets").fetchone()["c"]
             total_alerts = conn.execute("SELECT COUNT(*) as c FROM alerts").fetchone()["c"]
@@ -541,13 +556,13 @@ class RuleEngine:
     def __init__(self, storage: StorageManager, rules_path: str = ALERT_RULES_PATH):
         self.storage = storage
         self.rules_path = rules_path
-        self._raw_config: Dict[str, Any] = {}
+        self._raw_config: dict[str, Any] = {}
         self.rules = self._load_rules()
-        self.rules_by_id: Dict[str, Dict[str, Any]] = {
+        self.rules_by_id: dict[str, dict[str, Any]] = {
             r["id"]: r for r in self.rules if isinstance(r, dict) and r.get("id")
         }
 
-    def _rule(self, rule_id: str) -> Dict[str, Any]:
+    def _rule(self, rule_id: str) -> dict[str, Any]:
         """Return the loaded YAML rule dict for rule_id ({} if absent)."""
         rule = self.rules_by_id.get(rule_id)
         return rule if isinstance(rule, dict) else {}
@@ -574,11 +589,11 @@ class RuleEngine:
         except (ValueError, TypeError, AttributeError):
             return 300
 
-    def _load_rules(self) -> List[Dict[str, Any]]:
+    def _load_rules(self) -> list[dict[str, Any]]:
         """Load rules from YAML file or return fallback default rules."""
         if Path(self.rules_path).exists() and yaml is not None:
             try:
-                with open(self.rules_path, "r", encoding="utf-8") as f:
+                with open(self.rules_path, encoding="utf-8") as f:
                     cfg = yaml.safe_load(f)
                     if isinstance(cfg, dict):
                         self._raw_config = cfg
@@ -619,8 +634,8 @@ class RuleEngine:
             },
         ]
 
-    def evaluate(self, event: OpenLineageEvent) -> List[AlertItem]:
-        alerts: List[AlertItem] = []
+    def evaluate(self, event: OpenLineageEvent) -> list[AlertItem]:
+        alerts: list[AlertItem] = []
 
         # Evaluate Rule 1: Schema Change Alert on Silver/Gold tables
         schema_alerts = self._check_schema_changes(event)
@@ -654,9 +669,9 @@ class RuleEngine:
 
         return alerts
 
-    def _check_schema_changes(self, event: OpenLineageEvent) -> List[AlertItem]:
+    def _check_schema_changes(self, event: OpenLineageEvent) -> list[AlertItem]:
         """Rule 1: Detect schema modifications in Silver and Gold tables."""
-        alerts: List[AlertItem] = []
+        alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-001"):
             return alerts
         rule = self._rule("RF20-RULE-001")
@@ -758,15 +773,15 @@ class RuleEngine:
                             "type_changes": altered,
                             "total_fields": len(fields),
                         },
-                        created_at=datetime.now(timezone.utc).isoformat(),
+                        created_at=datetime.now(UTC).isoformat(),
                     )
                 )
 
         return alerts
 
-    def _check_quality_breaches(self, event: OpenLineageEvent) -> List[AlertItem]:
+    def _check_quality_breaches(self, event: OpenLineageEvent) -> list[AlertItem]:
         """Rule 2: Detect quality threshold breach in dataQuality / dataQualityAssertions facets."""
-        alerts: List[AlertItem] = []
+        alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-002"):
             return alerts
         rule = self._rule("RF20-RULE-002")
@@ -814,7 +829,7 @@ class RuleEngine:
                             f"Failed expectations: {failed_count}."
                         ),
                         details=dq_facet,
-                        created_at=datetime.now(timezone.utc).isoformat(),
+                        created_at=datetime.now(UTC).isoformat(),
                     )
                 )
 
@@ -858,15 +873,15 @@ class RuleEngine:
                             "failed_count": len(failed_assertions),
                             "failed_assertions": failed_assertions[:10],
                         },
-                        created_at=datetime.now(timezone.utc).isoformat(),
+                        created_at=datetime.now(UTC).isoformat(),
                     )
                 )
 
         return alerts
 
-    def _check_pipeline_failures(self, event: OpenLineageEvent) -> List[AlertItem]:
+    def _check_pipeline_failures(self, event: OpenLineageEvent) -> list[AlertItem]:
         """Rule 3: Pipeline failure alert on FAIL or ABORT."""
-        alerts: List[AlertItem] = []
+        alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-003"):
             return alerts
         rule = self._rule("RF20-RULE-003")
@@ -914,13 +929,13 @@ class RuleEngine:
                     "eventType": event.eventType,
                     "eventTime": event.eventTime,
                 },
-                created_at=datetime.now(timezone.utc).isoformat(),
+                created_at=datetime.now(UTC).isoformat(),
             )
         )
 
         return alerts
 
-    def _sla_lookup(self, dataset_name: str) -> Tuple[float, str]:
+    def _sla_lookup(self, dataset_name: str) -> tuple[float, str]:
         """Resolve (max_staleness_seconds, sla_tier) for a dataset.
 
         Uses YAML criteria.sla_definitions when present; otherwise falls
@@ -963,9 +978,9 @@ class RuleEngine:
         defaults = {"tier_1": "CRITICAL", "tier_2": "WARNING", "real_time": "CRITICAL"}
         return str(sev_map.get(f"{sla_tier}_breach", defaults.get(sla_tier, "WARNING")))
 
-    def _check_sla_freshness(self, event: OpenLineageEvent) -> List[AlertItem]:
+    def _check_sla_freshness(self, event: OpenLineageEvent) -> list[AlertItem]:
         """Rule 4: SLA freshness breach alert."""
-        alerts: List[AlertItem] = []
+        alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-004"):
             return alerts
         if event.eventType not in ("COMPLETE", "CHECK"):
@@ -973,7 +988,7 @@ class RuleEngine:
 
         try:
             event_dt = datetime.fromisoformat(event.eventTime.replace("Z", "+00:00"))
-            now_dt = datetime.now(timezone.utc)
+            now_dt = datetime.now(UTC)
             lag_seconds = (now_dt - event_dt).total_seconds()
         except Exception:
             lag_seconds = 0.0
@@ -1005,7 +1020,7 @@ class RuleEngine:
                             "max_staleness_seconds": max_staleness,
                             "eventTime": event.eventTime,
                         },
-                        created_at=datetime.now(timezone.utc).isoformat(),
+                        created_at=datetime.now(UTC).isoformat(),
                     )
                 )
 
@@ -1074,10 +1089,10 @@ async def ingest_lineage_event(event: OpenLineageEvent) -> IngestionResponse:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Lineage event ingestion failed: {str(exc)}",
-        )
+        ) from exc
 
 
-def asdict_alert(a: AlertItem) -> Dict[str, Any]:
+def asdict_alert(a: AlertItem) -> dict[str, Any]:
     return {
         "alert_id": a.alert_id,
         "rule_id": a.rule_id,
@@ -1095,10 +1110,10 @@ def asdict_alert(a: AlertItem) -> Dict[str, Any]:
 
 @app.get("/api/v1/alerts", summary="Get active metadata alerts")
 async def get_alerts(
-    severity: Optional[str] = Query(None, description="Filter by severity (CRITICAL, WARNING, INFO)"),
-    rule_id: Optional[str] = Query(None, description="Filter by rule ID (e.g. RF20-RULE-001)"),
-    status: Optional[str] = Query("ACTIVE", description="Filter by status (ACTIVE, ACKNOWLEDGED, RESOLVED)"),
-    dataset: Optional[str] = Query(None, description="Filter by dataset substring"),
+    severity: str | None = Query(None, description="Filter by severity (CRITICAL, WARNING, INFO)"),
+    rule_id: str | None = Query(None, description="Filter by rule ID (e.g. RF20-RULE-001)"),
+    status: str | None = Query("ACTIVE", description="Filter by status (ACTIVE, ACKNOWLEDGED, RESOLVED)"),
+    dataset: str | None = Query(None, description="Filter by dataset substring"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -1161,7 +1176,7 @@ async def health():
     return {
         "status": "healthy",
         "service": "lineage_webhook_service",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 

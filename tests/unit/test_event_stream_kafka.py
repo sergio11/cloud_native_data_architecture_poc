@@ -10,7 +10,6 @@ consumer_factory seam. Every test runs against isolated databases under tmp_path
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 import types
 from pathlib import Path
@@ -123,7 +122,12 @@ def test_sqlite_backend_without_env(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_kafka_incremental_orders_and_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Incremental Kafka runs return ascending offsets and commit every offset delivered."""
+    """Incremental Kafka runs return ascending offsets and commit every offset delivered.
+
+    A brand-new consumer group starts at ``earliest`` (not ``latest``) so it
+    reads the existing backlog, mirroring the SQLite backend where an unknown
+    cursor starts at offset 0 (EventBrokerPort contract).
+    """
     monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     frames = [_valid_frame(TOPIC, 2, 2), _valid_frame(TOPIC, 0, 0), _valid_frame(TOPIC, 1, 1)]
     instances: list[FakeConsumer] = []
@@ -133,7 +137,7 @@ def test_kafka_incremental_orders_and_commits(tmp_path: Path, monkeypatch: pytes
     assert [e["seq"] for e in events] == [0, 1, 2]  # sorted by offset before returning
     assert instances[0].subscribed == [TOPIC]
     assert instances[0].config["group.id"] == "speed_layer"
-    assert instances[0].config["auto.offset.reset"] == "latest"
+    assert instances[0].config["auto.offset.reset"] == "earliest"
     assert instances[0].config["enable.auto.commit"] is False
     assert instances[0].committed_offsets == [0, 1, 2]
     assert instances[0].closed is True
@@ -201,7 +205,7 @@ def test_kafka_fail_fast_without_broker(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_kafka_publish_no_double_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Kafka publish goes ONLY to Kafka: Producer receives it and SQLite stays empty."""
+    """Kafka publish goes ONLY to Kafka: no local SQLite file is even created."""
     monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 
     produced: list[dict[str, Any]] = []
@@ -227,10 +231,7 @@ def test_kafka_publish_no_double_write(tmp_path: Path, monkeypatch: pytest.Monke
     assert broker.publish_event(TOPIC, "k1", {"seq": 9}) is True
     assert len(produced) == 1 and produced[0]["topic"] == TOPIC
     assert json.loads(produced[0]["value"]) == {"seq": 9}
-
-    with sqlite3.connect(db_path) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM event_log WHERE topic = ?;", (TOPIC,)).fetchone()[0]
-    assert count == 0  # no double write to SQLite
+    assert not Path(db_path).exists()  # no SQLite side effects at all
 
 
 def test_sqlite_publish_never_imports_kafka(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

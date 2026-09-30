@@ -34,7 +34,7 @@ _BRONZE_ORDERS = bronze_table("orders")
 # once Trino/Polaris is enabled and the catalogs resolve logical names natively;
 # when TRINO_HOST is set the SQL is sent to Trino WITHOUT rewriting for that
 # reason.
-LOGICAL_TO_PHYSICAL: dict[str, str] = {
+_LOGICAL_TO_PHYSICAL: dict[str, str] = {
     f"iceberg.{_GOLD_DAILY_METRICS}": physical_sql_name(_GOLD_DAILY_METRICS),
     f"iceberg.{_STREAM_WINDOWED}": physical_sql_name(_STREAM_WINDOWED),
     "iceberg.gold.sales_daily_metrics": physical_sql_name(_GOLD_DAILY_METRICS),
@@ -50,7 +50,7 @@ LOGICAL_TO_PHYSICAL: dict[str, str] = {
 # Longest key first so catalog-qualified names win over their bare 3-part
 # substrings (e.g. iceberg.gold.sales.daily_metrics before gold.sales.daily_metrics).
 _MAPPING_LONGEST_FIRST = sorted(
-    LOGICAL_TO_PHYSICAL.items(), key=lambda kv: len(kv[0]), reverse=True
+    _LOGICAL_TO_PHYSICAL.items(), key=lambda kv: len(kv[0]), reverse=True
 )
 
 

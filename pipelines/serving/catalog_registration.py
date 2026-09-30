@@ -645,7 +645,7 @@ class ManifestUpdater:
         if not isinstance(spec, dict):
             spec = {}
             data["spec"] = spec
-        assets: list[dict] = spec.setdefault("assets", [])
+        assets: list[dict[str, Any]] = spec.setdefault("assets", [])
         if not isinstance(assets, list):
             assets = []
             spec["assets"] = assets

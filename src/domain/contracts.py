@@ -16,11 +16,11 @@ in either real repository shape and normalised transparently:
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class CompatibilityMode(str, Enum):
+class CompatibilityMode(StrEnum):
     BACKWARD = "BACKWARD"
     FORWARD = "FORWARD"
     FULL = "FULL"
@@ -277,9 +277,11 @@ def extract_quality_thresholds(contract_data: dict[str, Any]) -> dict[str, float
     Reads ``spec.quality.thresholds`` and returns only the declared keys of
     ``{"completeness", "uniqueness", "validity"}`` as floats in [0, 1].
     Unknown keys are ignored. Returns None when the quality/thresholds block
-    is missing, is not a mapping, declares none of the known dimensions with
-    a valid value, or holds any out-of-range/non-numeric value for a known
-    dimension (booleans never count as numbers).
+    is absent or declares none of the known dimensions. A declared threshold
+    block that is not a mapping, or a declared dimension value that is not a
+    number in [0, 1] (booleans never count as numbers), raises ``ValueError``:
+    misconfigured governance must fail loudly at gate time instead of
+    silently degrading to the global fallback (fail-closed, RF-06/RF-15).
     """
     if not isinstance(contract_data, dict):
         return None
@@ -290,18 +292,29 @@ def extract_quality_thresholds(contract_data: dict[str, Any]) -> dict[str, float
     if not isinstance(quality_raw, dict):
         return None
     thresholds_raw = quality_raw.get("thresholds")
-    if not isinstance(thresholds_raw, dict):
+    if thresholds_raw is None:
         return None
+    if not isinstance(thresholds_raw, dict):
+        raise ValueError(
+            f"Invalid contract quality thresholds: expected a mapping of dimension to rate, "
+            f"got {thresholds_raw!r}"
+        )
     extracted: dict[str, float] = {}
     for dimension in ("completeness", "uniqueness", "validity"):
         if dimension not in thresholds_raw:
             continue
         value = thresholds_raw[dimension]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
+            raise ValueError(
+                f"Invalid quality threshold for dimension '{dimension}': "
+                f"expected a number in [0, 1], got {value!r}"
+            )
         rate = float(value)
         if not 0.0 <= rate <= 1.0:
-            return None
+            raise ValueError(
+                f"Invalid quality threshold for dimension '{dimension}': "
+                f"expected a number in [0, 1], got {value!r}"
+            )
         extracted[dimension] = rate
     return extracted or None
 

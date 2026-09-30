@@ -9,6 +9,7 @@ controlled schema evolution, legacy table compatibility) for
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,69 @@ def test_overwrite_supersedes_and_time_travel(storage: LakehouseStorageAdapter) 
     assert len(storage.list_versions("silver.demo.orders")) == 2
     assert len(storage.read_table("silver.demo.orders")) == 2
     assert len(storage.read_table("silver.demo.orders", version=1)) == 3
+
+
+def test_overwrite_empty_set_clears_table_but_keeps_history(storage: LakehouseStorageAdapter) -> None:
+    """Overwrite with zero records reconciles the table to empty (RF-10):
+    live rows are superseded under a new row_count=0 snapshot, while prior
+    versions stay readable. A missing table stays missing."""
+    assert storage.write_table("silver.demo.orders", [{"id": 1}, {"id": 2}], mode="append") == 2
+
+    assert storage.write_table("silver.demo.orders", [], mode="overwrite") == 0
+    assert storage.read_table("silver.demo.orders") == []
+    assert storage.read_table("silver.demo.orders", version=1) != []
+
+    versions = storage.list_versions("silver.demo.orders")
+    assert [v["snapshot_version"] for v in versions] == [1, 2]
+    assert [v["row_count"] for v in versions] == [2, 0]
+
+    assert storage.write_table("silver.demo.missing", [], mode="overwrite") == 0
+    assert storage.table_exists("silver.demo.missing") is False
+    assert storage.list_versions("silver.demo.missing") == []
+
+
+def test_invalid_table_names_rejected_before_sql(storage: LakehouseStorageAdapter) -> None:
+    """Table names reach f-string-interpolated SQL identifiers: anything
+    outside the allowlist must fail before touching the database."""
+    with pytest.raises(ValueError, match="Invalid table name"):
+        storage.read_table('silver.demo."orders')
+    with pytest.raises(ValueError, match="Invalid table name"):
+        storage.write_table("silver.demo.orders; DROP TABLE x", [{"id": 1}], mode="append")
+    with pytest.raises(ValueError, match="Invalid table name"):
+        storage.table_exists("silver demo orders")
+    # Dotted tier names remain valid.
+    assert storage.table_exists("silver.demo.orders") is False
+
+
+def test_concurrent_writes_produce_unique_sequential_versions(tmp_path: Path) -> None:
+    """Regression (RF-07): two racing writers must never publish the same
+    snapshot version (TOCTOU on SELECT MAX). BEGIN IMMEDIATE serializes them."""
+    db_path = str(tmp_path / "lakehouse.db")
+    seed = LakehouseStorageAdapter(db_path=db_path)
+    assert seed.write_table("silver.demo.concurrent", [{"w": -1, "i": -1}], mode="append") == 1
+
+    errors: list[BaseException] = []
+
+    def worker(worker_id: int) -> None:
+        try:
+            adapter = LakehouseStorageAdapter(db_path=db_path)
+            for i in range(5):
+                adapter.write_table(
+                    "silver.demo.concurrent", [{"w": worker_id, "i": i}], mode="append"
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    versions = LakehouseStorageAdapter(db_path=db_path).list_versions("silver.demo.concurrent")
+    assert sorted(v["snapshot_version"] for v in versions) == list(range(1, 12))
 
 
 def test_append_after_overwrite_time_travel(storage: LakehouseStorageAdapter) -> None:

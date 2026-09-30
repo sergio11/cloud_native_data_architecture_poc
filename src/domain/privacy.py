@@ -28,6 +28,9 @@ class PrivacyPolicy:
         if not full_name:
             return ""
         tokens = full_name.strip().split()
+        if not tokens:
+            # Whitespace-only input: nothing to mask, never IndexError.
+            return ""
         if len(tokens) >= 2:
             return f"{tokens[0]} {tokens[1][0]}."
         return tokens[0]
@@ -37,7 +40,9 @@ class PrivacyPolicy:
         """Returns a new dictionary with PII attributes masked according to Gold tier policy."""
         masked = dict(record)
         if "email" in masked:
-            masked["email_hash"] = cls.hash_email(str(masked.pop("email")))
+            raw_email = masked.pop("email")
+            masked["email_hash"] = cls.hash_email("" if raw_email is None else str(raw_email))
         if "name" in masked:
-            masked["name_masked"] = cls.mask_name(str(masked.pop("name")))
+            raw_name = masked.pop("name")
+            masked["name_masked"] = cls.mask_name("" if raw_name is None else str(raw_name))
         return masked

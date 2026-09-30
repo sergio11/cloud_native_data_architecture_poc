@@ -16,7 +16,7 @@ from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.domain.exceptions import QualityGateBreachError, SuiteNotFoundError
 from src.use_cases.cleanse_silver import CleanseSilverUseCase
 from src.use_cases.run_quality_gate import RunQualityGateUseCase
-from tests.helpers import StubLineage
+from tests.helpers import EmptyContractCatalog, StubLineage
 
 
 class StubStorage:
@@ -144,9 +144,11 @@ def test_cleanse_silver_blocks_on_breach(tmp_path):
     storage = StubStorage(tables={"bronze.sales.orders": rows})
     lineage = StubLineage()
     use_case = CleanseSilverUseCase(
-        storage=storage,
+        storage_reader=storage,
+        storage_writer=storage,
         quality_engine=ExpectationEngineAdapter(),
         lineage=lineage,
+        catalog=EmptyContractCatalog(),
     )
 
     with pytest.raises(QualityGateBreachError) as exc_info:
@@ -167,9 +169,11 @@ def test_cleanse_silver_missing_suite_raises(tmp_path):
     storage = StubStorage(tables={"bronze.sales.orders": [{"id": 1, "status": "confirmed"}]})
     lineage = StubLineage()
     use_case = CleanseSilverUseCase(
-        storage=storage,
+        storage_reader=storage,
+        storage_writer=storage,
         quality_engine=ExpectationEngineAdapter(),
         lineage=lineage,
+        catalog=EmptyContractCatalog(),
     )
 
     with pytest.raises(SuiteNotFoundError):
@@ -188,7 +192,11 @@ def test_run_quality_gate_empty_table_fails(tmp_path):
         quality_engine=ExpectationEngineAdapter(),
     )
 
-    evaluation = use_case.execute("silver.sales.orders", suite_path, threshold=0.95)
+    # Fail-closed (RF-06): a failing verdict raises carrying the evaluation.
+    with pytest.raises(QualityGateBreachError) as exc_info:
+        use_case.execute("silver.sales.orders", suite_path, threshold=0.95)
+    evaluation = exc_info.value.evaluation
+    assert evaluation is not None
     assert evaluation.passed is False
     assert evaluation.pass_rate == 0.0
     assert evaluation.table_name == "silver.sales.orders"

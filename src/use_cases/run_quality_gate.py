@@ -10,8 +10,10 @@ import logging
 from typing import Any
 
 from src.domain.entities import QualityGateEvaluation
+from src.domain.exceptions import QualityGateBreachError
+from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD
 from src.ports.inbound import RunQualityGatePort
-from src.ports.outbound import LakehouseStoragePort, QualityEnginePort
+from src.ports.outbound import LakehouseTableReader, QualityEnginePort
 
 logger = logging.getLogger("use_case.run_quality_gate")
 
@@ -21,7 +23,7 @@ class RunQualityGateUseCase(RunQualityGatePort):
 
     def __init__(
         self,
-        storage: LakehouseStoragePort,
+        storage: LakehouseTableReader,
         quality_engine: QualityEnginePort,
     ) -> None:
         self._storage = storage
@@ -31,7 +33,7 @@ class RunQualityGateUseCase(RunQualityGatePort):
         self,
         table_name: str,
         suite_path: str,
-        threshold: float = 0.95,
+        threshold: float = DEFAULT_QUALITY_THRESHOLD,
         records: list[dict[str, Any]] | None = None,
     ) -> QualityGateEvaluation:
         logger.info(
@@ -68,4 +70,15 @@ class RunQualityGateUseCase(RunQualityGatePort):
             threshold,
             "PASS" if result.passed else "FAIL",
         )
+        # 3. Fail closed (RF-06): a failing verdict raises with the evaluation
+        # attached, so programmatic callers cannot ignore a breach and CLIs can
+        # still render results, emit FAIL lineage and persist reports.
+        if not result.passed:
+            raise QualityGateBreachError(
+                f"Quality gate breached for {table_name} "
+                f"(Pass rate: {result.pass_rate:.2f} < threshold {threshold:.2f})",
+                pass_rate=result.pass_rate,
+                threshold=threshold,
+                evaluation=result,
+            )
         return result

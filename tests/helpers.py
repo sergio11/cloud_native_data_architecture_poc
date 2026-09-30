@@ -14,7 +14,9 @@ sites), so existing assertions behave identically.
 
 from __future__ import annotations
 
+import inspect
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -120,3 +122,43 @@ class StubLineage:
             "status": status,
         })
         return True
+
+
+class EmptyContractCatalog:
+    """Minimal ContractCatalogPort stub advertising no contracts.
+
+    Quality gating then falls back to the explicit/global threshold, which is
+    what tests that do not exercise contract-threshold precedence need.
+    """
+
+    def list_contracts(self) -> list[tuple[str, dict[str, Any]]]:
+        return []
+
+
+def check_lsp(port_method: Callable[..., Any], impl_method: Callable[..., Any]) -> None:
+    """Asserts the implementation honours the port contract (Liskov).
+
+    Every port-declared parameter must exist on the implementation (with a
+    default when the port makes it optional), and the implementation must not
+    REQUIRE parameters the port does not declare - otherwise a caller using
+    only the port signature cannot invoke it.
+    """
+    port_params = [p for p in inspect.signature(port_method).parameters.values() if p.name != "self"]
+    impl_by_name = {p.name: p for p in inspect.signature(impl_method).parameters.values() if p.name != "self"}
+    port_by_name = {p.name: p for p in port_params}
+    for name, port_param in port_by_name.items():
+        assert name in impl_by_name, f"implementation is missing port-declared parameter '{name}'"
+        if port_param.default is not inspect.Parameter.empty:
+            assert impl_by_name[name].default is not inspect.Parameter.empty, (
+                f"port parameter '{name}' is optional but the implementation requires it"
+            )
+    position_kinds = {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
+    for name, impl_param in impl_by_name.items():
+        if impl_param.kind in position_kinds and impl_param.default is inspect.Parameter.empty:
+            assert name in port_by_name, (
+                f"implementation requires '{name}' which the port contract does not declare"
+            )

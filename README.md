@@ -23,13 +23,13 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 4. **Medallion Lakehouse**: Multi-tier curation (Bronze raw, Silver conformed, Gold aggregated) with ACID semantics, schema evolution, and time travel — implemented locally over embedded SQLite adapters, targeting Apache Iceberg on MinIO (Polaris catalog) in the K8s profile.
 5. **Hybrid Lambda / Kappa Processing**: Full-recomputation batch layer for historical depth combined with event-log stream processing (real 5-minute tumbling windows + full replay), unified at query time by a single anti-join SQL.
 
-> **Two execution profiles** share the same hexagonal core (`src/`): the **local profile** (default — pure Python + SQLite, verified by `rake demo` / `rake test`) and the **K8s profile** (`infra/helm`, `infra/profiles` — deployment target). See [`docs/architecture/overview.md`](docs/architecture/overview.md) and the honest RF-by-RF report [`docs/traceability-status.md`](docs/traceability-status.md).
+> **Two execution profiles** share the same hexagonal core (`src/`): the **local profile** (default — pure Python + SQLite, verified by `rake demo` / `rake test`) and the **K8s profile** (`infra/helm`, `infra/profiles` — deployment target). See [`docs/architecture/overview.md`](docs/architecture/overview.md) and the RF-by-RF verification status in [Acceptance Criteria Overview](#acceptance-criteria-overview-rf-01-to-rf-25) below.
 
 ### Verified scope & known K8s placeholders
 
 > **The K8s profile (`infra/helm`, `infra/profiles`) is a *deployment target
-> not verified in this environment*.** Everything marked VERIFIED in
-> [`docs/traceability-status.md`](docs/traceability-status.md) was proven in
+> not verified in this environment*.** Everything marked VERIFIED in the
+> [Acceptance Criteria Overview](#acceptance-criteria-overview-rf-01-to-rf-25) was proven in
 > the local profile (Python + SQLite) via `rake demo` / `rake test`. Honest
 > list of known K8s placeholders (details in `docs/architecture/overview.md`,
 > "What exists vs. what is wired"):
@@ -52,11 +52,27 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 >   `POLARIS_TOKEN` / `MARQUEZ_URL` (K8s-only services; it exits non-zero
 >   without them).
 
+### Known limitations (local profile)
+
+1. The speed layer is a **polling CLI**, not a resident daemon: no continuous streaming latency is measurable (RF-09 partial).
+2. The local lakehouse is **single-node SQLite**: same contract as Iceberg (idempotent append, versioning, evolution) but no columnar storage or multi-engine access.
+3. The quality engine evaluates **Great Expectations-format suites**, but **is not the GE library**.
+4. **No CI pipeline**: validations block at runtime (`exit 1`), not on merge.
+5. Telemetry (Prometheus/Grafana), catalog UI (Marquez) and admission (Kyverno) are **K8s profile**, not verified here.
+6. `flink_clickstream_stream.py` aggregates clickstream windows; funnel/session metrics are out of scope (SRS §1.2).
+7. Serving fusion is by key, not recency: a stream row whose `(order_date, status)` already exists in batch is shadowed even if newer (batch-wins rule, RF-11).
+8. Only contract dimensions the suite measures are enforced: a declared threshold (e.g. `uniqueness`) for a dimension the suite does not evaluate is skipped. Known case: `uniqueness` on Gold aggregates with composite keys is not measurable — the engine only supports single-column uniqueness.
+9. `quality.assertions` in the contract DSL (e.g. `total_amount >= 0` in `orders/contract.yaml`) stay declarative: no code compiles them into engine expectations; only `spec.quality.thresholds` are enforced.
+10. Residual structural notes (conscious trade-offs, not defects): `RunQualityGatePort`/`QueryServingPort` keep pragmatic signatures (`execute` vs `execute_unified_revenue_query`); the standalone quality-gate CLI pretty-prints via Rich while Dagster returns a bool; per-use-case status vocabularies (`SUCCESS`/`EMPTY`/`NO_EVENTS`) are statically typed per result contract (`Literal` in `src/ports/inbound.py`) rather than unified; `sql_serving` rewrites logical to physical table names by substring (documented interim bridge until Trino/Polaris resolves names natively); email pseudonymization is unsalted SHA-256 (demo-grade GDPR illustration, see `src/domain/privacy.py`).
+
 **Event backend (local profile).** `src/adapters/streaming/event_stream.py`
 uses the embedded SQLite WAL log (`data/event_log.db`) by default; when
 `KAFKA_BOOTSTRAP_SERVERS` is set and non-empty, Kafka becomes the canonical
 backend with fail-fast semantics (unreachable broker raises `RuntimeError` —
-never a silent SQLite fallback; no double writes).
+never a silent SQLite fallback; no double writes). Both backends share the
+same cursor contract: a consumer group without committed offsets reads from
+the beginning (`auto.offset.reset=earliest` on Kafka, offset 0 on SQLite),
+so a new group never silently skips the backlog.
 
 **Quality-threshold precedence.** Per-dimension contract thresholds
 (`spec.quality.thresholds` in `contract.yaml`: `completeness`, `uniqueness`,
@@ -64,8 +80,13 @@ never a silent SQLite fallback; no double writes).
 ignored once any declared dimension is measurable; the `--threshold` flag of
 `silver_transform.py` (and of the standalone `run_quality_gate.py`) only
 applies when the contract declares no thresholds (implemented in
-`src/domain/quality_gate.py::evaluate_and_enforce`, thresholds extracted by
-`src/domain/contracts.py::extract_quality_thresholds`).
+`src/use_cases/gate_support.py::enforce_quality_gate` (pure verdict in `src/domain/quality_gate.py::assess_gate`), thresholds extracted by
+`src/domain/contracts.py::extract_quality_thresholds`). A declared threshold
+that is not a number in `[0, 1]` (or a `thresholds` block that is not a
+mapping) raises `ValueError` at gate time — misconfigured governance fails
+loudly instead of silently degrading to the global fallback. An engine
+fail-closed veto (unsupported expectation type) always blocks, even when the
+contract dimensions pass.
 
 ### Strategic Objectives
 - **Pedagogical Reference**: Provide a clear, hands-on demonstration showing how theoretical data architecture concepts translate into production-grade open-source code.
@@ -181,7 +202,7 @@ applies when the contract declares no thresholds (implemented in
 
 ## Subsystems Summary (S1 to S8)
 
-- **S1: Source & Ingestion**: PostgreSQL when `PGPASSWORD` is set, otherwise a loud synthetic fallback + SQLite WAL event log (local); PostgreSQL + Kafka 3.7 KRaft in K8s (`s1-ingestion`, `s4-stream`).
+- **S1: Source & Ingestion**: PostgreSQL when `PGPASSWORD` is set, otherwise a loud synthetic fallback + SQLite WAL event log (local); PostgreSQL + Kafka 3.7 KRaft in K8s (`s1-ingestion`, `s4-stream`). A reachable PostgreSQL table is authoritative even when empty (empty table yields `[]`); synthetic records are generated only when PostgreSQL is unconfigured or the connection/query fails (logged at WARNING).
 - **S2: Lakehouse Storage & Catalog**: SQLite adapter with append-only idempotent Bronze, row-version time travel, schema evolution (local); MinIO + Iceberg + Polaris in K8s (`s2-lakehouse`).
 - **S3: Batch Processing Engine**: Pure-Python Medallion drivers over the hexagonal core — Bronze snapshotting, Silver dedup + fail-closed gate, Gold full recomputation (local); Spark Operator in K8s (`s3-batch`).
 - **S4: Stream Processing Engine**: Real 5-minute tumbling windows over the event log with consumer cursors + full replay (local); Flink Operator + Kafka in K8s (`s4-stream`).
@@ -214,7 +235,7 @@ rake medallion:all                # RF-01..RF-07 (bronze -> silver -> gold)
 rake stream:orders                # RF-09 speed layer (auto-seeds demo events if log empty)
 rake stream:replay                # RF-10 full Kappa replay
 rake serving:query                # RF-11 unified query
-rake test                         # unit + integration (107 tests: 95 unit + 12 integration)
+rake test                         # unit + integration (132 tests: 120 unit + 12 integration)
 rake test:coverage                # with coverage report
 rake lint                         # ruff
 rake typecheck                    # mypy on src/
@@ -307,33 +328,35 @@ poc_data_engineering/
 > Canonical numbering: [`srs.txt`](srs.txt) §5 is the source of truth. The table below follows it
 > (the legacy English `docs/srs.md` uses a different RF numbering — see the NOTICE at the top of that file).
 
-| Req ID | Requirement Summary | Priority | Implementation Component |
-| :--- | :--- | :---: | :--- |
-| **RF-01** | Ingesta OLTP periódica e idempotente hacia Bronze | `[M]` | [`pipelines/medallion/bronze_ingestion.py`](pipelines/medallion/bronze_ingestion.py) |
-| **RF-02** | Ingesta de eventos de dominio en el log con timestamp y procedencia | `[M]` | [`data-generator/event_producer.py`](data-generator/event_producer.py), [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) |
-| **RF-03** | Separación lógica estricta Bronze → Silver → Gold, sin saltos | `[M]` | [`pipelines/medallion/`](pipelines/medallion/) |
-| **RF-04** | Silver: limpieza, tipado, deduplicación y validaciones sobre Bronze | `[M]` | [`pipelines/medallion/silver_transform.py`](pipelines/medallion/silver_transform.py) |
-| **RF-05** | Gold: métricas/agregados de negocio listos para consumo | `[M]` | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) |
-| **RF-06** | Quality gates entre capas: si no cumplen umbrales, no se publica y se notifica | `[M]` | [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) |
-| **RF-07** | ACID, time travel y evolución de esquema controlada | `[M]` | Apache Iceberg in K8s profile; SQLite adapter with row-version time travel locally (`src/adapters/storage/`) |
-| **RF-08** | Batch layer: recálculo completo del histórico, programado y manual | `[M]` | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) (full recomputation from Silver on every run) |
-| **RF-09** | Stream layer: agregados en ventana con latencia ≤ 5 s | `[M]` | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (5-min tumbling windows) |
-| **RF-10** | Kappa: regenerar resultados releyendo el log desde su origen | `[M]` | `rake stream:replay` / `--start-offset earliest` / `--replay` in [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py); batch needs no flag (full recompute by design) |
-| **RF-11** | Serving layer: una única consulta fusiona batch exacto + ventana reciente | `[M]` | [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql) + [`pipelines/serving/run_serving_query.py`](pipelines/serving/run_serving_query.py) |
-| **RF-12** | Reproceso completo de cualquier capa sin pérdida de consistencia | `[S]` | Full stream replay + Gold full recomputation (idempotent rewrites) |
-| **RF-13** | Publicación declarativa de productos por dominio | `[M]` | `product.yaml` manifests in [`domains/`](domains/) |
-| **RF-14** | Productos encontrables y autoexplicativos en catálogo | `[M]` | `product.yaml` + Marquez catalog in K8s profile (`infra/helm/s7-fabric`) |
-| **RF-15** | Contratos máquina-legibles validados; ruptura bloquea publicación y alerta | `[M]` | [`governance/contract_validator.py`](governance/contract_validator.py) (also enforced in CI) |
-| **RF-16** | Consumo cross-dominio self-service sin intermediación del productor | `[M]` | Serving layer ([`pipelines/serving/`](pipelines/serving/)) |
-| **RF-17** | Políticas globales federadas aplicadas automáticamente (dueño, PII, nombres) | `[S]` | [`governance/policies/`](governance/policies/) + Kyverno in K8s (`infra/helm/s6-mesh`) |
-| **RF-18** | Cuotas/aislamiento por dominio en la plataforma compartida | `[S]` | [`infra/helm/s6-mesh/`](infra/helm/s6-mesh/) (K8s `ResourceQuota`/`LimitRange` per domain) |
-| **RF-19** | Linaje end-to-end consultable, alimentado automáticamente | `[M]` | [`lineage/`](lineage/) + Marquez (local audit trail `data/lineage_audit.jsonl`) |
-| **RF-20** | Metadatos activos: alertas ante cambios de esquema o degradación de calidad | `[S]` | [`lineage/config/`](lineage/config/) alert service (K8s profile) |
-| **RF-21** | Seguridad/clasificación embebida en el flujo, no en documentación externa | `[S]` | [`src/domain/privacy.py`](src/domain/privacy.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) (SHA-256 email hashing, name masking) |
-| **RF-22** | Pipelines orquestables: programables, a demanda, con estado observable | `[M]` | [`Rakefile`](Rakefile) tasks + Dagster assets ([`pipelines/orchestration/`](pipelines/orchestration/)) |
-| **RF-23** | Panel único: estado de pipelines, lag de stream, cumplimiento de calidad | `[S]` | Grafana/Prometheus assets in [`infra/helm/s8-ops/`](infra/helm/s8-ops/) selected via [`infra/profiles/`](infra/profiles/) (no docker-compose exists in this repo) |
-| **RF-24** | Comando único de demo end-to-end reproducible | `[M]` | [`scripts/demo.sh`](scripts/demo.sh) / `rake demo` |
-| **RF-25** | Documentación de arquitectura apta para portfolio | `[M]` | Directory [`docs/`](docs/) |
+| Req ID | Requirement Summary | Priority | Status | Implementation Component |
+| :--- | :--- | :---: | :---: | :--- |
+| **RF-01** | Ingesta OLTP periódica e idempotente hacia Bronze | `[M]` | VERIFIED | [`pipelines/medallion/bronze_ingestion.py`](pipelines/medallion/bronze_ingestion.py) |
+| **RF-02** | Ingesta de eventos de dominio en el log con timestamp y procedencia | `[M]` | VERIFIED | [`data-generator/event_producer.py`](data-generator/event_producer.py), [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) |
+| **RF-03** | Separación lógica estricta Bronze → Silver → Gold, sin saltos | `[M]` | VERIFIED | [`pipelines/medallion/`](pipelines/medallion/) |
+| **RF-04** | Silver: limpieza, tipado, deduplicación y validaciones sobre Bronze | `[M]` | PARTIAL (tipado explícito de columnas no implementado: todo se almacena como TEXT) | [`pipelines/medallion/silver_transform.py`](pipelines/medallion/silver_transform.py) |
+| **RF-05** | Gold: métricas/agregados de negocio listos para consumo | `[M]` | VERIFIED | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) |
+| **RF-06** | Quality gates entre capas: si no cumplen umbrales, no se publica y se notifica | `[M]` | VERIFIED | [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) |
+| **RF-07** | ACID, time travel y evolución de esquema controlada | `[M]` | VERIFIED | Apache Iceberg in K8s profile; SQLite adapter with row-version time travel locally (`src/adapters/storage/`) |
+| **RF-08** | Batch layer: recálculo completo del histórico, programado y manual | `[M]` | VERIFIED | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) (full recomputation from Silver on every run) |
+| **RF-09** | Stream layer: agregados en ventana con latencia ≤ 5 s | `[M]` | PARTIAL (ventanas reales e inmediatez verificadas; el límite de 5 s no se mide: CLI por polling, no demonio residente) | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (5-min tumbling windows) |
+| **RF-10** | Kappa: regenerar resultados releyendo el log desde su origen | `[M]` | VERIFIED | `rake stream:replay` / `--start-offset earliest` / `--replay` in [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py); batch needs no flag (full recompute by design). Un replay sobre log vacío reconcilia la tabla Speed a vacío (no deja filas obsoletas) |
+| **RF-11** | Serving layer: una única consulta fusiona batch exacto + ventana reciente | `[M]` | VERIFIED | [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql) + [`pipelines/serving/run_serving_query.py`](pipelines/serving/run_serving_query.py) |
+| **RF-12** | Reproceso completo de cualquier capa sin pérdida de consistencia | `[S]` | PARTIAL (sin comando único de reproceso Bronze→Gold en una invocación) | Full stream replay + Gold full recomputation (idempotent rewrites) |
+| **RF-13** | Publicación declarativa de productos por dominio | `[M]` | PARTIAL (el manifiesto *es* la publicación en local; sin pipeline de registro) | `product.yaml` manifests in [`domains/`](domains/) |
+| **RF-14** | Productos encontrables y autoexplicativos en catálogo | `[M]` | PARTIAL (catálogo UI buscable solo en K8s/Marquez; en local el catálogo es el árbol `domains/` + validación) | `product.yaml` + Marquez catalog in K8s profile (`infra/helm/s7-fabric`) |
+| **RF-15** | Contratos máquina-legibles validados; ruptura bloquea publicación y alerta | `[M]` | VERIFIED | [`governance/contract_validator.py`](governance/contract_validator.py) (bloqueo en ejecución/validación; sin pipeline CI que lo imponga en merge) |
+| **RF-16** | Consumo cross-dominio self-service sin intermediación del productor | `[M]` | PARTIAL (apertura total, sin capa de control de acceso) | Serving layer ([`pipelines/serving/`](pipelines/serving/)) |
+| **RF-17** | Políticas globales federadas aplicadas automáticamente (dueño, PII, nombres) | `[S]` | PARTIAL (admisión en despliegue/Kyverno solo en K8s) | [`governance/policies/`](governance/policies/) + Kyverno in K8s (`infra/helm/s6-mesh`) |
+| **RF-18** | Cuotas/aislamiento por dominio en la plataforma compartida | `[S]` | DEFERRED (K8s `ResourceQuota`/`LimitRange`; sin enforcement local) | [`infra/helm/s6-mesh/`](infra/helm/s6-mesh/) (K8s `ResourceQuota`/`LimitRange` per domain) |
+| **RF-19** | Linaje end-to-end consultable, alimentado automáticamente | `[M]` | VERIFIED | [`lineage/`](lineage/) + Marquez (local audit trail `data/lineage_audit.jsonl`) |
+| **RF-20** | Metadatos activos: alertas ante cambios de esquema o degradación de calidad | `[S]` | PARTIAL (alertas = registro local; despliegue `s7-fabric` arranca un stub; fuera del flujo `rake demo`) | [`lineage/config/`](lineage/config/) alert service (K8s profile) |
+| **RF-21** | Seguridad/clasificación embebida en el flujo, no en documentación externa | `[S]` | PARTIAL (PII mascarada en Gold verificada; sin RBAC en ejecución) | [`src/domain/privacy.py`](src/domain/privacy.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) (SHA-256 email hashing, name masking) |
+| **RF-22** | Pipelines orquestables: programables, a demanda, con estado observable | `[M]` | VERIFIED | [`Rakefile`](Rakefile) tasks + Dagster assets ([`pipelines/orchestration/`](pipelines/orchestration/)) |
+| **RF-23** | Panel único: estado de pipelines, lag de stream, cumplimiento de calidad | `[S]` | DEFERRED (assets sin templates: ningún dashboard desplegado) | Grafana/Prometheus assets in [`infra/helm/s8-ops/`](infra/helm/s8-ops/) selected via [`infra/profiles/`](infra/profiles/) (no docker-compose exists in this repo) |
+| **RF-24** | Comando único de demo end-to-end reproducible | `[M]` | VERIFIED | [`scripts/demo.sh`](scripts/demo.sh) / `rake demo` |
+| **RF-25** | Documentación de arquitectura apta para portfolio | `[M]` | VERIFIED | Directory [`docs/`](docs/) |
+
+> **Status counts — RF:** VERIFIED **14** · PARTIAL **9** · DEFERRED **2**. A requirement is VERIFIED only if an automated test or command in this repository proves it in the local profile. Evidence: `rake test` (132 tests: 120 unit + 12 integration), `rake demo` (RF-24 end-to-end).
 
 ---
 

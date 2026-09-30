@@ -17,8 +17,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from src.domain.naming import bronze_table
-from src.ports.inbound import IngestBronzePort
-from src.ports.outbound import LakehouseStoragePort, LineagePublisherPort, OltpSourcePort
+from src.ports.inbound import IngestBronzePort, IngestBronzeResult
+from src.ports.outbound import LakehouseTableWriter, LineagePublisherPort, OltpSourcePort
 
 logger = logging.getLogger("use_case.ingest_bronze")
 
@@ -29,23 +29,21 @@ class IngestBronzeUseCase(IngestBronzePort):
     def __init__(
         self,
         source: OltpSourcePort,
-        storage: LakehouseStoragePort,
+        storage: LakehouseTableWriter,
         lineage: LineagePublisherPort,
     ) -> None:
         self._source = source
         self._storage = storage
         self._lineage = lineage
 
-    def execute(self, entity: str) -> dict[str, Any]:
+    def execute(self, entity: str) -> IngestBronzeResult:
         """Ingests one OLTP snapshot into append-only Bronze storage.
 
         Append-only + content-hash idempotency (RF-01): the write always uses
         ``mode="append"`` and the storage adapter skips rows whose content hash
         already exists, so a re-run of the same snapshot returns
         ``rows_ingested == 0`` (``idempotent_hit=True``) instead of duplicating
-        rows. ``rows_ingested``/``rows_new`` are the count returned by
-        ``write_table`` (rows actually inserted; 0 when the content is already
-        present).
+        rows.
         """
         batch_id = str(uuid.uuid4())
         target_table = bronze_table(entity)
@@ -70,7 +68,6 @@ class IngestBronzeUseCase(IngestBronzePort):
                 "target_table": target_table,
                 "batch_id": batch_id,
                 "rows_ingested": 0,
-                "rows_new": 0,
                 "idempotent_hit": False,
                 "status": "EMPTY",
             }
@@ -81,7 +78,7 @@ class IngestBronzeUseCase(IngestBronzePort):
         for r in records:
             row = dict(r)
             row["_ingested_at"] = now_iso
-            row["_source"] = f"oltp.public.{entity}"
+            row["_source"] = f"postgresql.public.{entity}"
             row["_batch_id"] = batch_id
             enriched_records.append(row)
 
@@ -109,7 +106,6 @@ class IngestBronzeUseCase(IngestBronzePort):
             "target_table": target_table,
             "batch_id": batch_id,
             "rows_ingested": count_written,
-            "rows_new": count_written,
             "idempotent_hit": idempotent_hit,
             "status": "SUCCESS",
         }

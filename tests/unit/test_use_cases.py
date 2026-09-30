@@ -23,6 +23,7 @@ from src.use_cases.ingest_bronze import IngestBronzeUseCase
 from src.use_cases.process_stream import ProcessStreamUseCase
 from src.use_cases.query_serving import QueryServingUseCase
 from src.use_cases.validate_contract import ValidateContractUseCase
+from tests.helpers import EmptyContractCatalog
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -67,7 +68,13 @@ def test_medallion_pipeline_flow(temp_lakehouse):
     assert "_batch_id" in bronze_records[0]
 
     # 2. Cleanse Silver
-    cleanse_uc = CleanseSilverUseCase(storage=storage, quality_engine=quality, lineage=lineage)
+    cleanse_uc = CleanseSilverUseCase(
+        storage_reader=storage,
+        storage_writer=storage,
+        quality_engine=quality,
+        lineage=lineage,
+        catalog=EmptyContractCatalog(),
+    )
     silver_res = cleanse_uc.execute(
         "orders",
         suite_path=str(REPO_ROOT / "quality" / "expectations" / "silver_orders_suite.json"),
@@ -80,7 +87,13 @@ def test_medallion_pipeline_flow(temp_lakehouse):
     assert "_ingested_at" not in silver_records[0]  # Audit cols stripped for conformed layer
 
     # 3. Aggregate Gold
-    aggregate_uc = AggregateGoldUseCase(storage=storage, lineage=lineage, quality_engine=quality)
+    aggregate_uc = AggregateGoldUseCase(
+        storage_reader=storage,
+        storage_writer=storage,
+        lineage=lineage,
+        quality_engine=quality,
+        catalog=EmptyContractCatalog(),
+    )
     gold_res = aggregate_uc.execute(
         "daily_metrics",
         daily_metrics_suite=str(REPO_ROOT / "quality" / "expectations" / "gold_daily_metrics_suite.json"),
@@ -160,3 +173,50 @@ def test_contract_validation_use_case():
     assert res["products_evaluated"] >= 6
     assert res["contracts_evaluated"] >= 6
     assert res["passed"] is True
+
+
+def test_cleanse_silver_empty_returns_driver_compatible_contract(temp_lakehouse):
+    """Regression: the EMPTY result must carry every key drivers index.
+
+    ``pipelines/medallion/silver_transform.py`` reads ``target_table``,
+    ``rows_promoted`` and ``quality_pass_rate`` unconditionally; an EMPTY
+    shape without them crashed the driver with ``KeyError``.
+    """
+    storage = temp_lakehouse["storage"]
+    lineage = temp_lakehouse["lineage"]
+    quality = temp_lakehouse["quality"]
+
+    assert storage.read_table("bronze.sales.orders") == []
+    cleanse_uc = CleanseSilverUseCase(
+        storage_reader=storage,
+        storage_writer=storage,
+        quality_engine=quality,
+        lineage=lineage,
+        catalog=EmptyContractCatalog(),
+    )
+    res = cleanse_uc.execute(
+        "orders",
+        suite_path=str(REPO_ROOT / "quality" / "expectations" / "silver_orders_suite.json"),
+    )
+    assert res["status"] == "EMPTY"
+    assert res["entity"] == "orders"
+    assert res["target_table"] == "silver.sales.orders"
+    assert res["rows_promoted"] == 0
+    assert res["quality_pass_rate"] == 0.0
+
+
+def test_aggregate_gold_unknown_target_raises(temp_lakehouse):
+    """Regression: an unknown Gold target must fail loudly, never SUCCESS."""
+    aggregate_uc = AggregateGoldUseCase(
+        storage_reader=temp_lakehouse["storage"],
+        storage_writer=temp_lakehouse["storage"],
+        lineage=temp_lakehouse["lineage"],
+        quality_engine=temp_lakehouse["quality"],
+        catalog=EmptyContractCatalog(),
+    )
+    with pytest.raises(ValueError, match="Unknown Gold target"):
+        aggregate_uc.execute(
+            "daily_metric",
+            daily_metrics_suite=str(REPO_ROOT / "quality" / "expectations" / "gold_daily_metrics_suite.json"),
+            customers_suite=str(REPO_ROOT / "quality" / "expectations" / "gold_customers_suite.json"),
+        )

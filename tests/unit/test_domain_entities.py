@@ -32,6 +32,20 @@ def test_gdpr_privacy_policy():
     assert processed["name_masked"] == "Alice S."
 
 
+def test_privacy_masking_blank_and_none_inputs():
+    """Regression: blank/None PII must mask to "" — never crash or hash "None"."""
+    assert PrivacyPolicy.mask_name("") == ""
+    assert PrivacyPolicy.mask_name("   ") == ""
+
+    processed = PrivacyPolicy.apply_customer_masking({"id": 1, "name": None, "email": None})
+    assert processed["name_masked"] == ""
+    assert processed["email_hash"] == ""
+    assert "None" not in processed["email_hash"]
+
+    processed_blank = PrivacyPolicy.apply_customer_masking({"id": 2, "name": "  ", "email": "  "})
+    assert processed_blank["name_masked"] == ""
+
+
 def test_business_aggregator_daily_sales():
     orders = [
         {"order_date": "2024-09-25", "status": "confirmed", "total_amount": 100.0},

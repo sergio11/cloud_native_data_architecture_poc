@@ -36,10 +36,10 @@ from rich.table import Table
 # Ensure repository root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.adapters.quality.expectation_engine import FAIL_CLOSED_RULE
 from src.container import container
 from src.domain.entities import QualityGateEvaluation
-from src.domain.exceptions import SuiteNotFoundError
+from src.domain.exceptions import QualityGateBreachError, SuiteNotFoundError
+from src.ports.outbound import FAIL_CLOSED_RULE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,13 +135,21 @@ def main(
                 raise ValueError(f"Input file must contain a JSON array of records: {input_file}")
 
         # 2. Delegate to the core use case - the fail-closed rules (RF-06) live
-        #    there: empty record set => passed=False, missing suite => exit 2.
-        evaluation = container.run_quality_gate.execute(
-            table_name=table,
-            suite_path=suite,
-            threshold=threshold,
-            records=records,
-        )
+        #    there: a failing verdict raises QualityGateBreachError carrying
+        #    the evaluation (exit 1: blocked), a missing suite raises
+        #    SuiteNotFoundError (exit 2: execution error).
+        try:
+            evaluation = container.run_quality_gate.execute(
+                table_name=table,
+                suite_path=suite,
+                threshold=threshold,
+                records=records,
+            )
+        except QualityGateBreachError as breach:
+            if breach.evaluation is None:  # pragma: no cover - defensive, always attached
+                raise
+            logger.error("Quality gate FAILED: %s", breach)
+            evaluation = breach.evaluation
 
         _print_results_table(evaluation)
         _print_summary_panel(evaluation, threshold)

@@ -25,12 +25,11 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter  # noqa: E402
+from src.container import Container  # noqa: E402
 from src.domain.contracts import (  # noqa: E402
     ContractCompatibilityEvaluator,
     extract_contract_fields,
 )
-from src.use_cases.validate_contract import ValidateContractUseCase  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("contract_validator")
@@ -65,9 +64,9 @@ def run_legacy_comparison(new_file: str, prev_file: str) -> int:
 
 
 def run_repo_validation(repo_root: str) -> int:
-    """Full RF-15 repository validation via the use case (container-free wiring)."""
-    use_case = ValidateContractUseCase(catalog=FsDomainCatalogAdapter(repo_root))
-    results: dict[str, Any] = use_case.execute()
+    """Full RF-15 repository validation via the use case (single composition root)."""
+    use_case = Container(repo_root=repo_root).validate_contract
+    results = use_case.execute()
 
     logger.info(
         "Found %d DataProduct manifests and %d DataContract files",

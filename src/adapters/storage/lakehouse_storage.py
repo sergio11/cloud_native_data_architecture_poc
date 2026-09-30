@@ -17,15 +17,24 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
+import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
+from src.adapters._files import ensure_parent_dir
+from src.adapters._sqlite import sqlite_connection
+from src.domain.naming import physical_sql_name
 from src.ports.outbound import LakehouseStoragePort
 
 logger = logging.getLogger("adapter.storage.lakehouse")
+
+#: Allowlist for logical table names (dots separate the domain tiers and are
+#: normalized to underscores). Anything else is rejected before it can reach
+#: an f-string-interpolated SQL identifier (same guard as OltpSourceAdapter).
+_TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 INTERNAL_COLUMN_TYPES: dict[str, str] = {
     "_snapshot_time": "TEXT",
@@ -72,20 +81,27 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
     def __init__(self, db_path: str = "data/lakehouse.db") -> None:
         self._db_path = db_path
-        Path(os.path.dirname(db_path) or ".").mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(db_path)
         self._init_metadata()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        return conn
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """Yields a managed connection (row tuples, WAL mode, always closed)."""
+        with sqlite_connection(self._db_path, row_factory=sqlite3.Row) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            yield conn
 
     def _normalize_name(self, table_name: str) -> str:
-        return table_name.replace(".", "_")
+        if not isinstance(table_name, str) or not _TABLE_NAME_PATTERN.match(table_name):
+            raise ValueError(
+                f"Invalid table name {table_name!r}: must match {_TABLE_NAME_PATTERN.pattern} "
+                "(SQL identifier allowlist)"
+            )
+        # Single naming rule shared with the domain (dots become underscores).
+        return physical_sql_name(table_name)
 
     def _init_metadata(self) -> None:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS _lakehouse_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +118,23 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
             if "mode" not in snapshot_columns:
                 conn.execute("ALTER TABLE _lakehouse_snapshots ADD COLUMN mode TEXT;")
             conn.commit()
+            # Belt-and-braces uniqueness for the (table, version) pair so two
+            # racing writers can never publish the same snapshot version
+            # (RF-07). Legacy databases that already hold duplicate versions
+            # keep working: the index is skipped with a warning, and
+            # BEGIN IMMEDIATE below still serializes new writers.
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_snapshots_table_version "
+                    "ON _lakehouse_snapshots(table_name, snapshot_version);"
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                logger.warning(
+                    "LakehouseStorage: legacy duplicate snapshot versions detected, "
+                    "uniqueness index skipped (%s); reset state to re-enable it",
+                    exc,
+                )
 
     @staticmethod
     def _content_hash(record: dict[str, Any]) -> str:
@@ -185,22 +218,62 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
         ``mode="append"`` inserts only rows whose content hash is absent from the
         table (live or superseded); a fully duplicate batch returns 0 and creates
-        no snapshot. ``mode="overwrite"`` supersedes all live rows by setting
+        no snapshot.         ``mode="overwrite"`` supersedes all live rows by setting
         ``_row_superseded`` to the new version (rows are never deleted, so prior
         snapshots stay readable) and then inserts the new rows; when the incoming
         content equals the current live content it is a no-op returning 0.
+        Overwriting with an empty set reconciles the table to empty (RF-10: a
+        replayed empty log clears the speed table instead of leaving stale rows
+        behind); a missing table stays missing in that case.
         """
         if mode not in ("append", "overwrite"):
             raise ValueError(f"Unsupported write mode '{mode}'. Expected 'append' or 'overwrite'.")
-        if not records:
+        if not records and mode == "append":
             return 0
 
         clean_name = self._normalize_name(table_name)
-        columns = self._ordered_columns(records)
-        hashes = [self._content_hash(record) for record in records]
         now_iso = datetime.now(UTC).isoformat()
 
-        with self._get_connection() as conn:
+        with self._connection() as conn:
+            # Serialize concurrent writers (RF-07): the SELECT MAX below must
+            # not run in autocommit, otherwise two writers read the same
+            # maximum and publish duplicate snapshot versions (TOCTOU).
+            # BEGIN IMMEDIATE takes the RESERVED lock up front; concurrent
+            # writers wait on the busy timeout instead of interleaving.
+            conn.execute("BEGIN IMMEDIATE")
+            if not records:
+                # Overwrite-to-empty: supersede every live row under a new
+                # snapshot version (row_count 0). Never creates the table.
+                exists = (
+                    conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
+                        (clean_name,),
+                    ).fetchone()
+                    is not None
+                )
+                if not exists:
+                    return 0
+                self._ensure_internal_columns(conn, clean_name)
+                new_version = self._next_version(conn, table_name)
+                conn.execute(
+                    f'UPDATE "{clean_name}" SET _row_superseded = ? WHERE _row_superseded IS NULL;',
+                    (new_version,),
+                )
+                conn.execute(
+                    "INSERT INTO _lakehouse_snapshots "
+                    "(table_name, snapshot_version, row_count, created_at, mode) VALUES (?, ?, ?, ?, ?);",
+                    (table_name, new_version, 0, now_iso, mode),
+                )
+                conn.commit()
+                logger.info(
+                    "LakehouseStorage: overwrite of '%s' with empty set, table cleared (version=%d)",
+                    table_name,
+                    new_version,
+                )
+                return 0
+
+            columns = self._ordered_columns(records)
+            hashes = [self._content_hash(record) for record in records]
             self._ensure_table(conn, clean_name, columns)
 
             if mode == "append":
@@ -288,7 +361,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         business audit columns are kept.
         """
         clean_name = self._normalize_name(table_name)
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             exists = (
                 conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
@@ -335,7 +408,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
     def table_exists(self, table_name: str) -> bool:
         clean_name = self._normalize_name(table_name)
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
                 (clean_name,)
@@ -344,7 +417,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
     def get_table_schema(self, table_name: str) -> list[str]:
         clean_name = self._normalize_name(table_name)
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.execute(f'PRAGMA table_info("{clean_name}");')
             return [
                 row["name"]
@@ -357,7 +430,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
         ``row_count`` is the number of rows written by that snapshot.
         """
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 "SELECT snapshot_version, row_count, created_at FROM _lakehouse_snapshots "
                 "WHERE table_name = ? ORDER BY snapshot_version ASC;",

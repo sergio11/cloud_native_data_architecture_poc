@@ -31,11 +31,11 @@ from typing import Any
 
 from src.domain.entities import QualityAssertionResult, QualityGateEvaluation
 from src.domain.exceptions import SuiteNotFoundError
-from src.ports.outbound import QualityEnginePort
+from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD
+from src.ports.outbound import FAIL_CLOSED_RULE, QualityEnginePort
 
 logger = logging.getLogger("adapter.quality.engine")
 
-FAIL_CLOSED_RULE = "fail_closed"
 FAIL_CLOSED_MARKER = "no data / no assertions to evaluate"
 
 # Quality dimension per supported expectation type. Unsupported types map to no
@@ -73,7 +73,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
         self,
         records: list[dict[str, Any]],
         suite_path: str,
-        threshold: float = 0.95,
+        threshold: float = DEFAULT_QUALITY_THRESHOLD,
         table_name: str = "",
     ) -> QualityGateEvaluation:
         if not os.path.isfile(suite_path):
@@ -190,6 +190,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
             passed=passed,
             failures=failures,
             dimension_rates=dimension_rates,
+            unsupported=unsupported,
         )
 
     def _eval_not_null(

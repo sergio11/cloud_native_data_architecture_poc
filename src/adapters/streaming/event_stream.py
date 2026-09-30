@@ -10,14 +10,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
+from src.adapters._files import ensure_parent_dir
+from src.adapters._sqlite import sqlite_connection
 from src.ports.outbound import EventBrokerPort
 
 logger = logging.getLogger("adapter.streaming.event_stream")
@@ -51,11 +51,16 @@ class EventStreamAdapter(EventBrokerPort):
     ) -> None:
         self._db_path = db_path
         self._consumer_factory = consumer_factory
-        Path(os.path.dirname(db_path) or ".").mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        # The embedded SQLite log is backend state: with the Kafka backend
+        # selected this adapter talks ONLY to Kafka, so it must not create
+        # local files or schemas as a side effect of construction.
+        self._sqlite_backend = self._kafka_bootstrap() is None
+        if self._sqlite_backend:
+            ensure_parent_dir(db_path)
+            self._init_db()
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self._db_path) as conn:
+        with sqlite_connection(self._db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS event_log (
                     offset INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +98,7 @@ class EventStreamAdapter(EventBrokerPort):
 
     def _publish_to_sqlite(self, topic: str, key: str, payload: dict[str, Any]) -> None:
         # Persist to local immutable event log (guarantees Kappa replay RF-10)
-        with sqlite3.connect(self._db_path) as conn:
+        with sqlite_connection(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO event_log (topic, key, payload, published_at) VALUES (?, ?, ?, ?);",
                 (topic, str(key), json.dumps(payload), datetime.now(UTC).isoformat()),
@@ -149,7 +154,12 @@ class EventStreamAdapter(EventBrokerPort):
         replay: bool,
         consumer_group: str,
     ) -> list[dict[str, Any]]:
-        with sqlite3.connect(self._db_path) as conn:
+        with sqlite_connection(self._db_path) as conn:
+            if not replay:
+                # Serialize concurrent consumers of the same group: reading the
+                # cursor and advancing it must be one atomic unit, otherwise two
+                # consumers redeliver the same batch (TOCTOU on last_offset).
+                conn.execute("BEGIN IMMEDIATE")
             if replay:
                 query = "SELECT offset, payload FROM event_log WHERE topic = ? ORDER BY offset ASC"
                 params: list[Any] = [topic]
@@ -211,22 +221,27 @@ class EventStreamAdapter(EventBrokerPort):
         """Consumes from Kafka preserving the EventBrokerPort cursor semantics.
 
         Incremental runs use ``group.id=<consumer_group>`` with
-        ``auto.offset.reset=latest`` and explicitly commit every consumed
-        offset. Replay runs use an ephemeral group id with
-        ``auto.offset.reset=earliest`` and never commit, so consumer cursors
-        are left untouched.
+        ``auto.offset.reset=earliest`` and explicitly commit every consumed
+        offset. ``earliest`` (not ``latest``) is required so a brand-new
+        consumer group reads the existing backlog, exactly like the SQLite
+        backend (unknown cursor starts at offset 0): the port promises
+        "only events NOT yet consumed by consumer_group", and for a new
+        group nothing has been consumed yet. Once offsets are committed,
+        subsequent runs are incremental on both backends. Replay runs use an
+        ephemeral group id with ``auto.offset.reset=earliest`` and never
+        commit, so consumer cursors are left untouched.
         """
         if replay:
             group_id = f"{consumer_group}-replay-{uuid.uuid4().hex}"
-            auto_reset = "earliest"
         else:
             group_id = consumer_group
-            auto_reset = "latest"
+        # Both modes reset to earliest (see docstring): a group without
+        # committed offsets reads the backlog like the SQLite backend.
         config: dict[str, Any] = {
             "bootstrap.servers": bootstrap,
             "group.id": group_id,
             "enable.auto.commit": False,
-            "auto.offset.reset": auto_reset,
+            "auto.offset.reset": "earliest",
         }
         try:
             if self._consumer_factory is not None:

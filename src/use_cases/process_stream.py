@@ -7,16 +7,23 @@ and updates the Speed layer table with support for log replay (RF-10).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Literal
 
 from src.domain.aggregations import BusinessAggregator
 from src.domain.naming import stream_table
-from src.ports.inbound import ProcessStreamPort
-from src.ports.outbound import EventBrokerPort, LakehouseStoragePort, LineagePublisherPort
+from src.ports.inbound import ProcessStreamPort, ProcessStreamResult
+from src.ports.outbound import EventBrokerPort, LakehouseTableWriter, LineagePublisherPort
 
 logger = logging.getLogger("use_case.process_stream")
 
 CONSUMER_GROUP = "speed_layer"
+
+#: Tumbling-window size in seconds (RF-09: 5-minute windows).
+WINDOW_SIZE_SECONDS = 300
+
+#: Incremental cursor-advance batch cap per run (observability only; the speed
+#: table itself is always fully recomputed from the whole log).
+CURSOR_OBSERVABILITY_BATCH = 500
 
 
 class ProcessStreamUseCase(ProcessStreamPort):
@@ -36,7 +43,7 @@ class ProcessStreamUseCase(ProcessStreamPort):
     def __init__(
         self,
         broker: EventBrokerPort,
-        storage: LakehouseStoragePort,
+        storage: LakehouseTableWriter,
         lineage: LineagePublisherPort,
     ) -> None:
         self._broker = broker
@@ -48,7 +55,7 @@ class ProcessStreamUseCase(ProcessStreamPort):
         topic: str = "sales.orders.events",
         target_table: str = stream_table(),
         replay: bool = False,
-    ) -> dict[str, Any]:
+    ) -> ProcessStreamResult:
         """Consumes stream events and rebuilds/updates the speed buffer table.
 
         replay=False (incremental): the FULL speed table is rebuilt
@@ -75,42 +82,47 @@ class ProcessStreamUseCase(ProcessStreamPort):
         replay=True: FULL RECOMPUTE (RF-10) - rewinds to offset 0, consumes the
         entire topic log, recomputes every tumbling window from scratch and
         overwrites the whole speed table deterministically (idempotent,
-        no row growth across repeated replays).
+        no row growth across repeated replays). An empty log reconciles the
+        speed table to empty instead of leaving stale rows behind.
         """
-        mode = "replay_full" if replay else "append"
+        mode: Literal["replay_full", "append"] = "replay_full" if replay else "append"
         logger.info("Processing streaming speed layer on topic '%s' (replay=%s)...", topic, replay)
 
         # 1. Consume events from the persistent log (replay rewinds to earliest offset RF-10).
         # Incremental runs read the full log first WITHOUT touching cursors so a
         # downstream write failure never leaves the cursor falsely advanced.
+        # An empty log yields zero windows; the overwrite below then reconciles
+        # the speed table to empty (or is a no-op when the table is missing).
         events = self._broker.consume_events(topic=topic, max_messages=None, replay=True)
-        if not replay and not events:
-            logger.info("No events on topic '%s'; nothing to materialize", topic)
-            return {
-                "topic": topic,
-                "target_table": target_table,
-                "events_consumed": 0,
-                "windows_generated": 0,
-                "windows_written": 0,
-                "mode": mode,
-                "status": "NO_EVENTS",
-            }
         events_consumed = len(events)
 
         # 2. Compute 5-minute tumbling windows from event time (RF-09)
-        windows = BusinessAggregator.aggregate_tumbling_window(events, window_size_seconds=300)
+        windows = BusinessAggregator.aggregate_tumbling_window(events, window_size_seconds=WINDOW_SIZE_SECONDS)
         logger.info("Calculated %d window aggregations", len(windows))
 
         # 3. Write Speed layer table (overwrite on both replay and incremental
         # full recompute; incremental overwrites to avoid partial-window fragmentation)
         written = self._storage.write_table(target_table, windows, mode="overwrite")
 
-        # 4. Advance the observability cursor ONLY after the durable write. When
+        # 4. Emit OpenLineage metadata for the durable recompute. The run
+        # completed (COMPLETE even when the recompute is empty): lineage must
+        # not be skipped on paths that performed a write.
+        self._lineage.emit_job_event(
+            job_name="streaming_orders_windowing",
+            inputs=[f"kafka.{topic}"],
+            outputs=[target_table],
+            status="COMPLETE",
+        )
+
+        # 5. Advance the observability cursor ONLY after the durable write. When
         # there is nothing new the idempotent rewrite above changed nothing, so
-        # report NO_EVENTS with zeroed counters.
+        # report NO_EVENTS — with the real recompute counters, not zeroes.
         if not replay:
             incremental = self._broker.consume_events(
-                topic=topic, max_messages=500, replay=False, consumer_group=CONSUMER_GROUP,
+                topic=topic,
+                max_messages=CURSOR_OBSERVABILITY_BATCH,
+                replay=False,
+                consumer_group=CONSUMER_GROUP,
             )
             logger.info("Consumed %d stream events from topic '%s'", len(incremental), topic)
             if not incremental:
@@ -118,20 +130,12 @@ class ProcessStreamUseCase(ProcessStreamPort):
                     "topic": topic,
                     "target_table": target_table,
                     "events_consumed": 0,
-                    "windows_generated": 0,
-                    "windows_written": 0,
+                    "windows_generated": len(windows),
+                    "windows_written": written,
                     "mode": mode,
                     "status": "NO_EVENTS",
                 }
             events_consumed = len(incremental)
-
-        # 4. Emit OpenLineage metadata
-        self._lineage.emit_job_event(
-            job_name="streaming_orders_windowing",
-            inputs=[f"kafka.{topic}"],
-            outputs=[target_table],
-            status="COMPLETE",
-        )
 
         return {
             "topic": topic,

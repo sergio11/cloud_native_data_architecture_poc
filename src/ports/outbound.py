@@ -11,6 +11,13 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from src.domain.entities import QualityGateEvaluation
+from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD
+
+#: Rule name the quality engine assigns to the fail-closed "no records /
+#: no assertions to evaluate" failure (RF-06). Part of the
+#: ``QualityEnginePort`` contract so drivers can recognise the empty-dataset
+#: condition without importing a concrete adapter.
+FAIL_CLOSED_RULE = "fail_closed"
 
 
 class OltpSourcePort(Protocol):
@@ -21,13 +28,8 @@ class OltpSourcePort(Protocol):
         ...
 
 
-class LakehouseStoragePort(Protocol):
-    """Port for reading and writing lakehouse tables (Bronze, Silver, Gold, Speed).
-
-    Isolates all Iceberg/SQLite persistence concerns (RF-01 idempotent landing,
-    RF-07 snapshot time travel) behind a storage-agnostic interface so the
-    application core never depends on a concrete lakehouse engine.
-    """
+class LakehouseTableWriter(Protocol):
+    """Narrow port: writing lakehouse tables (Bronze landing, Silver/Gold promotion)."""
 
     def write_table(
         self,
@@ -44,6 +46,10 @@ class LakehouseStoragePort(Protocol):
         """
         ...
 
+
+class LakehouseTableReader(Protocol):
+    """Narrow port: reading lakehouse tables, current state or time travel (RF-07)."""
+
     def read_table(
         self,
         table_name: str,
@@ -56,6 +62,10 @@ class LakehouseStoragePort(Protocol):
         RF-07); ``version=None`` reads the current state. ``limit=None`` reads all rows.
         """
         ...
+
+
+class LakehouseTableInspector(Protocol):
+    """Narrow port: lakehouse metadata for observability and tests (RF-07)."""
 
     def table_exists(self, table_name: str) -> bool:
         """Checks if the table exists."""
@@ -72,6 +82,18 @@ class LakehouseStoragePort(Protocol):
         ``row_count`` (int) and ``created_at`` (str), ordered oldest to newest.
         """
         ...
+
+
+class LakehouseStoragePort(
+    LakehouseTableReader, LakehouseTableWriter, LakehouseTableInspector, Protocol
+):
+    """Composite port: the full lakehouse capability (Bronze, Silver, Gold, Speed).
+
+    Isolates all Iceberg/SQLite persistence concerns (RF-01 idempotent landing,
+    RF-07 snapshot time travel) behind a storage-agnostic interface so the
+    application core never depends on a concrete lakehouse engine. Clients
+    depend on the narrow ports above; only the composite is implemented.
+    """
 
 
 class EventBrokerPort(Protocol):
@@ -134,7 +156,7 @@ class QualityEnginePort(Protocol):
         self,
         records: list[dict[str, Any]],
         suite_path: str,
-        threshold: float = 0.95,
+        threshold: float = DEFAULT_QUALITY_THRESHOLD,
         table_name: str = "",
     ) -> QualityGateEvaluation:
         """Executes quality assertions on records against the suite specification.
@@ -169,19 +191,25 @@ class QueryExecutorPort(Protocol):
         ...
 
 
-class DomainCatalogPort(Protocol):
-    """Port for discovering and reading data-product manifests in the repository.
+class ContractCatalogPort(Protocol):
+    """Narrow port: reading data contracts (quality-threshold governance)."""
+
+    def list_contracts(self) -> list[tuple[str, dict[str, Any]]]:
+        """Returns (source_file_path, parsed contract.yaml) pairs, sorted by path."""
+        ...
+
+
+class DomainCatalogPort(ContractCatalogPort, Protocol):
+    """Composite port for discovering and reading data-product manifests in the repository.
 
     Lets the application core validate data-product manifests without filesystem
     knowledge (RF-13/RF-15), isolating glob/YAML/JSON I/O in an adapter.
+    Governance validation needs the full manifest surface; quality gating only
+    needs ``ContractCatalogPort``.
     """
 
     def list_products(self) -> list[tuple[str, dict[str, Any]]]:
         """Returns (source_file_path, parsed product.yaml) pairs, sorted by path."""
-        ...
-
-    def list_contracts(self) -> list[tuple[str, dict[str, Any]]]:
-        """Returns (source_file_path, parsed contract.yaml) pairs, sorted by path."""
         ...
 
     def list_schemas(self) -> list[tuple[str, dict[str, Any]]]:

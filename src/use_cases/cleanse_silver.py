@@ -10,9 +10,15 @@ import logging
 from typing import Any
 
 from src.domain.naming import bronze_table, silver_table
-from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD, evaluate_and_enforce, find_contract_thresholds
-from src.ports.inbound import CleanseSilverPort
-from src.ports.outbound import DomainCatalogPort, LakehouseStoragePort, LineagePublisherPort, QualityEnginePort
+from src.ports.inbound import CleanseSilverPort, CleanseSilverResult
+from src.ports.outbound import (
+    ContractCatalogPort,
+    LakehouseTableReader,
+    LakehouseTableWriter,
+    LineagePublisherPort,
+    QualityEnginePort,
+)
+from src.use_cases.gate_support import enforce_quality_gate
 
 logger = logging.getLogger("use_case.cleanse_silver")
 
@@ -22,12 +28,14 @@ class CleanseSilverUseCase(CleanseSilverPort):
 
     def __init__(
         self,
-        storage: LakehouseStoragePort,
+        storage_reader: LakehouseTableReader,
+        storage_writer: LakehouseTableWriter,
         quality_engine: QualityEnginePort,
         lineage: LineagePublisherPort,
-        catalog: DomainCatalogPort | None = None,
+        catalog: ContractCatalogPort,
     ) -> None:
-        self._storage = storage
+        self._reader = storage_reader
+        self._writer = storage_writer
         self._quality = quality_engine
         self._lineage = lineage
         self._catalog = catalog
@@ -37,16 +45,24 @@ class CleanseSilverUseCase(CleanseSilverPort):
         entity: str,
         suite_path: str,
         quality_threshold: float | None = None,
-    ) -> dict[str, Any]:
+    ) -> CleanseSilverResult:
         source_table = bronze_table(entity)
         target_table = silver_table(entity)
         logger.info("Starting Silver transformation from '%s' to '%s'", source_table, target_table)
 
         # 1. Read raw records from Bronze
-        raw_records = self._storage.read_table(source_table)
+        raw_records = self._reader.read_table(source_table)
         if not raw_records:
             logger.warning("No records found in '%s'. Skipping promotion.", source_table)
-            return {"entity": entity, "rows_promoted": 0, "status": "EMPTY"}
+            # The EMPTY shape mirrors the SUCCESS contract (target_table and
+            # quality_pass_rate included): drivers index those keys directly.
+            return {
+                "entity": entity,
+                "target_table": target_table,
+                "rows_promoted": 0,
+                "quality_pass_rate": 0.0,
+                "status": "EMPTY",
+            }
 
         # 2. Deduplicate records based on primary key ('id'):
         # latest snapshot wins (RF-01 periodic snapshots). read_table returns
@@ -68,40 +84,24 @@ class CleanseSilverUseCase(CleanseSilverPort):
         #    SuiteNotFoundError which must propagate - never a silent pass).
         #    Hexagonal note: the core holds no filesystem conventions - the
         #    driver resolves the suite path per entity and passes it explicitly.
-        if suite_path is None:
-            raise ValueError(
-                "suite_path is required: the driver must resolve the "
-                "quality/expectations suite path for the entity and pass it explicitly."
-            )
-        # Contract thresholds (data-products/<entity>/) govern per dimension and
-        # ignore the global threshold; the explicit threshold (or its 0.95
-        # default) is only a fallback when the contract is silent.
-        contract_thresholds = find_contract_thresholds(self._catalog, entity)
-        if contract_thresholds is not None and quality_threshold is not None:
-            logger.info(
-                "contract thresholds take precedence over explicit quality_threshold=%.2f for '%s'",
-                quality_threshold, target_table,
-            )
-        effective_threshold = quality_threshold if quality_threshold is not None else DEFAULT_QUALITY_THRESHOLD
-        logger.info(
-            "Evaluating Quality Gate suite '%s' (threshold=%.2f)...",
-            suite_path, effective_threshold,
+        #    Threshold resolution, lineage emission and breach raising live in
+        #    the shared gate_support collaborator (single policy for Silver/Gold).
+        quality_pass_rate = enforce_quality_gate(
+            quality_engine=self._quality,
+            lineage=self._lineage,
+            catalog=self._catalog,
+            records=deduped,
+            suite_path=suite_path,
+            table_name=target_table,
+            job_name=f"silver_clean_{entity}",
+            inputs=[source_table],
+            entity=entity,
+            quality_threshold=quality_threshold,
         )
-        quality_result = evaluate_and_enforce(
-            self._quality,
-            self._lineage,
-            deduped,
-            suite_path,
-            target_table,
-            f"silver_clean_{entity}",
-            [source_table],
-            effective_threshold,
-            contract_thresholds=contract_thresholds,
-        )
-        logger.info("Quality gate PASSED (Pass rate: %.2f)", quality_result.pass_rate)
+        logger.info("Quality gate PASSED (Pass rate: %.2f)", quality_pass_rate)
 
         # 4. Write conformed records to Silver tier
-        written_count = self._storage.write_table(target_table, deduped, mode="overwrite")
+        written_count = self._writer.write_table(target_table, deduped, mode="overwrite")
         logger.info("Successfully wrote %d records to '%s'", written_count, target_table)
 
         # 5. Emit OpenLineage metadata
@@ -116,6 +116,6 @@ class CleanseSilverUseCase(CleanseSilverPort):
             "entity": entity,
             "target_table": target_table,
             "rows_promoted": written_count,
-            "quality_pass_rate": quality_result.pass_rate,
+            "quality_pass_rate": quality_pass_rate,
             "status": "SUCCESS",
         }

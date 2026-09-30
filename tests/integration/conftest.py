@@ -171,10 +171,18 @@ def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
             source=source, storage=storage, lineage=lineage
         ),
         cleanse_silver=CleanseSilverUseCase(
-            storage=storage, quality_engine=quality_engine, lineage=lineage, catalog=domain_catalog
+            storage_reader=storage,
+            storage_writer=storage,
+            quality_engine=quality_engine,
+            lineage=lineage,
+            catalog=domain_catalog,
         ),
         aggregate_gold=AggregateGoldUseCase(
-            storage=storage, lineage=lineage, quality_engine=quality_engine, catalog=domain_catalog
+            storage_reader=storage,
+            storage_writer=storage,
+            lineage=lineage,
+            quality_engine=quality_engine,
+            catalog=domain_catalog,
         ),
         process_stream=ProcessStreamUseCase(
             broker=broker, storage=storage, lineage=lineage

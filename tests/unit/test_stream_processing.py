@@ -7,12 +7,12 @@ Every test runs against isolated event-log and lakehouse databases under tmp_pat
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from src.adapters._sqlite import sqlite_connection
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
 from src.adapters.streaming.event_stream import EventStreamAdapter
@@ -105,7 +105,7 @@ def test_replay_returns_full_log_and_ignores_cursor(tmp_path: Path):
     replayed = broker.consume_events(topic, replay=True)
     assert [e["i"] for e in replayed] == [0, 1, 2, 3, 4]  # full log from offset 0
 
-    with sqlite3.connect(db_path) as conn:
+    with sqlite_connection(db_path) as conn:
         row = conn.execute(
             "SELECT last_offset FROM consumer_offsets WHERE topic = ? AND consumer_group = ?;",
             (topic, "group_a"),
@@ -138,7 +138,10 @@ def test_process_stream_two_runs_no_duplicate_windows(tmp_path: Path):
 
     second = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
     assert second["status"] == "NO_EVENTS"
-    assert second["windows_generated"] == 0
+    # Counters report the full-table recompute actually performed (1 window),
+    # not zeroes: the idempotent rewrite changed nothing (0 rows written).
+    assert second["windows_generated"] == 1
+    assert second["windows_written"] == 0
     rows_after_second = storage.read_table(TARGET_TABLE)
     assert len(rows_after_second) == len(rows_after_first)  # no duplicate windows
 
@@ -226,6 +229,31 @@ def test_empty_log_returns_empty(tmp_path: Path):
     assert result["status"] == "NO_EVENTS"
     assert result["windows_written"] == 0
     assert storage.table_exists(TARGET_TABLE) is False  # nothing written, nothing fabricated
+
+
+def test_replay_empty_log_clears_stale_speed_rows(tmp_path: Path):
+    """Regression (RF-10): replaying an empty log must reconcile the speed
+    table to empty instead of reporting SUCCESS over stale rows."""
+    use_case, broker, storage = _make_use_case(tmp_path)
+    topic = "unit.replay_empty_clears"
+
+    # Simulate rows left behind by a previous log generation.
+    storage.write_table(
+        TARGET_TABLE,
+        [{"window_start": "2026-01-15T12:00:00+00:00", "status": "confirmed",
+          "window_orders": 2, "window_revenue": 120.0}],
+        mode="overwrite",
+    )
+    assert len(storage.read_table(TARGET_TABLE)) == 1
+    assert broker.consume_events(topic, replay=True) == []
+
+    result = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=True)
+    assert result["status"] == "SUCCESS"
+    assert result["windows_generated"] == 0
+    assert result["windows_written"] == 0
+    assert storage.read_table(TARGET_TABLE) == []
+    # Time travel still exposes the cleared generation.
+    assert len(storage.list_versions(TARGET_TABLE)) == 2
 
 
 def test_write_failure_does_not_advance_cursor(tmp_path: Path):

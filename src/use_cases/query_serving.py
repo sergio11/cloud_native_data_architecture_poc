@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.ports.inbound import QueryServingPort
+from src.domain.naming import gold_table, stream_table
+from src.ports.inbound import QueryServingPort, UnifiedRevenueRow
 from src.ports.outbound import QueryExecutorPort
 
 logger = logging.getLogger("use_case.query_serving")
@@ -35,7 +36,7 @@ class QueryServingUseCase(QueryServingPort):
         self,
         order_date_gte: str | None = None,
         limit: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> list[UnifiedRevenueRow]:
         """Executes one unified query over batch Gold + stream Speed tiers.
 
         Returns rows coerced to typed values (``total_orders`` int, revenues
@@ -52,8 +53,12 @@ class QueryServingUseCase(QueryServingPort):
         """Builds the single no-double-count SQL statement.
 
         QueryExecutorPort takes SQL only (no bind parameters), so the filter is
-        inlined with quote escaping and the limit is cast to int.
+        inlined with quote escaping and the limit is cast to int. Tier table
+        names always derive from ``src.domain.naming`` (single source of
+        truth), never from literals.
         """
+        batch_table = gold_table("daily_metrics")
+        stream_table_name = stream_table()
         sql = (
             "SELECT order_date, status, total_orders, total_revenue, "
             "avg_order_value, source_tier FROM ("
@@ -61,7 +66,7 @@ class QueryServingUseCase(QueryServingPort):
             "gross_revenue AS total_revenue, "
             "average_order_value AS avg_order_value, "
             "'batch_historical' AS source_tier "
-            "FROM gold.sales.daily_metrics "
+            f"FROM {batch_table} "
             "UNION ALL "
             "SELECT s.order_date AS order_date, s.status AS status, "
             "SUM(s.window_orders) AS total_orders, "
@@ -69,8 +74,8 @@ class QueryServingUseCase(QueryServingPort):
             "SUM(s.window_revenue) / NULLIF(SUM(s.window_orders), 0) "
             "AS avg_order_value, "
             "'stream_speed' AS source_tier "
-            "FROM stream.sales.orders_windowed s "
-            "WHERE NOT EXISTS (SELECT 1 FROM gold.sales.daily_metrics b "
+            f"FROM {stream_table_name} s "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {batch_table} b "
             "WHERE b.order_date = s.order_date AND b.status = s.status) "
             "GROUP BY s.order_date, s.status"
             ")"
@@ -82,7 +87,7 @@ class QueryServingUseCase(QueryServingPort):
         return sql
 
     @staticmethod
-    def _coerce_row(row: dict[str, Any]) -> dict[str, Any]:
+    def _coerce_row(row: dict[str, Any]) -> UnifiedRevenueRow:
         """Physical columns are TEXT; coerce numerics for downstream consumers."""
         return {
             "order_date": row.get("order_date"),

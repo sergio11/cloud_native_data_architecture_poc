@@ -9,7 +9,7 @@ from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.source.oltp_source import OltpSourceAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
 from src.use_cases.cleanse_silver import CleanseSilverUseCase
-from tests.helpers import StubLineage
+from tests.helpers import EmptyContractCatalog, StubLineage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SILVER_ORDERS_SUITE = str(REPO_ROOT / "quality" / "expectations" / "silver_orders_suite.json")
@@ -40,7 +40,13 @@ def test_silver_keeps_latest_snapshot(tmp_path: Path) -> None:
     ]
     assert storage.write_table("bronze.sales.orders", raw, mode="append") == len(raw)
 
-    uc = CleanseSilverUseCase(storage=storage, quality_engine=ExpectationEngineAdapter(), lineage=StubLineage())
+    uc = CleanseSilverUseCase(
+        storage_reader=storage,
+        storage_writer=storage,
+        quality_engine=ExpectationEngineAdapter(),
+        lineage=StubLineage(),
+        catalog=EmptyContractCatalog(),
+    )
     res = uc.execute("orders", suite_path=SILVER_ORDERS_SUITE)
     assert res["status"] == "SUCCESS"
 

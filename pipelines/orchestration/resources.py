@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dagster.resources")
 
 
-class SparkResource(ConfigurableResource):
+class SparkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base; K8s-only stub
     """Resource to dispatch PySpark jobs on Kubernetes."""
     master_url: str = "k8s://https://kubernetes.default.svc"
     spark_image: str = "docker.io/apache/spark:3.5.0-scala2.12-java17-python3"
@@ -27,7 +27,7 @@ class SparkResource(ConfigurableResource):
         raise NotImplementedError("K8s profile only: Spark job submission is not wired in the local profile")
 
 
-class FlinkResource(ConfigurableResource):
+class FlinkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base; K8s-only stub
     """Resource to interact with Apache Flink Kubernetes Operator."""
     operator_endpoint: str = "http://flink-operator.platform.svc:8080"
 
@@ -35,7 +35,7 @@ class FlinkResource(ConfigurableResource):
         raise NotImplementedError("K8s profile only: Flink savepoint and replay is not wired in the local profile")
 
 
-class MarquezResource(ConfigurableResource):
+class MarquezResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base; K8s-only stub
     """Resource to query OpenLineage/Marquez metadata graph and alerts."""
     marquez_url: str = "http://marquez.platform.svc:5000"
 
@@ -44,13 +44,15 @@ class MarquezResource(ConfigurableResource):
         try:
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
-                return resp.json()
+                payload = resp.json()
+                if isinstance(payload, dict):
+                    return payload
         except Exception as e:
             logger.warning("Could not reach Marquez lineage API: %s", e)
         return {"namespace": namespace, "dataset": dataset_name, "status": "mocked"}
 
 
-class GreatExpectationsResource(ConfigurableResource):
+class GreatExpectationsResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
     """Resource to execute data quality suites via the hexagonal core quality gate."""
     suites_dir: str = "quality/expectations"
 

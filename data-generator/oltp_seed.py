@@ -18,7 +18,6 @@ import os
 import random
 import sys
 from datetime import date, timedelta
-from typing import List, Tuple
 
 import click
 
@@ -42,18 +41,18 @@ logger = logging.getLogger("oltp_seed")
 
 BATCH_SIZE: int = 1_000
 
-CUSTOMER_SEGMENTS: List[str] = ["premium", "standard", "basic"]
-SEGMENT_WEIGHTS: List[float] = [0.20, 0.60, 0.20]
+CUSTOMER_SEGMENTS: list[str] = ["premium", "standard", "basic"]
+SEGMENT_WEIGHTS: list[float] = [0.20, 0.60, 0.20]
 
-ORDER_STATUSES: List[str] = ["confirmed", "pending", "shipped", "cancelled"]
-STATUS_WEIGHTS: List[float] = [0.70, 0.15, 0.10, 0.05]
+ORDER_STATUSES: list[str] = ["confirmed", "pending", "shipped", "cancelled"]
+STATUS_WEIGHTS: list[float] = [0.70, 0.15, 0.10, 0.05]
 
-PRODUCT_CATEGORIES: List[str] = [
+PRODUCT_CATEGORIES: list[str] = [
     "Electronics", "Computers", "Smartphones", "Audio", "Home & Kitchen",
     "Sports & Outdoors", "Books & Media", "Clothing & Fashion", "Health & Beauty", "Toys & Games"
 ]
 
-CAMPAIGN_CHANNELS: List[str] = ["email", "sms", "display", "social", "search"]
+CAMPAIGN_CHANNELS: list[str] = ["email", "sms", "display", "social", "search"]
 
 DDL_PRODUCTS = """
 CREATE TABLE IF NOT EXISTS products (
@@ -154,7 +153,7 @@ def create_schema(conn: psycopg2.extensions.connection, recreate: bool = False) 
     logger.info("Schema created successfully.")
 
 
-def seed_products(conn: psycopg2.extensions.connection, n: int = 500) -> List[Tuple[int, float]]:
+def seed_products(conn: psycopg2.extensions.connection, n: int = 500) -> list[tuple[int, float]]:
     logger.info("Seeding %d products...", n)
     from faker import Faker
 
@@ -182,7 +181,7 @@ def seed_products(conn: psycopg2.extensions.connection, n: int = 500) -> List[Tu
     return [(int(r[0]), float(r[1])) for r in results]
 
 
-def seed_customers(conn: psycopg2.extensions.connection, n: int = 1_000) -> List[int]:
+def seed_customers(conn: psycopg2.extensions.connection, n: int = 1_000) -> list[int]:
     logger.info("Seeding %d customers...", n)
     from faker import Faker
 
@@ -216,8 +215,8 @@ def seed_customers(conn: psycopg2.extensions.connection, n: int = 1_000) -> List
 
 def seed_orders(
     conn: psycopg2.extensions.connection,
-    customer_ids: List[int],
-    product_pool: List[Tuple[int, float]],
+    customer_ids: list[int],
+    product_pool: list[tuple[int, float]],
     n_orders: int = 50_000,
 ) -> None:
     logger.info("Seeding %d orders with order items...", n_orders)

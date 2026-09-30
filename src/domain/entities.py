@@ -53,3 +53,7 @@ class QualityGateEvaluation:
     failures: list[QualityAssertionResult] = field(default_factory=list)
     # Pass ratio per quality dimension present in the suite (e.g. completeness).
     dimension_rates: dict[str, float] = field(default_factory=dict)
+    # Engine fail-closed veto: True when the suite contained expectation types
+    # the engine cannot verify. A vetoed evaluation must block promotion even
+    # when the pass-rate arithmetic would otherwise approve (RF-06).
+    unsupported: bool = False

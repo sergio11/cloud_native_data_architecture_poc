@@ -15,11 +15,17 @@ from typing import Any
 
 from src.domain.aggregations import BusinessAggregator
 from src.domain.exceptions import QualityGateBreachError
-from src.domain.naming import gold_table, silver_table
+from src.domain.naming import GOLD_PRODUCTS, gold_table, silver_table
 from src.domain.privacy import PrivacyPolicy
-from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD, evaluate_and_enforce, find_contract_thresholds
-from src.ports.inbound import AggregateGoldPort
-from src.ports.outbound import DomainCatalogPort, LakehouseStoragePort, LineagePublisherPort, QualityEnginePort
+from src.ports.inbound import AggregateGoldPort, AggregateGoldResult
+from src.ports.outbound import (
+    ContractCatalogPort,
+    LakehouseTableReader,
+    LakehouseTableWriter,
+    LineagePublisherPort,
+    QualityEnginePort,
+)
+from src.use_cases.gate_support import enforce_quality_gate
 
 logger = logging.getLogger("use_case.aggregate_gold")
 
@@ -27,9 +33,6 @@ _GOLD_DAILY_METRICS_TABLE = gold_table("daily_metrics")
 _GOLD_CUSTOMERS_TABLE = gold_table("customers")
 _SILVER_ORDERS_TABLE = silver_table("orders")
 _SILVER_CUSTOMERS_TABLE = silver_table("customers")
-
-#: Gold product -> governing contract entity (contracts live under data-products/<entity>/).
-GOLD_PRODUCT_CONTRACT_ENTITY: dict[str, str] = {"daily_metrics": "orders", "customers": "customers"}
 
 
 class AggregateGoldUseCase(AggregateGoldPort):
@@ -41,12 +44,14 @@ class AggregateGoldUseCase(AggregateGoldPort):
 
     def __init__(
         self,
-        storage: LakehouseStoragePort,
+        storage_reader: LakehouseTableReader,
+        storage_writer: LakehouseTableWriter,
         lineage: LineagePublisherPort,
         quality_engine: QualityEnginePort,
-        catalog: DomainCatalogPort | None = None,
+        catalog: ContractCatalogPort,
     ) -> None:
-        self._storage = storage
+        self._reader = storage_reader
+        self._writer = storage_writer
         self._lineage = lineage
         self._quality = quality_engine
         self._catalog = catalog
@@ -58,78 +63,62 @@ class AggregateGoldUseCase(AggregateGoldPort):
         daily_metrics_suite: str,
         customers_suite: str,
         quality_threshold: float | None = None,
-    ) -> dict[str, Any]:
+    ) -> AggregateGoldResult:
         logger.info("Executing Gold Layer aggregation (target='%s')", target)
-        results: dict[str, Any] = {}
+        publishers: dict[str, tuple[Any, str]] = {
+            "daily_metrics": (self._publish_daily_metrics, daily_metrics_suite),
+            "customers": (self._publish_customers, customers_suite),
+        }
+        valid_targets: tuple[str, ...] = ("all",)
+        for product in GOLD_PRODUCTS:
+            valid_targets += (product.name, gold_table(product.name))
+        if target not in valid_targets:
+            raise ValueError(
+                f"Unknown Gold target {target!r}. Expected one of {sorted(valid_targets)}; "
+                "refusing to report SUCCESS without materializing anything."
+            )
+        results: AggregateGoldResult = {"status": "SUCCESS"}
         breach: QualityGateBreachError | None = None
 
-        # 1. Aggregate Daily Sales Metrics (fail-closed: a breach blocks only
-        #    this target - the customers target below proceeds independently).
-        if target in ("daily_metrics", _GOLD_DAILY_METRICS_TABLE, "all"):
+        # Data-driven fan-out over GOLD_PRODUCTS (open for extension: a new
+        # product adds a descriptor plus its publisher, the loop is untouched).
+        # Fail-closed per target: a breach blocks only its target - the other
+        # proceeds independently.
+        for product in GOLD_PRODUCTS:
+            if target not in ("all", product.name, gold_table(product.name)):
+                continue
+            publish, suite_path = publishers[product.name]
             try:
-                results["daily_metrics_rows"] = self._publish_daily_metrics(
-                    quality_threshold, daily_metrics_suite
-                )
-            except QualityGateBreachError as exc:
-                breach = breach or exc
-
-        # 2. Pseudonymize Customer Dimensions (GDPR PII Masking, gated likewise).
-        if target in ("customers", _GOLD_CUSTOMERS_TABLE, "all"):
-            try:
-                results["customers_masked_rows"] = self._publish_customers(
-                    quality_threshold, customers_suite
-                )
+                results[product.result_key] = publish(quality_threshold, suite_path)  # type: ignore[literal-required]
             except QualityGateBreachError as exc:
                 breach = breach or exc
 
         if breach is not None:
             raise breach
 
-        results["status"] = "SUCCESS"
         return results
 
-    def _resolve_gate(
-        self,
-        product: str,
-        quality_threshold: float | None,
-    ) -> tuple[float, dict[str, float] | None]:
-        """Resolves the gate policy for a Gold product from its governing contract.
-
-        Contract thresholds (data-products/<entity>/) govern per dimension and
-        ignore the global threshold; the explicit threshold (or its 0.95
-        default) is only a fallback when the contract is silent.
-        """
-        entity = GOLD_PRODUCT_CONTRACT_ENTITY[product]
-        contract_thresholds = find_contract_thresholds(self._catalog, entity)
-        if contract_thresholds is not None and quality_threshold is not None:
-            logger.info(
-                "contract thresholds take precedence over explicit quality_threshold=%.2f for '%s'",
-                quality_threshold, gold_table(product),
-            )
-        effective = quality_threshold if quality_threshold is not None else DEFAULT_QUALITY_THRESHOLD
-        return effective, contract_thresholds
-
     def _publish_daily_metrics(self, quality_threshold: float | None, suite_path: str) -> int:
-        orders_silver = self._storage.read_table(_SILVER_ORDERS_TABLE)
+        orders_silver = self._reader.read_table(_SILVER_ORDERS_TABLE)
         logger.info("Aggregating %d silver orders for daily metrics rollup...", len(orders_silver))
         metrics = BusinessAggregator.aggregate_daily_sales(orders_silver)
         metrics_dicts = [m.to_dict() for m in metrics]
 
         target_table = _GOLD_DAILY_METRICS_TABLE
-        effective_threshold, contract_thresholds = self._resolve_gate("daily_metrics", quality_threshold)
-        evaluate_and_enforce(
-            self._quality,
-            self._lineage,
+        enforce_quality_gate(
+            quality_engine=self._quality,
+            lineage=self._lineage,
+            catalog=self._catalog,
             records=metrics_dicts,
             suite_path=suite_path,
             table_name=target_table,
             job_name="gold_daily_sales_rollup",
             inputs=[_SILVER_ORDERS_TABLE],
-            threshold=effective_threshold,
-            contract_thresholds=contract_thresholds,
+            entity="orders",
+            quality_threshold=quality_threshold,
         )
 
-        written = self._storage.write_table(target_table, metrics_dicts, mode="overwrite")
+        written = self._writer.write_table(target_table, metrics_dicts, mode="overwrite")
         logger.info("Published %d daily aggregation rows to '%s'", written, target_table)
 
         self._lineage.emit_job_event(
@@ -141,7 +130,7 @@ class AggregateGoldUseCase(AggregateGoldPort):
         return written
 
     def _publish_customers(self, quality_threshold: float | None, suite_path: str) -> int:
-        customers_silver = self._storage.read_table(_SILVER_CUSTOMERS_TABLE)
+        customers_silver = self._reader.read_table(_SILVER_CUSTOMERS_TABLE)
         logger.info("Applying GDPR Art.25 pseudonymization on %d customers...", len(customers_silver))
 
         masked_customers: list[dict[str, Any]] = [
@@ -149,20 +138,20 @@ class AggregateGoldUseCase(AggregateGoldPort):
         ]
 
         target_cust_table = _GOLD_CUSTOMERS_TABLE
-        effective_threshold, contract_thresholds = self._resolve_gate("customers", quality_threshold)
-        evaluate_and_enforce(
-            self._quality,
-            self._lineage,
+        enforce_quality_gate(
+            quality_engine=self._quality,
+            lineage=self._lineage,
+            catalog=self._catalog,
             records=masked_customers,
             suite_path=suite_path,
             table_name=target_cust_table,
             job_name="gold_customer_pseudonymization",
             inputs=[_SILVER_CUSTOMERS_TABLE],
-            threshold=effective_threshold,
-            contract_thresholds=contract_thresholds,
+            entity="customers",
+            quality_threshold=quality_threshold,
         )
 
-        written_cust = self._storage.write_table(target_cust_table, masked_customers, mode="overwrite")
+        written_cust = self._writer.write_table(target_cust_table, masked_customers, mode="overwrite")
         logger.info("Published %d pseudonymized records to '%s'", written_cust, target_cust_table)
 
         self._lineage.emit_job_event(

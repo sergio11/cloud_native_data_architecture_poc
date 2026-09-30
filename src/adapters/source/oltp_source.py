@@ -7,23 +7,15 @@ from __future__ import annotations
 
 import logging
 import os
-import random
 import re
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from src.adapters.source._synthetic import DEFAULT_SEED, generate_synthetic_records
 from src.ports.outbound import OltpSourcePort
 
 logger = logging.getLogger("adapter.source.oltp")
 
 TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-DEFAULT_SEED = 42
-
-# Fixed reference clock for the synthetic fallback so output is fully
-# reproducible per (seed, table_name, count). Wall-clock `now` would make
-# two calls with the same seed differ in order_date/created_at timestamps.
-SYNTHETIC_REFERENCE_TIME = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
 
 
 class OltpSourceAdapter(OltpSourcePort):
@@ -100,64 +92,24 @@ class OltpSourceAdapter(OltpSourcePort):
                         rows = [dict(r) for r in cur.fetchall()]
                 finally:
                     conn.close()
-                if rows:
-                    logger.info("Extracted %d records from PostgreSQL '%s'", len(rows), table_name)
-                    return rows
+                # A successful query is authoritative even when it returns zero
+                # rows: an empty real table yields [], never synthetic records.
+                # The synthetic fallback below applies ONLY to connection/query
+                # failures (or an unconfigured PostgreSQL), so lineage always
+                # describes the true origin of the returned rows.
+                logger.info("Extracted %d records from PostgreSQL '%s'", len(rows), table_name)
+                return rows
             except Exception as exc:
-                logger.info(
-                    "PostgreSQL source unavailable (%s); falling back to embedded synthetic source",
+                logger.warning(
+                    "PostgreSQL source unavailable for '%s' (%s); falling back to embedded synthetic source",
+                    table_name,
                     exc,
                 )
 
         # 2. Fallback to generating high-fidelity synthetic relational records
-        logger.info(
+        logger.warning(
             "SYNTHETIC fallback data: generating embedded demo records for table '%s' "
             "(not live PostgreSQL rows)",
             table_name,
         )
-        return self._generate_synthetic_records(table_name, limit or 100)
-
-    def _generate_synthetic_records(self, table_name: str, count: int) -> list[dict[str, Any]]:
-        rng = random.Random(self._seed)
-        records = []
-        now = SYNTHETIC_REFERENCE_TIME
-
-        if table_name == "customers":
-            segments = ["premium", "standard", "basic"]
-            names = ["Alice Smith", "Bob Jones", "Carol White", "David Brown", "Emma Watson", "Frank Miller"]
-            for i in range(1, count + 1):
-                name = rng.choice(names)
-                slug = name.lower().replace(" ", ".")
-                records.append({
-                    "id": i,
-                    "name": name,
-                    "email": f"{slug}{i}@example.com",
-                    "segment": rng.choice(segments),
-                    "registration_date": (now - timedelta(days=rng.randint(10, 365))).strftime("%Y-%m-%d"),
-                    "created_at": (now - timedelta(days=rng.randint(1, 100))).isoformat(),
-                })
-
-        elif table_name == "orders":
-            statuses = ["confirmed", "pending", "shipped", "cancelled"]
-            for i in range(1, count + 1):
-                records.append({
-                    "id": i,
-                    "customer_id": rng.randint(1, min(100, count)),
-                    "total_amount": round(rng.uniform(25.0, 450.0), 2),
-                    "status": rng.choice(statuses),
-                    "order_date": (now - timedelta(days=rng.randint(0, 14))).strftime("%Y-%m-%d"),
-                    "created_at": (now - timedelta(hours=rng.randint(1, 72))).isoformat(),
-                })
-
-        elif table_name == "campaigns":
-            channels = ["email", "social", "search", "display"]
-            for i in range(1, count + 1):
-                records.append({
-                    "id": i,
-                    "channel": rng.choice(channels),
-                    "budget": round(rng.uniform(500.0, 5000.0), 2),
-                    "start_date": (now - timedelta(days=30)).strftime("%Y-%m-%d"),
-                    "end_date": now.strftime("%Y-%m-%d"),
-                })
-
-        return records
+        return generate_synthetic_records(table_name, limit or 100, seed=self._seed)

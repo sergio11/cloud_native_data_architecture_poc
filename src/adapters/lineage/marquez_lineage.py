@@ -10,11 +10,11 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import requests
 
+from src.adapters._files import ensure_parent_dir
 from src.ports.outbound import LineagePublisherPort
 
 logger = logging.getLogger("adapter.lineage.marquez")
@@ -30,7 +30,7 @@ class MarquezLineageAdapter(LineagePublisherPort):
     ) -> None:
         self._marquez_url: str = marquez_url or os.getenv("MARQUEZ_URL") or "http://localhost:5000"
         self._audit_file_path = audit_file_path
-        Path(os.path.dirname(audit_file_path) or ".").mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(audit_file_path)
 
     def emit_job_event(
         self,

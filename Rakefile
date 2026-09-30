@@ -42,7 +42,7 @@ end
 desc 'Run all automated tests (unit + integration)'
 task :test do
   puts "\n\e[33m[Step 8/8] Executing Automated Test Suite...\e[0m"
-  sh 'python -m pytest tests -v'
+  sh 'python -m pytest tests --cov=src --cov-branch --cov-fail-under=70 -q'
   puts "\e[32mAll test suites passed.\e[0m"
 end
 

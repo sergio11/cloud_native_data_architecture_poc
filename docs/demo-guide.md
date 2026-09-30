@@ -223,8 +223,9 @@ Marquez/webhook URL is configured, and blocks pipeline progression.
 > directly, but inside the Silver/Gold pipeline runs (`silver_transform.py`,
 > `gold_aggregation.py`) per-dimension contract thresholds
 > (`spec.quality.thresholds`) take precedence and the flag (default `0.95`)
-> is only a fallback when the contract is silent — see
-> `src/domain/quality_gate.py::evaluate_and_enforce`. Gold additionally
+> is only a fallback when the contract is silent — see the shared
+> `src/use_cases/gate_support.py::enforce_quality_gate` collaborator (pure
+> verdict via `src/domain/quality_gate.py::assess_gate`). Gold additionally
 > requires its suites (`quality/expectations/gold_daily_metrics_suite.json`,
 > `gold_customers_suite.json`); a missing suite blocks the run.
 

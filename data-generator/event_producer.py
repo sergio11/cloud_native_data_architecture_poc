@@ -16,8 +16,8 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 import click
 
@@ -35,8 +35,8 @@ DEFAULT_RATE: int = 10
 MAX_RATE: int = 100
 DEFAULT_DURATION: int = 3600
 
-FUNNEL_STAGES: List[str] = ["view", "click", "add_to_cart", "checkout", "purchase"]
-PAGES: Dict[str, List[str]] = {
+FUNNEL_STAGES: list[str] = ["view", "click", "add_to_cart", "checkout", "purchase"]
+PAGES: dict[str, list[str]] = {
     "view": ["/", "/catalog", "/product/{id}", "/category/{cat}", "/deals"],
     "click": ["/product/{id}", "/search?q={q}", "/brand/{b}"],
     "add_to_cart": ["/cart", "/product/{id}#add"],
@@ -44,7 +44,7 @@ PAGES: Dict[str, List[str]] = {
     "purchase": ["/checkout/confirmation", "/order/{id}/thankyou"],
 }
 
-REFERRERS: List[str] = [
+REFERRERS: list[str] = [
     "https://www.google.com",
     "https://www.bing.com",
     "https://www.facebook.com",
@@ -53,9 +53,9 @@ REFERRERS: List[str] = [
     "https://newsletter.company.com",
 ]
 
-ORDER_EVENT_TYPES: List[str] = ["created", "updated", "cancelled", "shipped"]
-ORDER_STATUSES: List[str] = ["confirmed", "pending", "cancelled", "shipped"]
-SOURCES: List[str] = ["web", "mobile", "api", "backoffice"]
+ORDER_EVENT_TYPES: list[str] = ["created", "updated", "cancelled", "shipped"]
+ORDER_STATUSES: list[str] = ["confirmed", "pending", "cancelled", "shipped"]
+SOURCES: list[str] = ["web", "mobile", "api", "backoffice"]
 
 
 @dataclass
@@ -70,7 +70,7 @@ class OrderEvent:
     timestamp: str
     source: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -78,13 +78,13 @@ class OrderEvent:
 class ClickstreamEvent:
     event_id: str
     session_id: str
-    customer_id: Optional[int]
+    customer_id: int | None
     page_url: str
     event_type: str
     referrer: str
     timestamp: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -102,7 +102,7 @@ def _get_faker():
 
 
 def generate_order_event(order_id: int, customer_id: int) -> OrderEvent:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     amount = round(random.uniform(10.0, 500.0), 2)
     status = random.choice(ORDER_STATUSES)
     return OrderEvent(
@@ -118,8 +118,8 @@ def generate_order_event(order_id: int, customer_id: int) -> OrderEvent:
     )
 
 
-def generate_clickstream_event(session_id: str, customer_id: Optional[int]) -> ClickstreamEvent:
-    now = datetime.now(timezone.utc)
+def generate_clickstream_event(session_id: str, customer_id: int | None) -> ClickstreamEvent:
+    now = datetime.now(UTC)
     stage = random.choice(FUNNEL_STAGES)
     page_template = random.choice(PAGES[stage])
     page = page_template.replace("{id}", str(random.randint(1, 500))).replace("{cat}", "electronics")

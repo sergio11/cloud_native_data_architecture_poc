@@ -136,7 +136,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
   - **Quality Gates (Great-Expectations-format suites)** ([`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)):
     - Evaluates JSON test suites ([`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json)) with the built-in fail-closed engine (`src/adapters/quality/expectation_engine.py`) — not the Great Expectations library.
     - Blocks pipeline progression with exit code `1` if the quality score is below threshold (missing suite, unknown expectation type, or empty data also block); optionally emits alert payloads to webhooks.
-    - Threshold precedence: per-dimension contract thresholds (`spec.quality.thresholds`) govern the verdict via `src/domain/quality_gate.py::evaluate_and_enforce`; the global/`--threshold` value (default `0.95`) applies only when the contract is silent, and contract dimensions the suite does not measure are skipped.
+    - Threshold precedence: per-dimension contract thresholds (`spec.quality.thresholds`) govern the verdict via the shared `src/use_cases/gate_support.py::enforce_quality_gate` collaborator (pure verdict in `src/domain/quality_gate.py::assess_gate`); the global/`--threshold` value (default `0.95`) applies only when the contract is silent, and contract dimensions the suite does not measure are skipped.
 
 ---
 

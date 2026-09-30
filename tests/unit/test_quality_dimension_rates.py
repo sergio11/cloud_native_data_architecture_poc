@@ -142,14 +142,26 @@ def test_extract_quality_thresholds_missing_blocks() -> None:
     assert extract_quality_thresholds({"spec": {}}) is None
     assert extract_quality_thresholds({"spec": {"quality": {}}}) is None
     assert extract_quality_thresholds({"spec": {"quality": {"thresholds": {"freshness": 0.5}}}}) is None
-    assert extract_quality_thresholds({"spec": {"quality": {"thresholds": "high"}}}) is None
+    assert extract_quality_thresholds({"spec": {"quality": {"thresholds": {}}}}) is None
     assert extract_quality_thresholds({"spec": "quality"}) is None
 
 
-def test_extract_quality_thresholds_invalid_values() -> None:
-    assert extract_quality_thresholds(_contract_with_thresholds({"completeness": 1.5})) is None
-    assert extract_quality_thresholds(_contract_with_thresholds({"completeness": -0.1})) is None
-    assert extract_quality_thresholds(_contract_with_thresholds({"completeness": "high"})) is None
-    assert extract_quality_thresholds(_contract_with_thresholds({"completeness": None})) is None
-    assert extract_quality_thresholds(_contract_with_thresholds({"completeness": True})) is None
-    assert extract_quality_thresholds(_contract_with_thresholds({"validity": float("nan")})) is None
+def test_extract_quality_thresholds_invalid_values_raise() -> None:
+    """Misconfigured governance fails loudly (fail-closed) instead of
+    silently degrading to the global fallback threshold."""
+    import pytest
+
+    with pytest.raises(ValueError, match="completeness"):
+        extract_quality_thresholds(_contract_with_thresholds({"completeness": 1.5}))
+    with pytest.raises(ValueError, match="completeness"):
+        extract_quality_thresholds(_contract_with_thresholds({"completeness": -0.1}))
+    with pytest.raises(ValueError, match="completeness"):
+        extract_quality_thresholds(_contract_with_thresholds({"completeness": "high"}))
+    with pytest.raises(ValueError, match="completeness"):
+        extract_quality_thresholds(_contract_with_thresholds({"completeness": None}))
+    with pytest.raises(ValueError, match="completeness"):
+        extract_quality_thresholds(_contract_with_thresholds({"completeness": True}))
+    with pytest.raises(ValueError, match="validity"):
+        extract_quality_thresholds(_contract_with_thresholds({"validity": float("nan")}))
+    with pytest.raises(ValueError, match="mapping"):
+        extract_quality_thresholds({"spec": {"quality": {"thresholds": "high"}}})

@@ -22,6 +22,7 @@ from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
 from src.domain.exceptions import QualityGateBreachError
 from src.use_cases.aggregate_gold import AggregateGoldUseCase
+from tests.helpers import EmptyContractCatalog
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLD_DAILY_SUITE = str(REPO_ROOT / "quality" / "expectations" / "gold_daily_metrics_suite.json")
@@ -37,9 +38,11 @@ def world(tmp_path: Path):
         audit_file_path=str(audit_file),
     )
     use_case = AggregateGoldUseCase(
-        storage=storage,
+        storage_reader=storage,
+        storage_writer=storage,
         lineage=lineage,
         quality_engine=ExpectationEngineAdapter(),
+        catalog=EmptyContractCatalog(),
     )
     return {
         "storage": storage,

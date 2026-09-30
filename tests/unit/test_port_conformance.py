@@ -15,13 +15,17 @@ live execution of every port through the container guards the regression.
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+from src.adapters.catalog.fs_domain_catalog import FsDomainCatalogAdapter
+from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
+from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
+from src.adapters.serving.sql_serving import SqlServingAdapter
+from src.adapters.source.oltp_source import OltpSourceAdapter
+from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
+from src.adapters.streaming.event_stream import EventStreamAdapter
 from src.container import Container
 from src.ports.inbound import (
     AggregateGoldPort,
@@ -32,6 +36,20 @@ from src.ports.inbound import (
     RunQualityGatePort,
     ValidateContractPort,
 )
+from src.ports.outbound import (
+    ContractCatalogPort,
+    DomainCatalogPort,
+    EventBrokerPort,
+    LakehouseStoragePort,
+    LakehouseTableInspector,
+    LakehouseTableReader,
+    LakehouseTableWriter,
+    LineagePublisherPort,
+    OltpSourcePort,
+    QualityEnginePort,
+    QueryExecutorPort,
+)
+from tests.helpers import check_lsp as _check_lsp
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ORDERS_SUITE = str(REPO_ROOT / "quality" / "expectations" / "silver_orders_suite.json")
@@ -51,35 +69,6 @@ def container(tmp_path: Path) -> Container:
         event_db_path=str(tmp_path / "events.db"),
         lineage_audit_path=str(tmp_path / "lineage.jsonl"),
     )
-
-
-def _check_lsp(port_method: Callable[..., Any], impl_method: Callable[..., Any]) -> None:
-    """Asserts the implementation honours the port contract (Liskov).
-
-    Every port-declared parameter must exist on the implementation (with a
-    default when the port makes it optional), and the implementation must not
-    REQUIRE parameters the port does not declare - otherwise a caller using
-    only the port signature cannot invoke it.
-    """
-    port_params = [p for p in inspect.signature(port_method).parameters.values() if p.name != "self"]
-    impl_by_name = {p.name: p for p in inspect.signature(impl_method).parameters.values() if p.name != "self"}
-    port_by_name = {p.name: p for p in port_params}
-    for name, port_param in port_by_name.items():
-        assert name in impl_by_name, f"implementation is missing port-declared parameter '{name}'"
-        if port_param.default is not inspect.Parameter.empty:
-            assert impl_by_name[name].default is not inspect.Parameter.empty, (
-                f"port parameter '{name}' is optional but the implementation requires it"
-            )
-    position_kinds = {
-        inspect.Parameter.POSITIONAL_ONLY,
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    }
-    for name, impl_param in impl_by_name.items():
-        if impl_param.kind in position_kinds and impl_param.default is inspect.Parameter.empty:
-            assert name in port_by_name, (
-                f"implementation requires '{name}' which the port contract does not declare"
-            )
 
 
 def test_port_signatures_conform_to_lsp(container: Container) -> None:
@@ -152,3 +141,49 @@ def test_every_inbound_port_is_invocable_by_its_declared_signature(container: Co
     rows = container.query_serving.execute_unified_revenue_query(limit=5)
     assert isinstance(rows, list)
     assert len(rows) > 0
+
+
+def test_outbound_port_signatures_conform_to_lsp(tmp_path: Path) -> None:
+    """Static LSP check: every driven adapter honours its outbound port contract.
+
+    Mirrors the inbound check above for the driven side (the S3 defect class
+    applies symmetrically: a signature drift between a port and its adapter
+    breaks every caller honouring the port). Narrow (ISP-segregated) ports are
+    checked individually so a fat-port regression is caught as well.
+    """
+    lakehouse_db = str(tmp_path / "lakehouse.db")
+    events_db = str(tmp_path / "events.db")
+    audit_file = str(tmp_path / "lineage.jsonl")
+
+    source = OltpSourceAdapter()
+    storage = LakehouseStorageAdapter(db_path=lakehouse_db)
+    broker = EventStreamAdapter(db_path=events_db)
+    lineage = MarquezLineageAdapter(marquez_url="http://127.0.0.1:1", audit_file_path=audit_file)
+    quality = ExpectationEngineAdapter()
+    serving = SqlServingAdapter(db_path=lakehouse_db)
+    catalog = FsDomainCatalogAdapter(repo_root=str(tmp_path))
+
+    _check_lsp(OltpSourcePort.extract_table, source.extract_table)
+
+    _check_lsp(LakehouseTableWriter.write_table, storage.write_table)
+    _check_lsp(LakehouseTableReader.read_table, storage.read_table)
+    _check_lsp(LakehouseTableInspector.table_exists, storage.table_exists)
+    _check_lsp(LakehouseTableInspector.get_table_schema, storage.get_table_schema)
+    _check_lsp(LakehouseTableInspector.list_versions, storage.list_versions)
+    _check_lsp(LakehouseStoragePort.write_table, storage.write_table)
+    _check_lsp(LakehouseStoragePort.read_table, storage.read_table)
+
+    _check_lsp(EventBrokerPort.publish_event, broker.publish_event)
+    _check_lsp(EventBrokerPort.consume_events, broker.consume_events)
+
+    _check_lsp(LineagePublisherPort.emit_job_event, lineage.emit_job_event)
+
+    _check_lsp(QualityEnginePort.evaluate_suite, quality.evaluate_suite)
+
+    _check_lsp(QueryExecutorPort.execute_query, serving.execute_query)
+
+    _check_lsp(ContractCatalogPort.list_contracts, catalog.list_contracts)
+    _check_lsp(DomainCatalogPort.list_products, catalog.list_products)
+    _check_lsp(DomainCatalogPort.list_contracts, catalog.list_contracts)
+    _check_lsp(DomainCatalogPort.list_schemas, catalog.list_schemas)
+    _check_lsp(DomainCatalogPort.load_governance_schema, catalog.load_governance_schema)

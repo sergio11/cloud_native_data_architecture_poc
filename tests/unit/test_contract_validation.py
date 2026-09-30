@@ -410,3 +410,98 @@ def test_cli_legacy_two_file_mode(
     assert result.returncode == expected_code, result.stderr
     for fragment in expected_fragments:
         assert fragment in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Governance JSON-schema validation is fail-closed (RF-15)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_jsonschema(monkeypatch: pytest.MonkeyPatch, validator_for) -> None:
+    """Registers a stub ``jsonschema`` module exposing ``validators``/``exceptions``."""
+    import types
+
+    class FakeSchemaError(Exception):
+        pass
+
+    fake_exceptions = types.ModuleType("jsonschema.exceptions")
+    fake_exceptions.SchemaError = FakeSchemaError  # type: ignore[attr-defined]
+    fake_validators = types.ModuleType("jsonschema.validators")
+    fake_validators.validator_for = validator_for  # type: ignore[attr-defined]
+    fake_jsonschema = types.ModuleType("jsonschema")
+    fake_jsonschema.exceptions = fake_exceptions  # type: ignore[attr-defined]
+    fake_jsonschema.validators = fake_validators  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "jsonschema", fake_jsonschema)
+    monkeypatch.setitem(sys.modules, "jsonschema.exceptions", fake_exceptions)
+    monkeypatch.setitem(sys.modules, "jsonschema.validators", fake_validators)
+
+
+def _use_case_with_schema(schema: dict[str, Any] | None) -> ValidateContractUseCase:
+    from types import SimpleNamespace
+
+    catalog = SimpleNamespace(load_governance_schema=lambda name: schema)
+    return ValidateContractUseCase(catalog=catalog)  # type: ignore[arg-type]
+
+
+def test_invalid_governance_schema_blocks_instead_of_silently_passing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a broken governance schema must surface as an error (RF-15),
+    never degrade to 'no errors' with a mere warning."""
+
+    def explode(schema: dict[str, Any]):
+        import sys as _sys
+
+        raise _sys.modules["jsonschema"].exceptions.SchemaError("bad schema")
+
+    _install_fake_jsonschema(monkeypatch, explode)
+    use_case = _use_case_with_schema({"type": "nonsense"})
+
+    errs = use_case._jsonschema_errors({"name": "x"}, "product-schema.json", "domains/d/product.yaml")
+
+    assert len(errs) == 1
+    assert "invalid" in errs[0].lower()
+
+
+def test_jsonschema_runtime_failure_blocks_instead_of_silently_passing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any validation-time failure (unresolvable $ref, library error, ...) blocks."""
+
+    class BoomValidator:
+        def __init__(self, schema: dict[str, Any]) -> None:
+            pass
+
+        def iter_errors(self, data: dict[str, Any]):
+            raise RuntimeError("cannot resolve $ref")
+
+    _install_fake_jsonschema(monkeypatch, lambda schema: BoomValidator)
+    use_case = _use_case_with_schema({"type": "object"})
+
+    errs = use_case._jsonschema_errors({"name": "x"}, "product-schema.json", "domains/d/product.yaml")
+
+    assert len(errs) == 1
+    assert "could not run" in errs[0]
+
+
+def test_jsonschema_violations_still_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The happy path is unchanged: violations are collected, not raised."""
+
+    class FakeError:
+        def __init__(self, path: list[str], message: str) -> None:
+            self.path = path
+            self.message = message
+
+    class OkValidator:
+        def __init__(self, schema: dict[str, Any]) -> None:
+            pass
+
+        def iter_errors(self, data: dict[str, Any]):
+            yield FakeError(["metadata", "owner"], "required")
+
+    _install_fake_jsonschema(monkeypatch, lambda schema: OkValidator)
+    use_case = _use_case_with_schema({"type": "object"})
+
+    errs = use_case._jsonschema_errors({"name": "x"}, "product-schema.json", "domains/d/product.yaml")
+
+    assert errs == ["JSON-schema violation at 'metadata/owner': required"]

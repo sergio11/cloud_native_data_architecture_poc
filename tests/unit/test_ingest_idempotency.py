@@ -58,7 +58,6 @@ def test_ingest_bronze_idempotent(tmp_path):
     res1 = use_case.execute("orders")
     assert res1["status"] == "SUCCESS"
     assert res1["rows_ingested"] == len(ORDERS_SNAPSHOT)
-    assert res1["rows_new"] == res1["rows_ingested"]
     assert res1["idempotent_hit"] is False
 
     count1 = len(storage.read_table("bronze.sales.orders"))

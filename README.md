@@ -61,7 +61,7 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 1. The speed layer is a **polling CLI**, not a resident daemon: no continuous streaming latency is measurable (RF-09 partial).
 2. The local lakehouse is **single-node SQLite**: same contract as Iceberg (idempotent append, versioning, evolution) but no columnar storage or multi-engine access.
 3. The quality engine evaluates **Great Expectations-format suites**, but **is not the GE library**.
-4. **CI is thin**: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check`, `ruff format --check`, `mypy` and `pytest --cov --cov-fail-under=85` on push/PR to `main` (the same four commands verified green locally for this README). It has **no** `rake demo`/end-to-end stage, no K8s/Trino/Marquez stage, and no dedicated `governance:validate` step (contract rules are covered indirectly by `tests/unit/test_contract_validation.py`). Runtime gates (`exit 1`) remain the primary enforcement inside the tools.
+4. **No CI pipeline**: validations block at runtime (`rake lint` / `rake typecheck` / `rake test:coverage` must be run manually and gate the tools via `exit 1` + `fail_under`), not on merge. Contract rules are covered by `tests/unit/test_contract_validation.py` and `rake governance:validate`.
 5. Telemetry (Prometheus/Grafana), catalog UI (Marquez) and admission (Kyverno) are **K8s profile**, not verified here.
 6. `flink_clickstream_stream.py` aggregates clickstream windows; funnel/session metrics are out of scope (SRS §1.2).
 7. Serving fusion is by key, not recency: a stream row whose `(order_date, status)` already exists in batch is shadowed even if newer (batch-wins rule, RF-11).
@@ -251,7 +251,6 @@ rake test                         # unit + integration (230 tests: 218 unit + 12
 rake test:coverage                # with coverage report
 rake lint                         # ruff
 rake typecheck                    # mypy on src/
-# CI (GitHub Actions, .github/workflows/ci.yml): ruff check + ruff format --check + mypy + pytest --cov (fail under 70%) on push/PR to main
 ```
 
 State lives in `data/` (git-ignored SQLite + lineage audit log). Reset with `rm -f data/*.db data/*.jsonl` (PowerShell: `Remove-Item data/*.db, data/*.jsonl -ErrorAction SilentlyContinue`).
@@ -377,7 +376,7 @@ poc_data_engineering/
 | **RF-12** | Reproceso completo de cualquier capa sin pérdida de consistencia | `[S]` | PARTIAL (sin comando único de reproceso Bronze→Gold en una invocación) | Full stream replay + Gold full recomputation (idempotent rewrites) |
 | **RF-13** | Publicación declarativa de productos por dominio | `[M]` | PARTIAL (el manifiesto *es* la publicación en local; sin pipeline de registro) | `product.yaml` manifests in [`domains/`](domains/) |
 | **RF-14** | Productos encontrables y autoexplicativos en catálogo | `[M]` | PARTIAL (catálogo UI buscable solo en K8s/Marquez; en local el catálogo es el árbol `domains/` + validación) | `product.yaml` + Marquez catalog in K8s profile (`infra/helm/s7-fabric`) |
-| **RF-15** | Contratos máquina-legibles validados; ruptura bloquea publicación y alerta | `[M]` | VERIFIED | [`governance/contract_validator.py`](governance/contract_validator.py) (bloqueo en ejecución/validación, incl. *cross-check* `product.yaml` ↔ `contract.yaml` que falla si los umbrales de calidad divergen; reglas cubiertas en CI vía `tests/unit/test_contract_validation.py`, sin paso `governance:validate` dedicado en `.github/workflows/ci.yml`) |
+| **RF-15** | Contratos máquina-legibles validados; ruptura bloquea publicación y alerta | `[M]` | VERIFIED | [`governance/contract_validator.py`](governance/contract_validator.py) (bloqueo en ejecución/validación, incl. *cross-check* `product.yaml` ↔ `contract.yaml` que falla si los umbrales de calidad divergen; reglas cubiertas por `tests/unit/test_contract_validation.py` y `rake governance:validate`) |
 | **RF-16** | Consumo cross-dominio self-service sin intermediación del productor | `[M]` | PARTIAL (apertura total, sin capa de control de acceso) | Serving layer ([`pipelines/serving/`](pipelines/serving/)) |
 | **RF-17** | Políticas globales federadas aplicadas automáticamente (dueño, PII, nombres) | `[S]` | PARTIAL (admisión en despliegue/Kyverno solo en K8s) | [`governance/policies/`](governance/policies/) + Kyverno in K8s (`infra/helm/s6-mesh`) |
 | **RF-18** | Cuotas/aislamiento por dominio en la plataforma compartida | `[S]` | DEFERRED (K8s `ResourceQuota`/`LimitRange`; sin enforcement local) | [`infra/helm/s6-mesh/`](infra/helm/s6-mesh/) (K8s `ResourceQuota`/`LimitRange` per domain) |
@@ -389,7 +388,7 @@ poc_data_engineering/
 | **RF-24** | Comando único de demo end-to-end reproducible | `[M]` | VERIFIED | [`scripts/demo.sh`](scripts/demo.sh) / `rake demo` |
 | **RF-25** | Documentación de arquitectura apta para portfolio | `[M]` | VERIFIED | Directory [`docs/`](docs/) |
 
-> **Status counts — RF:** VERIFIED **14** · PARTIAL **9** · DEFERRED **2**. A requirement is VERIFIED only if an automated test or command in this repository proves it in the local profile. Evidence: `rake test` (230 tests: 218 unit + 12 integration), `rake demo` (RF-24 end-to-end), `.github/workflows/ci.yml` (lint/format/mypy/coverage on push & PR).
+> **Status counts — RF:** VERIFIED **14** · PARTIAL **9** · DEFERRED **2**. A requirement is VERIFIED only if an automated test or command in this repository proves it in the local profile. Evidence: `rake test` (230 tests: 218 unit + 12 integration), `rake demo` (RF-24 end-to-end), `rake lint` + `rake typecheck` + `rake test:coverage` (gates run manually; there is no CI pipeline).
 
 ---
 

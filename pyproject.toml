@@ -39,8 +39,7 @@ ignore = []
 [tool.ruff.format]
 # Formatter enabled with ruff's documented defaults (deliberately no overrides):
 # quote-style = "double", indent-style = "space", line-ending = "lf",
-# skip-magic-trailing-comma = false. Guarded in CI by `ruff format --check`
-# (see .github/workflows/ci.yml) and locally by `rake format:check`;
+# skip-magic-trailing-comma = false. Guarded locally by `rake format:check`;
 # `rake format` rewrites in place over the same directories as `rake lint`.
 
 

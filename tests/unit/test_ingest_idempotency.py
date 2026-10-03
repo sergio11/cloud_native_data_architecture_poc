@@ -11,23 +11,54 @@ import pytest
 
 from src.adapters.source.oltp_source import OltpSourceAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
+from src.domain.entities import ExtractionResult
 from src.use_cases.ingest_bronze import IngestBronzeUseCase
 from tests.helpers import StubLineage
 
 ORDERS_SNAPSHOT = [
-    {"id": 1, "customer_id": 10, "total_amount": 100.5, "status": "confirmed",
-     "order_date": "2026-09-01", "created_at": "2026-09-01T10:00:00+00:00"},
-    {"id": 2, "customer_id": 11, "total_amount": 250.0, "status": "shipped",
-     "order_date": "2026-09-02", "created_at": "2026-09-02T11:30:00+00:00"},
-    {"id": 3, "customer_id": 12, "total_amount": 75.25, "status": "pending",
-     "order_date": "2026-09-03", "created_at": "2026-09-03T09:15:00+00:00"},
+    {
+        "id": 1,
+        "customer_id": 10,
+        "total_amount": 100.5,
+        "status": "confirmed",
+        "order_date": "2026-09-01",
+        "created_at": "2026-09-01T10:00:00+00:00",
+    },
+    {
+        "id": 2,
+        "customer_id": 11,
+        "total_amount": 250.0,
+        "status": "shipped",
+        "order_date": "2026-09-02",
+        "created_at": "2026-09-02T11:30:00+00:00",
+    },
+    {
+        "id": 3,
+        "customer_id": 12,
+        "total_amount": 75.25,
+        "status": "pending",
+        "order_date": "2026-09-03",
+        "created_at": "2026-09-03T09:15:00+00:00",
+    },
 ]
 
 ORDERS_SNAPSHOT_B = [
-    {"id": 4, "customer_id": 13, "total_amount": 42.0, "status": "cancelled",
-     "order_date": "2026-09-04", "created_at": "2026-09-04T08:00:00+00:00"},
-    {"id": 5, "customer_id": 14, "total_amount": 999.99, "status": "confirmed",
-     "order_date": "2026-09-05", "created_at": "2026-09-05T12:45:00+00:00"},
+    {
+        "id": 4,
+        "customer_id": 13,
+        "total_amount": 42.0,
+        "status": "cancelled",
+        "order_date": "2026-09-04",
+        "created_at": "2026-09-04T08:00:00+00:00",
+    },
+    {
+        "id": 5,
+        "customer_id": 14,
+        "total_amount": 999.99,
+        "status": "confirmed",
+        "order_date": "2026-09-05",
+        "created_at": "2026-09-05T12:45:00+00:00",
+    },
 ]
 
 
@@ -41,7 +72,9 @@ class StubOltpSource:
     def extract_table(self, table_name, limit=None):
         batch = self._batches[min(self.calls, len(self._batches) - 1)]
         self.calls += 1
-        return [dict(r) for r in batch]
+        # Fabricated rows (not a live database): honest "synthetic" origin, so
+        # Bronze stamps synthetic.local.* provenance instead of postgresql.*.
+        return ExtractionResult(records=[dict(r) for r in batch], origin="synthetic")
 
 
 def _storage(tmp_path) -> LakehouseStorageAdapter:

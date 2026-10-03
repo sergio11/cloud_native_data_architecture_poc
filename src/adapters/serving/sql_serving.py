@@ -12,6 +12,7 @@ import os
 import sqlite3
 from typing import Any
 
+from src.adapters._sqlite import sqlite_connection
 from src.domain.naming import bronze_table, gold_table, physical_sql_name, silver_table, stream_table
 from src.ports.outbound import QueryExecutorPort
 
@@ -49,9 +50,7 @@ _LOGICAL_TO_PHYSICAL: dict[str, str] = {
 
 # Longest key first so catalog-qualified names win over their bare 3-part
 # substrings (e.g. iceberg.gold.sales.daily_metrics before gold.sales.daily_metrics).
-_MAPPING_LONGEST_FIRST = sorted(
-    _LOGICAL_TO_PHYSICAL.items(), key=lambda kv: len(kv[0]), reverse=True
-)
+_MAPPING_LONGEST_FIRST = sorted(_LOGICAL_TO_PHYSICAL.items(), key=lambda kv: len(kv[0]), reverse=True)
 
 
 class SqlServingAdapter(QueryExecutorPort):
@@ -109,9 +108,9 @@ class SqlServingAdapter(QueryExecutorPort):
             conn.close()
 
     def _execute_embedded(self, sql: str) -> list[dict[str, Any]]:
-        conn = sqlite3.connect(self._db_path)
-        try:
-            conn.row_factory = sqlite3.Row
+        # Shared lifecycle helper: commit-on-success, rollback-on-error and
+        # close() in every case (raw sqlite3.connect leaks the handle).
+        with sqlite_connection(self._db_path, row_factory=sqlite3.Row) as conn:
             rewritten = self._rewrite_logical_names(sql, conn)
             try:
                 cur = conn.execute(rewritten)
@@ -119,8 +118,6 @@ class SqlServingAdapter(QueryExecutorPort):
             except sqlite3.Error as exc:
                 raise RuntimeError(f"serving query failed: {exc}") from exc
             return [dict(r) for r in rows]
-        finally:
-            conn.close()
 
     @staticmethod
     def _rewrite_logical_names(sql: str, conn: sqlite3.Connection) -> str:
@@ -137,13 +134,8 @@ class SqlServingAdapter(QueryExecutorPort):
             if logical not in rewritten:
                 continue
             replacement = physical
-            columns = {
-                row[1]
-                for row in conn.execute(f'PRAGMA table_info("{physical}")').fetchall()
-            }
+            columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{physical}")').fetchall()}
             if "_row_superseded" in columns:
-                replacement = (
-                    f"(SELECT * FROM {physical} WHERE _row_superseded IS NULL)"
-                )
+                replacement = f"(SELECT * FROM {physical} WHERE _row_superseded IS NULL)"
             rewritten = rewritten.replace(logical, replacement)
         return rewritten

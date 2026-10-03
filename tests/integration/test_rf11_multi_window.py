@@ -55,11 +55,7 @@ def test_stream_windows_merge_to_single_day_row(world) -> None:
 
     rows = world.query_serving.execute_unified_revenue_query()
 
-    keyed = [
-        r
-        for r in rows
-        if r["order_date"] == "2026-09-26" and r["status"] == "confirmed"
-    ]
+    keyed = [r for r in rows if r["order_date"] == "2026-09-26" and r["status"] == "confirmed"]
     assert len(keyed) == 1
     merged = keyed[0]
     assert merged["source_tier"] == "stream_speed"
@@ -102,11 +98,7 @@ def test_batch_wins_over_merged_stream(world) -> None:
 
     rows = world.query_serving.execute_unified_revenue_query()
 
-    keyed = [
-        r
-        for r in rows
-        if r["order_date"] == "2026-09-26" and r["status"] == "confirmed"
-    ]
+    keyed = [r for r in rows if r["order_date"] == "2026-09-26" and r["status"] == "confirmed"]
     assert len(keyed) == 1
     assert keyed[0]["source_tier"] == "batch_historical"
     assert keyed[0]["total_orders"] == 10

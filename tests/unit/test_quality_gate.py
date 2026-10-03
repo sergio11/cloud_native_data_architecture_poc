@@ -61,9 +61,13 @@ def _write_suite(tmp_path, name: str, expectations: list[dict[str, Any]]) -> str
 
 
 def test_row_count_expectation_enforced(tmp_path):
-    suite_path = _write_suite(tmp_path, "row_count_suite", [
-        {"expectation_type": "expect_table_row_count_to_be_between", "kwargs": {"min_value": 10}},
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "row_count_suite",
+        [
+            {"expectation_type": "expect_table_row_count_to_be_between", "kwargs": {"min_value": 10}},
+        ],
+    )
     engine = ExpectationEngineAdapter()
 
     below = engine.evaluate_suite(
@@ -90,9 +94,13 @@ def test_row_count_expectation_enforced(tmp_path):
 
 
 def test_unknown_expectation_type_fails(tmp_path):
-    suite_path = _write_suite(tmp_path, "unknown_suite", [
-        {"expectation_type": "expect_column_values_to_be_zip_code", "kwargs": {"column": "zip"}},
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "unknown_suite",
+        [
+            {"expectation_type": "expect_column_values_to_be_zip_code", "kwargs": {"column": "zip"}},
+        ],
+    )
     engine = ExpectationEngineAdapter()
 
     # threshold=0.0 would pass on arithmetic alone: fail-closed must override it.
@@ -111,9 +119,13 @@ def test_unknown_expectation_type_fails(tmp_path):
 
 
 def test_empty_records_fail_closed(tmp_path):
-    suite_path = _write_suite(tmp_path, "empty_suite", [
-        {"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "id"}},
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "empty_suite",
+        [
+            {"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "id"}},
+        ],
+    )
     engine = ExpectationEngineAdapter()
 
     evaluation = engine.evaluate_suite([], suite_path, threshold=1.0, table_name="silver.sales.orders")
@@ -132,14 +144,17 @@ def test_missing_suite_raises(tmp_path):
 
 
 def test_cleanse_silver_blocks_on_breach(tmp_path):
-    suite_path = _write_suite(tmp_path, "silver_orders_breach_suite", [
-        {"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "status"}},
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "silver_orders_breach_suite",
+        [
+            {"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "status"}},
+        ],
+    )
     # 20 bronze rows with 3 null statuses => 15% nulls exceeds the 5% tolerated
     # by threshold=0.95, so the single expectation fails and the gate must block.
     rows = [
-        {"id": i, "status": None if i < 3 else "confirmed", "total_amount": 10.0, "_batch_id": "b1"}
-        for i in range(20)
+        {"id": i, "status": None if i < 3 else "confirmed", "total_amount": 10.0, "_batch_id": "b1"} for i in range(20)
     ]
     storage = StubStorage(tables={"bronze.sales.orders": rows})
     lineage = StubLineage()
@@ -184,12 +199,17 @@ def test_cleanse_silver_missing_suite_raises(tmp_path):
 
 
 def test_run_quality_gate_empty_table_fails(tmp_path):
-    suite_path = _write_suite(tmp_path, "silver_orders_empty_suite", [
-        {"expectation_type": "expect_table_row_count_to_be_between", "kwargs": {"min_value": 1}},
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "silver_orders_empty_suite",
+        [
+            {"expectation_type": "expect_table_row_count_to_be_between", "kwargs": {"min_value": 1}},
+        ],
+    )
     use_case = RunQualityGateUseCase(
         storage=StubStorage(),  # table absent -> read_table returns []
         quality_engine=ExpectationEngineAdapter(),
+        catalog=EmptyContractCatalog(),
     )
 
     # Fail-closed (RF-06): a failing verdict raises carrying the evaluation.
@@ -205,12 +225,17 @@ def test_run_quality_gate_empty_table_fails(tmp_path):
 
 
 def test_run_quality_gate_records_override(tmp_path):
-    suite_path = _write_suite(tmp_path, "silver_records_suite", [
-        {"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "id"}},
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "silver_records_suite",
+        [
+            {"expectation_type": "expect_column_values_to_not_be_null", "kwargs": {"column": "id"}},
+        ],
+    )
     use_case = RunQualityGateUseCase(
         storage=StubStorage(),  # storage is empty: records= must win
         quality_engine=ExpectationEngineAdapter(),
+        catalog=EmptyContractCatalog(),
     )
 
     records = [{"id": i} for i in range(10)]

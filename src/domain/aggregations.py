@@ -118,16 +118,18 @@ class BusinessAggregator:
             window_end = window_start + timedelta(seconds=window_size_seconds)
             count = len(amounts)
             total = sum(amounts)
-            windows.append({
-                "window_start": window_start.isoformat(),
-                "window_end": window_end.isoformat(),
-                "order_date": window_start.strftime("%Y-%m-%d"),
-                "status": status,
-                "window_revenue": round(total, 2),
-                "window_orders": count,
-                "avg_order_value": round(total / count, 2) if count > 0 else 0.0,
-                "source_tier": "stream_speed",
-            })
+            windows.append(
+                {
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "order_date": window_start.strftime("%Y-%m-%d"),
+                    "status": status,
+                    "window_revenue": round(total, 2),
+                    "window_orders": count,
+                    "avg_order_value": round(total / count, 2) if count > 0 else 0.0,
+                    "source_tier": "stream_speed",
+                }
+            )
 
         windows.sort(key=lambda w: (w["window_start"], w["status"]))
         return windows

@@ -17,17 +17,19 @@ spec:
   assets:
     - name: gold_financial_closings
       type: iceberg_table
-      path: "s3a://gold/finance/financial_closings/"
+      path: "s3://datalake/warehouse/gold/finance/financial_closings"
       format: parquet
       partitioned_by: ["fiscal_year", "fiscal_period"]
       description: "Audited balance sheet reconciliation closures"
       access_tier: restricted
+      status: planned
     - name: silver_financial_closings
       type: iceberg_table
-      path: "s3a://silver/finance/financial_closings/"
+      path: "s3://datalake/warehouse/silver/finance/financial_closings"
       format: parquet
       description: "Aggregated transactional ledger entries"
       access_tier: restricted
+      status: planned
   quality:
     completeness: 1.00
     uniqueness: 1.00

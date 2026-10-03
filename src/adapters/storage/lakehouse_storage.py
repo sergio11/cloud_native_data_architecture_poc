@@ -112,9 +112,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
                     mode TEXT
                 );
             """)
-            snapshot_columns = {
-                row["name"] for row in conn.execute("PRAGMA table_info(_lakehouse_snapshots);")
-            }
+            snapshot_columns = {row["name"] for row in conn.execute("PRAGMA table_info(_lakehouse_snapshots);")}
             if "mode" not in snapshot_columns:
                 conn.execute("ALTER TABLE _lakehouse_snapshots ADD COLUMN mode TEXT;")
             conn.commit()
@@ -177,20 +175,19 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
             if column not in existing:
                 conn.execute(f'ALTER TABLE "{clean_name}" ADD COLUMN "{column}" {column_type};')
 
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, clean_name: str) -> bool:
+        """Checks the catalog for ``clean_name`` (single home for the lookup SQL)."""
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
+            (clean_name,),
+        ).fetchone()
+        return row is not None
+
     def _ensure_table(self, conn: sqlite3.Connection, clean_name: str, columns: list[str]) -> None:
-        exists = (
-            conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-                (clean_name,),
-            ).fetchone()
-            is not None
-        )
-        if not exists:
+        if not self._table_exists(conn, clean_name):
             definitions = [f'"{column}" TEXT' for column in columns]
-            definitions.extend(
-                f'"{column}" {column_type}'
-                for column, column_type in INTERNAL_COLUMN_TYPES.items()
-            )
+            definitions.extend(f'"{column}" {column_type}' for column, column_type in INTERNAL_COLUMN_TYPES.items())
             conn.execute(f'CREATE TABLE "{clean_name}" ({", ".join(definitions)});')
             return
         self._ensure_internal_columns(conn, clean_name)
@@ -244,14 +241,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
             if not records:
                 # Overwrite-to-empty: supersede every live row under a new
                 # snapshot version (row_count 0). Never creates the table.
-                exists = (
-                    conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-                        (clean_name,),
-                    ).fetchone()
-                    is not None
-                )
-                if not exists:
+                if not self._table_exists(conn, clean_name):
                     return 0
                 self._ensure_internal_columns(conn, clean_name)
                 new_version = self._next_version(conn, table_name)
@@ -298,9 +288,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
             else:
                 live_hashes = {
                     row["_content_hash"]
-                    for row in conn.execute(
-                        f'SELECT _content_hash FROM "{clean_name}" WHERE _row_superseded IS NULL;'
-                    )
+                    for row in conn.execute(f'SELECT _content_hash FROM "{clean_name}" WHERE _row_superseded IS NULL;')
                     if row["_content_hash"] is not None
                 }
                 if set(hashes) == live_hashes:
@@ -362,14 +350,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         """
         clean_name = self._normalize_name(table_name)
         with self._connection() as conn:
-            exists = (
-                conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-                    (clean_name,),
-                ).fetchone()
-                is not None
-            )
-            if not exists:
+            if not self._table_exists(conn, clean_name):
                 return []
 
             self._ensure_internal_columns(conn, clean_name)
@@ -377,10 +358,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
             if version is None:
                 where = "WHERE _row_superseded IS NULL"
             else:
-                where = (
-                    "WHERE COALESCE(_row_version, 0) <= ? "
-                    "AND (_row_superseded IS NULL OR _row_superseded > ?)"
-                )
+                where = "WHERE COALESCE(_row_version, 0) <= ? AND (_row_superseded IS NULL OR _row_superseded > ?)"
                 params.extend([int(version), int(version)])
 
             query = f'SELECT * FROM "{clean_name}" {where} ORDER BY rowid ASC'
@@ -392,11 +370,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
         results: list[dict[str, Any]] = []
         for row in rows:
-            record = {
-                key: value
-                for key, value in dict(row).items()
-                if key not in INTERNAL_COLUMN_TYPES
-            }
+            record = {key: value for key, value in dict(row).items() if key not in INTERNAL_COLUMN_TYPES}
             for key, value in record.items():
                 if isinstance(value, str) and (value.startswith("{") or value.startswith("[")):
                     try:
@@ -409,21 +383,13 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
     def table_exists(self, table_name: str) -> bool:
         clean_name = self._normalize_name(table_name)
         with self._connection() as conn:
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-                (clean_name,)
-            )
-            return cursor.fetchone() is not None
+            return self._table_exists(conn, clean_name)
 
     def get_table_schema(self, table_name: str) -> list[str]:
         clean_name = self._normalize_name(table_name)
         with self._connection() as conn:
             cursor = conn.execute(f'PRAGMA table_info("{clean_name}");')
-            return [
-                row["name"]
-                for row in cursor.fetchall()
-                if row["name"] not in INTERNAL_COLUMN_TYPES
-            ]
+            return [row["name"] for row in cursor.fetchall() if row["name"] not in INTERNAL_COLUMN_TYPES]
 
     def list_versions(self, table_name: str) -> list[dict[str, Any]]:
         """Lists snapshots of ``table_name`` oldest to newest (RF-07).

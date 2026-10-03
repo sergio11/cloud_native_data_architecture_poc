@@ -119,8 +119,7 @@ def _enforce(evaluation: QualityGateEvaluation) -> tuple[float, StubEngine, Stub
 
 def test_assess_veto_rejects_despite_passing_contract_dims() -> None:
     verdict = assess_gate(
-        _evaluation(passed=False, pass_rate=0.90, unsupported=True,
-                    dimension_rates={"completeness": 1.0}),
+        _evaluation(passed=False, pass_rate=0.90, unsupported=True, dimension_rates={"completeness": 1.0}),
         {"completeness": 0.99},
         0.95,
     )
@@ -130,8 +129,7 @@ def test_assess_veto_rejects_despite_passing_contract_dims() -> None:
 
 def test_assess_contract_dims_govern_over_global_arithmetic() -> None:
     verdict = assess_gate(
-        _evaluation(passed=False, pass_rate=0.90, unsupported=False,
-                    dimension_rates={"completeness": 1.0}),
+        _evaluation(passed=False, pass_rate=0.90, unsupported=False, dimension_rates={"completeness": 1.0}),
         {"completeness": 0.99},
         0.95,
     )
@@ -140,8 +138,7 @@ def test_assess_contract_dims_govern_over_global_arithmetic() -> None:
 
 def test_assess_dimension_breach_names_dimension() -> None:
     verdict = assess_gate(
-        _evaluation(passed=True, pass_rate=1.0, unsupported=False,
-                    dimension_rates={"completeness": 0.50}),
+        _evaluation(passed=True, pass_rate=1.0, unsupported=False, dimension_rates={"completeness": 0.50}),
         {"completeness": 0.99},
         0.95,
     )
@@ -273,12 +270,18 @@ def test_explicit_threshold_used_when_contract_silent() -> None:
 
 
 def test_find_contract_thresholds_resolution() -> None:
-    catalog = StubCatalog([
-        ("domains/sales/data-products/orders/contract.yaml",
-         {"spec": {"quality": {"thresholds": {"completeness": 0.98}}}}),
-        ("domains/sales/data-products/customers/contract.yaml",
-         {"spec": {"quality": {"thresholds": {"completeness": 0.90}}}}),
-    ])
+    catalog = StubCatalog(
+        [
+            (
+                "domains/sales/data-products/orders/contract.yaml",
+                {"spec": {"quality": {"thresholds": {"completeness": 0.98}}}},
+            ),
+            (
+                "domains/sales/data-products/customers/contract.yaml",
+                {"spec": {"quality": {"thresholds": {"completeness": 0.90}}}},
+            ),
+        ]
+    )
     assert find_contract_thresholds(catalog, "orders") == {"completeness": 0.98}
     assert find_contract_thresholds(catalog, "unknown") is None
     assert find_contract_thresholds(None, "orders") is None

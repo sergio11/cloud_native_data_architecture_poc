@@ -64,6 +64,22 @@ def stream_table() -> str:
     return "stream.sales.orders_windowed"
 
 
+def contract_entity_for_table(table_name: str) -> str:
+    """Returns the data-product entity whose contract governs ``table_name``.
+
+    Contract documents live under ``data-products/<entity>/``, so the quality
+    gate must resolve the ENTITY behind a logical table name before looking up
+    thresholds. Gold product tables map through :data:`GOLD_PRODUCTS`
+    (``gold.sales.daily_metrics`` is governed by the ``orders`` contract);
+    every other table falls back to its last dotted segment
+    (``silver.sales.orders`` -> ``orders``).
+    """
+    for product in GOLD_PRODUCTS:
+        if table_name == gold_table(product.name):
+            return product.contract_entity
+    return table_name.rsplit(".", 1)[-1]
+
+
 def physical_sql_name(logical: str) -> str:
     """Maps a logical dotted table name to its physical SQL name (dots become underscores)."""
     return logical.replace(".", "_")

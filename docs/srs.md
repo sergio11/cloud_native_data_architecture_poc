@@ -265,9 +265,9 @@ The system architecture separates enterprise data concerns across three orthogon
 #### S1: Source & Ingestion Subsystem
 - **Purpose**: Generates and ingests synthetic operational transactions and web clickstream data representing a realistic Spanish e-commerce environment.
 - **Components**:
-  - `oltp_seed.py`: Connects via `psycopg2` to PostgreSQL, creating idempotent schemas and seeding 1,000 customers, 50,000 orders, and 200,000 order line items.
-  - `event_producer.py`: Multithreaded Kafka producer with token-bucket rate limiting (10 to 100 events/sec) producing realistic checkout and navigation funnels to topics `sales.orders.events` and `marketing.clickstream.raw`.
-  - Ingestion Connectors: PySpark JDBC connector for batch snapshotting; Flink Kafka Source for low-latency streaming ingest.
+  - `oltp_seed.py`: Connects via `psycopg2` to PostgreSQL, creating idempotent schemas (`INSERT ... ON CONFLICT DO NOTHING`) and seeding by default **500 products, 1,000 customers, 1,000 orders (`--records`, default 1000), ~4,000 order items (1–5 per order), and 100 campaigns**. It requires `PGPASSWORD`, so it runs only against a real PostgreSQL instance (s1-ingestion / PostgreSQL profile); the local `rake demo` path has no database and falls back to the loud synthetic generator inside `src/adapters/source/oltp_source.py`.
+  - `event_producer.py`: Multithreaded Kafka producer with token-bucket rate limiting (10 to 100 events/sec) producing realistic checkout and navigation events to topics `sales.orders.events` and `marketing.clickstream.raw`.
+  - Ingestion Connectors: **K8s target** — the `s1-ingestion` CronJob template describes a JDBC/spark-submit style snapshot trigger (echoing `JDBC_URL`), while the local profile uses `psycopg2`/the embedded generator inside `src/adapters/source/oltp_source.py`. Streaming ingest is `Flink Kafka Source` in the K8s profile and `EventStreamAdapter` (SQLite WAL, or Kafka when `KAFKA_BOOTSTRAP_SERVERS` is set) locally.
 
 #### S2: Lakehouse Storage & Catalog Subsystem
 - **Purpose**: Provides reliable, ACID-compliant, open-standard columnar storage with snapshot isolation and schema evolution.
@@ -279,7 +279,7 @@ The system architecture separates enterprise data concerns across three orthogon
 #### S3: Batch Processing Engine Subsystem
 - **Purpose**: Executes high-throughput transformations, deduplication, cleansing, and multi-dimensional aggregations across Medallion layers.
 - **Components**:
-  - `bronze_ingestion.py`: Reads PostgreSQL tables via JDBC, attaches system lineage attributes (`_ingested_at`, `_source`, `_batch_id`), and appends into Iceberg Bronze tables.
+  - `bronze_ingestion.py`: Thin driver over `src/use_cases/ingest_bronze.py` — reads source tables (PostgreSQL when `PGPASSWORD` is set, otherwise the loud synthetic fallback), attaches system lineage attributes (`_ingested_at`, `_source`, `_batch_id`), and appends into the lakehouse (`bronze.*`; SQLite locally, Iceberg on MinIO in the K8s profile). No JDBC/Spark is involved locally.
   - `silver_transform.py`: Reads Bronze tables, cleanses whitespace, casts strict types, enforces business validation rules, eliminates duplicate records by primary key, and commits into Iceberg Silver tables.
   - `gold_aggregation.py`: Computes business KPIs (daily sales by status, customer segment distribution, campaign ROAS), applies SHA-256 PII masking, and publishes to Iceberg Gold tables.
 
@@ -287,14 +287,14 @@ The system architecture separates enterprise data concerns across three orthogon
 - **Purpose**: Ingests, enriches, and aggregates high-frequency event streams with sub-minute latency.
 - **Components**:
   - `flink_orders_stream.py`: PyFlink streaming pipeline reading `sales.orders.events`, tumbling over 5-minute event-time windows with 30-second watermarks, calculating total volume and GMV, and writing to Iceberg stream buffers.
-  - `flink_clickstream_stream.py`: Clickstream sessionizer tracking visitor drop-off and funnel stages, streaming real-time metrics to `stream.marketing.clickstream_windowed`.
+  - `flink_clickstream_stream.py`: Clickstream speed layer writing 5-minute tumbling-window aggregations to `stream.marketing.clickstream_windowed`. Funnel-stage conversion metrics, sessionization and cart-abandonment alerts are **declared out of POC scope in the script docstring (SRS §1.2)** and are not implemented.
   - Replay Mechanism: Configurable stream offsets supporting complete reprocessing (Kappa paradigm).
 
 #### S5: Serving Layer Subsystem
 - **Purpose**: Presents a unified, zero-copy SQL access interface across diverse storage tiers and catalogs.
 - **Components**:
   - **Engine**: Trino distributed SQL query engine with Iceberg connector hooked to Apache Polaris REST catalog.
-  - `unified_view.sql`: Exposes views (e.g., `serving.sales.unified_revenue`) that execute a `UNION ALL` between historical Gold batch tables and active streaming Iceberg buffers, using date filtering to prevent double counting.
+  - `unified_view.sql`: defines `iceberg.serving.sales_unified_revenue`, a `UNION ALL` of `gold.sales.daily_metrics` and day-grained `stream.sales.orders_windowed` guarded by a `NOT EXISTS` anti-join on `(order_date, status)` (batch wins — **not** date filtering). The marketing/finance views in the same file are explicitly marked **PLANNED** because `iceberg.marketing.funnel_metrics` / `iceberg.finance.financial_closings` are not produced by any pipeline here. No local task executes this file: the K8s `trino-views-init-job` runs `CREATE SCHEMA` statements only.
   - Cross-Domain Analytics: Supports federated joins combining `sales` transactions, `marketing` spend, and `finance` allocations.
 
 #### S6: Data Mesh & Data Products Layer Subsystem
@@ -307,15 +307,15 @@ The system architecture separates enterprise data concerns across three orthogon
 #### S7: Data Fabric & Automated Governance Subsystem
 - **Purpose**: Provides automated metadata harvesting, cross-pipeline lineage visualization, and declarative data quality enforcement.
 - **Components**:
-  - **Active Lineage**: OpenLineage Spark listener and Flink OpenLineage reporter publishing dataset dependencies and run states to Marquez on port `5000`.
-  - **Quality Gates (`run_quality_gate.py`)**: Evaluates Great-Expectations-format suites (`silver_orders_suite.json`, `silver_customers_suite.json`) with the built-in fail-closed engine before committing data to subsequent tiers. Halts pipeline progression upon quality breaches.
-  - **Policy Enforcement**: Declarative policy rules (Kyverno / OPA) verifying container security contexts and schema contract compliance.
+  - **Active Lineage**: application-level OpenLineage emission from the pipeline use cases through `src/adapters/lineage/marquez_lineage.py` (`COMPLETE`/`FAIL`) — local audit trail `data/lineage_audit.jsonl` first, best-effort POST to Marquez on port `5000`. There are **no Spark/Flink OpenLineage listeners** in this repository (nothing runs inside a Spark/Flink JVM locally).
+  - **Quality Gates (`run_quality_gate.py`)**: Evaluates Great-Expectations-format suites (`silver_orders_suite.json`, `silver_customers_suite.json`, `gold_daily_metrics_suite.json`, `gold_customers_suite.json`) with the built-in fail-closed engine before committing data to subsequent tiers. Halts pipeline progression upon quality breaches (exit `1`; `2` on execution error).
+  - **Policy Enforcement**: `rake governance:validate` / `src/use_cases/validate_contract.py` enforce owner, classification, structure, compatibility mode and BACKWARD evolution against `schema.json`. **Kyverno/OPA admission policies are declarative YAML only** (`governance/policies/`) — they are rendered/evaluated only in the K8s profile (RF-17 DEFERRED), never locally.
 
 #### S8: Orchestration & Observability Subsystem
 - **Purpose**: Coordinates inter-job execution dependencies, manages resource-constrained startup profiles, and visualizes platform telemetry.
 - **Components**:
-  - **Orchestration**: Dagster asset-based orchestrator modeling pipeline steps as a Software-Defined Asset (SDA) DAG.
-  - **Telemetry**: Prometheus server scraping container metrics and engine JMX metrics; pre-configured Grafana dashboards displaying pipeline throughput, latency, quality gate pass rates, and system memory.
+  - **Orchestration**: Dagster asset-based orchestrator modeling pipeline steps as a Software-Defined Asset (SDA) DAG — five assets (`bronze_orders`, `bronze_customers`, `silver_orders`, `silver_customers`, `gold_daily_metrics`) plus schedules; locally the assets materialize through `pipelines/orchestration/local_dispatch.py` when the optional `orchestration` extra (`dagster>=1.6`) is installed (`dagster dev -f pipelines/orchestration/dagster_repository.py`). The default local path is still `rake`.
+  - **Telemetry**: Prometheus/Grafana are **deployment targets only** — `infra/helm/s8-ops` ships values and dashboard/alert assets but **no templates**, so nothing scrapes or renders metrics in this profile.
 
 ---
 
@@ -336,11 +336,11 @@ The system architecture separates enterprise data concerns across three orthogon
  [Pipelines S3/S4] ---(F5: OpenLineage)-----> [Marquez Lineage & Quality Gates]
 ```
 
-- **Flow F1 (OLTP to Bronze Ingestion)**: Scheduled or manual trigger initiates `bronze_ingestion.py`. Spark connects to PostgreSQL via JDBC, captures an immutable snapshot of `orders`, `customers`, and `campaigns`, appends ingestion timestamps (`_ingested_at`), and appends to Iceberg Bronze tables on MinIO. Emits OpenLineage START/COMPLETE events to Marquez.
+- **Flow F1 (OLTP to Bronze Ingestion)**: Scheduled or manual trigger initiates `bronze_ingestion.py` (a thin driver over the core use case). In the local profile there is **no Spark and no JDBC**: the adapter reads PostgreSQL when `PGPASSWORD` is set and otherwise falls back to the loud embedded generator, appending audit columns (`_ingested_at`, `_source`, `_batch_id`) and appending into the SQLite lakehouse (`write_table(mode="append")`, content-hash idempotent). It then emits a single OpenLineage `COMPLETE` event (local audit trail first; best-effort HTTP POST to Marquez when `MARQUEZ_URL` is set) — there is no `START` event.
 - **Flow F2 (Streaming Ingestion & Aggregation)**: `event_producer.py` publishes JSON messages to Kafka. `flink_orders_stream.py` consumes records using event-time timestamps, extracts windowed totals (5-minute tumbling windows), and sinks results to Iceberg `stream.sales.orders_windowed`.
-- **Flow F3 (Medallion Progression)**: `silver_transform.py` runs (thin driver over the core use case), reading Bronze, filtering corrupt rows, deduplicating by primary key, and writing to Silver. `run_quality_gate.py` evaluates the GE-format suite with the built-in fail-closed engine. Upon passage (score >= 0.95), `gold_aggregation.py` reads Silver, computes dimensional KPIs, hashes PII columns using SHA-256, and writes to Gold tables (a **full recomputation from Silver on every run**).
-- **Flow F4 (Unified Serving Query)**: A business analyst issues `SELECT * FROM serving.sales.unified_revenue` to Trino. Trino evaluates the view definition: historical data prior to `CURRENT_DATE - INTERVAL '2' DAY` is read from `gold.sales.daily_metrics`, while recent data is read from `stream.sales.orders_windowed`. The query returns unified results without manual reconciliation.
-- **Flow F5 (Lineage & Quality Enforcement)**: During every pipeline step, dataset names, input/output schemas, row counts, and execution run UUIDs are transmitted over HTTP to Marquez. If `run_quality_gate.py` detects a critical check breach (e.g., null primary keys), it exits with code `1`, halting the DAG, emitting an OpenLineage FAILED event, and firing a notification webhook.
+- **Flow F3 (Medallion Progression)**: `silver_transform.py` runs (thin driver over the core use case), reading Bronze, filtering corrupt rows, deduplicating by primary key, and writing to Silver. `run_quality_gate.py` evaluates the GE-format suite with the built-in fail-closed engine; the verdict uses **contract thresholds first** (`spec.quality.thresholds` resolved by `contract_entity_for_table`/`find_contract_thresholds`), with `0.95`/`--threshold` only as the fallback when the contract is silent. Upon passage, `gold_aggregation.py` reads Silver, computes dimensional KPIs, hashes emails and masks names (`src/domain/privacy.py`), and writes to Gold tables (a **full recomputation from Silver on every run**).
+- **Flow F4 (Unified Serving Query)**: A business analyst runs `rake serving:query` / `python pipelines/serving/run_serving_query.py` (backend Trino when `TRINO_HOST` is set, embedded SQLite otherwise). The single anti-join statement unions `gold.sales.daily_metrics` with `stream.sales.orders_windowed` (day-grain aggregated) and uses `WHERE NOT EXISTS (… b.order_date = s.order_date AND b.status = s.status)` so the batch row always wins — there is **no date-window filtering**: keys absent from batch are filled by the stream, keys present in batch are never duplicated. In Trino the same semantics are exposed as `iceberg.serving.sales_unified_revenue` (`pipelines/serving/unified_view.sql`); the CLI exits `1` on an empty result unless `--allow-empty`.
+- **Flow F5 (Lineage & Quality Enforcement)**: During pipeline steps, dataset names, input/output schemas, row counts, and run UUIDs are written as OpenLineage JSON to `data/lineage_audit.jsonl` (source of truth) and POSTed to Marquez best-effort (2 s timeout, failures logged, no outbox). If `run_quality_gate.py` detects a breach, it emits a `FAIL` event (pipeline paths always; the CLI only when Marquez is configured) and exits with code `1` (blocked) or `2` (execution error), halting the DAG step. Outbound alert webhooks fire only if the RF-20 service (`lineage/config/lineage_webhook_service.py`) is running — it is **not** started by `rake demo` and the `s7-fabric` chart ships an `http.server` stub.
 - **Flow F6 (Kappa Reprocessing / Historical Replay)**: Upon algorithm revision or backfill request, the operator triggers a **full stream log replay** (`flink_orders_stream.py --start-offset earliest` / `--replay`, or `rake stream:replay`) or resets consumer offsets to `earliest`. The batch side needs no flag: every `gold_aggregation.py` run is already a **full recomputation** of the historical aggregates from Silver. Both paths re-evaluate historical data idempotently without mutating raw Bronze history.
 
 ---
@@ -393,7 +393,7 @@ The system architecture separates enterprise data concerns across three orthogon
 
 ### 5.1 Ingestion & Synthetic Generation
 
-- **RF-01 [M] Synthetic OLTP Data Generation**: The system shall generate a synthetic relational e-commerce dataset via `oltp_seed.py` comprising `customers` (1,000 rows with realistic Spanish demographic attributes and PII), `orders` (50,000 order records distributed across the last 90 days), `order_items` (200,000 item details), and `campaigns` (100 marketing records). Generation must be idempotent using `INSERT ON CONFLICT DO NOTHING`.
+- **RF-01 [M] Synthetic OLTP Data Generation**: The system shall generate a synthetic relational e-commerce dataset via `oltp_seed.py` comprising `customers` (1,000 rows with realistic Spanish demographic attributes and PII), `orders` (50,000 order records distributed across the last 90 days), `order_items` (200,000 item details), and `campaigns` (100 marketing records). Generation must be idempotent using `INSERT ON CONFLICT DO NOTHING`. *(Implementation note: the script ships with smaller **defaults** — 500 products, 1,000 customers, **1,000 orders** (scales with `--records`), ~4,000 order items, 100 campaigns — the 50,000/200,000 volumes above are achievable by passing `--records 50000` against a real PostgreSQL instance; it is **not** executed by `rake demo`, which has no database and uses the synthetic fallback in `src/adapters/source/oltp_source.py`.)*
 - **RF-02 [M] Real-Time Event Generation**: The system shall continuously stream synthetic JSON events to Apache Kafka topics (`sales.orders.events` and `marketing.clickstream.raw`) via `event_producer.py`. The producer must feature token-bucket rate limiting (10-100 events/sec), realistic conversion funnel probabilities, and session correlation IDs.
 - **RF-03 [M] Batch Ingestion to Bronze Lakehouse**: The system shall read relational tables from PostgreSQL via Spark JDBC, append audit metadata columns (`_ingested_at`, `_source`, `_batch_id`), and persist the records into raw Iceberg tables within `bronze.*` on MinIO without schema alteration.
 - **RF-04 [M] Real-Time Stream Ingestion**: The system shall ingest records from Kafka topics via Apache Flink, parse JSON payloads against predefined schemas, handle deserialization failures via an internal dead-letter queue, and commit windowed records into Iceberg streaming tables.
@@ -409,7 +409,7 @@ The system architecture separates enterprise data concerns across three orthogon
 ### 5.3 Processing & Serving Layer
 
 - **RF-10 [S] Kappa-Style Historical Reprocessing**: The stream processing and batch aggregation pipelines shall provide an idempotent replay capability (stream: `--start-offset earliest` / `--replay` CLI flags or broker offset resets; batch: full recomputation of derived tables on every run) allowing complete recomputation of derived tables without mutating raw Bronze history.
-- **RF-11 [M] Unified Batch + Stream Serving**: The system shall provide unified analytical views in Trino (`serving.sales.unified_revenue`, `serving.marketing.unified_campaign_performance`) that seamlessly execute a `UNION ALL` between historical Gold batch tables and active streaming buffers, applying partition filters to ensure zero data duplication.
+- **RF-11 [M] Unified Batch + Stream Serving**: The system shall provide unified analytical views in Trino (`serving.sales.unified_revenue`, `serving.marketing.unified_campaign_performance`) that seamlessly execute a `UNION ALL` between historical Gold batch tables and active streaming buffers, applying partition filters to ensure zero data duplication. *(Implementation note: the delivered view is `iceberg.serving.sales_unified_revenue` — an anti-join on `(order_date, status)` rather than a partition/date filter — and the marketing/finance views are marked PLANNED (their source tables are never produced); locally the same semantics are the single query in `src/use_cases/query_serving.py`.)*
 - **RF-12 [S] Interactive Cross-Domain SQL Querying**: Trino shall execute ad-hoc analytical queries joining assets across disparate domains (e.g., joining `sales.orders` with `marketing.campaigns` and `finance` budgets) with sub-3-second P99 query latency.
 
 ### 5.4 Data Mesh & Data Products
@@ -417,13 +417,13 @@ The system architecture separates enterprise data concerns across three orthogon
 - **RF-13 [M] Domain Autonomy & Decentralization**: The system codebase, schemas, and pipelines shall be segregated into distinct domain directories (`domains/sales`, `domains/marketing`, `domains/finance`) reflecting domain boundaries and autonomous lifecycle management.
 - **RF-14 [M] Formal Data Product Manifests**: Each data product shall contain a standardized `product.yaml` descriptor documenting product ownership, metadata, business SLA commitments, input ports, and output ports.
 - **RF-15 [M] Declarative Data Contracts**: Every product shall maintain an authoritative `contract.yaml` adhering to the Bitol Open Data Contract Standard, defining formal field types, validation constraints, privacy classifications, and registered consumers.
-- **RF-16 [M] Contract Backward Compatibility Verification**: The system shall validate that schema changes maintain strict backward compatibility (preventing field removal or datatype narrowing). Pre-commit or CI checks must reject breaking changes.
+- **RF-16 [M] Contract Backward Compatibility Verification**: The system shall validate that schema changes maintain strict backward compatibility (preventing field removal or datatype narrowing). Pre-commit or CI checks must reject breaking changes. *(Implementation note: the check runs on demand/`rake governance:validate` and inside the CI test step (`tests/unit/test_contract_validation.py`, which covers BACKWARD evolution); there is **no pre-commit hook** in this repository.)*
 
 ### 5.5 Data Fabric & Automated Governance
 
-- **RF-17 [M] Automated Metadata & Lineage Harvesting**: Every pipeline job (Spark, Flink, Trino scripts) must emit OpenLineage-compliant lifecycle events to the Marquez API, tracking dataset inputs, outputs, schemas, and execution run states.
+- **RF-17 [M] Automated Metadata & Lineage Harvesting**: Every pipeline job (Spark, Flink, Trino scripts) must emit OpenLineage-compliant lifecycle events to the Marquez API, tracking dataset inputs, outputs, schemas, and execution run states. *(Implementation note: `emit_job_event` is called by the pipeline use cases — Bronze, Silver incl. `FAIL` on gate breach, Gold, stream — and by the standalone quality-gate CLI only when `--marquez-url`/`MARQUEZ_URL` is set; `query_serving` and `validate_contract` emit nothing. Delivery is local-first: every emitted event is appended to `data/lineage_audit.jsonl`, the Marquez POST is best-effort with a 2 s timeout, and no outbox/retry persistence exists.)*
 - **RF-18 [M] Automated Quality Gates**: Data pipeline execution must evaluate GE-format validation suites (`run_quality_gate.py`, built-in fail-closed engine — the Great Expectations library is not invoked) against Silver and Gold datasets. If the validation success ratio falls below the contractual threshold (e.g., 95%), the script must exit with a non-zero code, blocking downstream table commits.
-- **RF-19 [M] Automated PII Masking (GDPR Compliance)**: Customer PII fields (email, full name, registration date) must be pseudonymized or masked in Silver-to-Gold transformations. Emails must be hashed with SHA-256; names must be truncated to initials; registration dates must be truncated to year-only.
+- **RF-19 [M] Automated PII Masking (GDPR Compliance)**: Customer PII fields (email, full name, registration date) must be pseudonymized or masked in Silver-to-Gold transformations. Emails must be hashed with SHA-256; names must be truncated to initials; registration dates must be truncated to year-only. *(Implementation note: only the email hash and the name masking are implemented — `src/domain/privacy.py` + `pipelines/medallion/gold_aggregation.py` replace `email` with `email_hash` (SHA-256 of `strip().lower()`) and `name` with `name_masked` (`"Alice S."`); **no registration-date truncation exists**, `registration_date` is carried into `gold.sales.customers` unchanged. The same note applies to AC-04 below.)*
 - **RF-20 [S] Policy-as-Code Governance**: Kubernetes manifests and container deployments must comply with declarative security policies (Kyverno / OPA) preventing privilege escalation, enforcing read-only root filesystems where applicable, and disallowing root user execution.
 
 ### 5.6 Operations, Observability & Validation
@@ -431,7 +431,7 @@ The system architecture separates enterprise data concerns across three orthogon
 - **RF-21 [M] Asset-Based Workflow Orchestration**: Pipeline workflows shall be defined in Dagster as a directed acyclic graph of Software-Defined Assets (SDAs), tracking asset materialization status and upstream/downstream dependencies.
 - **RF-22 [M] Platform Telemetry & Dashboards**: Prometheus shall collect container, JVM, and pipeline metrics. Grafana dashboards shall display pipeline execution latency, data quality pass rates, active memory consumption, and record throughput.
 - **RF-23 [M] Startup Execution Profiles**: The platform shall provide modular execution profiles (`Platform`, `Stream`, `Batch`, `Demo`) in `infra/profiles/*.yaml` and the `infra/helm` charts to prevent exceeding the 8 GB RAM memory budget constraint (RC-02). (There is no `docker-compose.yml` in this repo; Helm profiles are the deployment target.)
-- **RF-24 [M] Automated End-to-End Demo Script**: The system shall provide an executable shell script (`scripts/demo.sh`, implemented as a thin wrapper delegating to `rake demo`) that runs synthetic data generation, batch ingestion, streaming pipelines, quality gate execution, verification queries, and lineage assertion with colored status output.
+- **RF-24 [M] Automated End-to-End Demo Script**: The system shall provide an executable shell script (`scripts/demo.sh`, implemented as a thin wrapper delegating to `rake demo`) that runs synthetic data generation, batch ingestion, streaming pipelines, quality gate execution, verification queries, and lineage assertion with colored status output. *(Implementation note: the shipped `rake demo` runs **8 steps** — `preflight`, `governance:validate`, `medallion:bronze`, `medallion:silver`, `medallion:gold`, `stream:orders`, `serving:query`, `test`. It does **not** run `oltp_seed.py`/`event_producer.py` (no generation step), performs **no lineage assertion** and **no row-count checks**, and the quality gates run as part of the Silver/Gold steps.)*
 - **RF-25 [M] Production-Grade Technical Documentation**: The repository shall contain complete architectural specifications, Architecture Decision Records (ADRs), concept-to-component mappings, and execution guides written in professional technical English.
 
 ---
@@ -468,7 +468,7 @@ The system architecture separates enterprise data concerns across three orthogon
 - Container definitions must enforce hard memory limits (`mem_limit` in Docker Compose; `resources.limits.memory` in Kubernetes).
 
 ### 6.8 Observability & Traceability (RNF-08)
-- 100% of pipeline runs must generate OpenLineage event payloads transmitted to Marquez, establishing full dataset lineage from raw source to final serving views.
+- 100% of pipeline runs must generate OpenLineage event payloads transmitted to Marquez, establishing full dataset lineage from raw source to final serving views. *(Implementation note: emission is local-first — every emitted event is appended to `data/lineage_audit.jsonl` and POSTed to Marquez only when `MARQUEZ_URL` is set; delivery is best-effort with a 2 s timeout and no retry/outbox, so "transmitted to Marquez" cannot be asserted from the local profile alone. See RF-17 above for exactly which use cases emit.)*
 - Quality gate validation reports must be published as JSON artifacts and logged to standard output with structured severity levels.
 
 ### 6.9 Data Freshness & Latency (RNF-09)
@@ -611,11 +611,13 @@ The system architecture separates enterprise data concerns across three orthogon
 ## 8. Data Constraints & Sizing
 
 ### 8.1 Data Volume and Generation Bounds
-- **OLTP PostgreSQL Database**:
-  - `customers`: exactly 1,000 records (~150 KB).
-  - `orders`: exactly 50,000 records (~5.5 MB).
-  - `order_items`: exactly 200,000 records (~18 MB).
-  - Total relational disk footprint: **<= 50 MB**.
+- **OLTP PostgreSQL Database** (target volumes; only realized when the profile runs PostgreSQL and `oltp_seed.py` is executed with `--records 50000`):
+  - `customers`: 1,000 records (~150 KB) — seed default.
+  - `products`: 500 records, `campaigns`: 100 records — seed defaults.
+  - `orders`: 50,000 records (~5.5 MB) at `--records 50000`; **the shipped default is 1,000**.
+  - `order_items`: ~200,000 item details (~18 MB) at that scale; **~4,000 by default** (1–5 per order).
+  - Total relational disk footprint: **<= 50 MB** at target volumes.
+  - *Local profile reality*: `rake demo` runs **no** database — Bronze is fed by the embedded synthetic generator at **100 records per table** (`src/adapters/source/_synthetic.py`, `limit or 100`) with `_source = synthetic.local.<entity>`.
 - **Kafka Streaming Buffer**:
   - Event generation rate: 10 to 50 events/sec.
   - Active retention: 24 hours (or 100,000 events max).
@@ -638,9 +640,9 @@ The system architecture separates enterprise data concerns across three orthogon
 ### 9.1 Verification Scenarios (Given / When / Then)
 
 #### Scenario AC-01: Synthetic OLTP Generation & Idempotency (RF-01)
-- **Given** an initialized and running PostgreSQL container,
+- **Given** an initialized and running PostgreSQL container (s1-ingestion / PostgreSQL profile — **not** the local `rake demo` flow, which has no database),
 - **When** the operator runs `python data-generator/oltp_seed.py` multiple consecutive times,
-- **Then** the script must complete with exit code `0`, and SQL verification queries must confirm exactly 1,000 customers, 50,000 orders, and 200,000 order lines without record duplication.
+- **Then** the script must complete with exit code `0`, and SQL verification queries must confirm 1,000 customers, **1,000 orders and ~4,000 order items at the shipped defaults** (50,000 / 200,000 only when seeded with `--records 50000`), plus 500 products and 100 campaigns, without record duplication.
 
 #### Scenario AC-02: Quality Gate Enforces Business SLA & Contract (RF-18, RF-15)
 - **Given** a populated `silver.sales.orders` Iceberg table,
@@ -651,13 +653,13 @@ The system architecture separates enterprise data concerns across three orthogon
 
 #### Scenario AC-03: Unified Batch and Stream Query Execution (RF-11)
 - **Given** historical order records populated in `gold.sales.daily_metrics` and real-time streaming records ingested by Flink into `stream.sales.orders_windowed`,
-- **When** a user queries `SELECT * FROM serving.sales.unified_revenue` in Trino,
+- **When** a user queries `SELECT * FROM iceberg.serving.sales_unified_revenue` in Trino (or runs `rake serving:query`, which issues the same anti-join directly),
 - **Then** Trino must return a consolidated time series displaying both historical and real-time records without double counting or query syntax errors.
 
 #### Scenario AC-04: GDPR PII Masking Verification (RF-19)
 - **Given** customer records in Bronze containing plaintext names and email addresses,
 - **When** the transformation progresses through Silver to Gold (`gold_aggregation.py`),
-- **Then** the Gold table and serving views must contain only SHA-256 hashed emails (`^[a-f0-9]{64}$`), truncated names ("Juan P."), and truncated registration years, ensuring zero plaintext PII leaks.
+- **Then** the Gold table (and, in Trino, its serving view) must contain only SHA-256 hashed emails (`^[a-f0-9]{64}$`) and masked names ("Juan P."), with **no plaintext `name`/`email` columns**. *(As noted under RF-19: registration dates are **not** truncated to year-only in the current implementation — `registration_date` is carried through unchanged.)*
 
 #### Scenario AC-05: Memory Ceiling Compliance (RNF-07, RC-02)
 - **Given** the deployment of any startup profile (`Platform`, `Stream`, `Batch`, `Demo`),
@@ -668,32 +670,37 @@ The system architecture separates enterprise data concerns across three orthogon
 
 ## 10. Traceability Matrix
 
+> The **Verification Method** column is the *intended* check. What actually runs in this
+> repository today (and what is K8s-only or not wired) is tracked per RF in the
+> [README Acceptance Criteria Overview](../README.md#acceptance-criteria-overview-rf-01-to-rf-25)
+> (`VERIFIED` / `PARTIAL` / `DEFERRED`). Rows tagged **K8s** need the Helm profile.
+
 | Requirement ID | Subsystem | Implementation File / Component | Verification Method |
 | :--- | :--- | :--- | :--- |
-| **RF-01** | S1 | `data-generator/oltp_seed.py` | Automated CLI execution & SQL count |
+| **RF-01** | S1 | `data-generator/oltp_seed.py` | Automated CLI execution & SQL count **(K8s/PostgreSQL only — needs `PGPASSWORD`; not part of `rake demo`, local Bronze uses the synthetic fallback)** |
 | **RF-02** | S1 | `data-generator/event_producer.py` | Kafka consumer message inspection |
 | **RF-03** | S1, S2, S3 | `pipelines/medallion/bronze_ingestion.py` | Iceberg Bronze metadata inspection |
 | **RF-04** | S1, S2, S4 | `pipelines/stream/flink_orders_stream.py` | Flink job execution & table query |
 | **RF-05** | S2, S3 | `pipelines/medallion/bronze_ingestion.py` | Bronze table schema & audit check |
 | **RF-06** | S2, S3 | `pipelines/medallion/silver_transform.py` | Primary key deduplication check |
 | **RF-07** | S2, S3 | `pipelines/medallion/gold_aggregation.py` | KPI query verification in Trino |
-| **RF-08** | S2 | Apache Iceberg + MinIO | Snapshot inspection via `$snapshots` |
-| **RF-09** | S2 | `pipelines/serving/catalog_registration.py` | Polaris REST API endpoint query |
+| **RF-08** | S2 | Apache Iceberg + MinIO | Snapshot inspection via `$snapshots` **(K8s only; locally covered by the SQLite `_lakehouse_snapshots` / `_row_version` time-travel tests)** |
+| **RF-09** | S2 | `pipelines/serving/catalog_registration.py` | Polaris REST API endpoint query **(K8s only — needs `POLARIS_URL`/`POLARIS_TOKEN`; local coverage is unit tests with mocked clients)** |
 | **RF-10** | S3, S4 | Full recomputation in `gold_aggregation.py` / `rake stream:replay` (log replay) | Historical re-run idempotency test |
-| **RF-11** | S5 | `pipelines/serving/unified_view.sql` | Trino SQL `UNION ALL` query check |
-| **RF-12** | S5 | Trino Engine | Cross-domain multi-table join test |
+| **RF-11** | S5 | `pipelines/serving/unified_view.sql` | Trino SQL `UNION ALL` query check **(K8s only — nothing executes that file locally; local coverage is the anti-join query in `src/use_cases/query_serving.py` + `rake serving:query`)** |
+| **RF-12** | S5 | Trino Engine | Cross-domain multi-table join test **(K8s only — no marketing/finance Gold data exists locally, so no cross-domain join runs here)** |
 | **RF-13** | S6 | `domains/sales`, `domains/marketing` | Directory structure & autonomy audit |
 | **RF-14** | S6 | `domains/*/data-products/*/product.yaml` | YAML schema validation |
 | **RF-15** | S6 | `domains/*/data-products/*/contract.yaml` | Bitol ODCS compliance validation |
-| **RF-16** | S6 | `quality/gates/run_quality_gate.py` | Backward compatibility test |
-| **RF-17** | S7 | Spark/Flink OpenLineage -> Marquez | Marquez API GET lineage graph check |
+| **RF-16** | S6 | `src/use_cases/validate_contract.py` + `governance/contract_validator.py` | Backward compatibility test |
+| **RF-17** | S7 | Pipeline use cases + `src/adapters/lineage/marquez_lineage.py` | Local audit trail assertions (`tests/unit/test_rf_acceptance.py::test_rf19_lineage_records_connected_bronze_to_gold_chain`, `test_rf06_null_breach_blocks_silver_and_alerts_via_lineage`); the Marquez HTTP GET is **K8s only** (best-effort POST, no retries) |
 | **RF-18** | S7 | `quality/gates/run_quality_gate.py` | Quality-gate exit code check (0 pass / 1 blocked / 2 error) |
-| **RF-19** | S3, S7 | `pipelines/medallion/gold_aggregation.py` | Regex audit for SHA-256 in Gold |
-| **RF-20** | S7 | Kyverno / Kubernetes manifests | Admission control test |
-| **RF-21** | S8 | Dagster SDA Definitions | Dagster UI asset materialization |
-| **RF-22** | S8 | Prometheus & Grafana | Dashboard HTTP 200 & metrics scrape |
+| **RF-19** | S3, S7 | `pipelines/medallion/gold_aggregation.py` + `src/domain/privacy.py` | Email-hash / name-mask audit (`tests/integration/test_end_to_end.py`, `^[0-9a-f]{64}$`); **registration-date truncation is not implemented, see RF-19 above** |
+| **RF-20** | S7 | Kyverno / Kubernetes manifests | Admission control test **(not run here: Kyverno policies are declarative files only, RF-17 DEFERRED — `rake governance:validate` checks owner/classification/compat/schema, not the naming regex)** |
+| **RF-21** | S8 | Dagster SDA Definitions | Dagster UI asset materialization **(UI is K8s only; local coverage = `pipelines/orchestration/local_dispatch.py` + `tests/unit/test_w5_local_dispatch.py`, assets run via `dagster dev`)** |
+| **RF-22** | S8 | Prometheus & Grafana | Dashboard HTTP 200 & metrics scrape **(K8s only — `s8-ops` has values but no templates yet)** |
 | **RF-23** | S8 | `infra/profiles/*.yaml` + `infra/helm` charts | `docker stats` memory audit <= 8 GB |
-| **RF-24** | All | `scripts/demo.sh` | End-to-end automated script pass |
+| **RF-24** | All | `scripts/demo.sh` → `rake demo` | End-to-end automated script pass (8 steps: preflight, governance:validate, bronze, silver, gold, stream, serving, test) |
 | **RF-25** | All | `README.md`, `docs/*` | Formal documentation review |
 
 ---

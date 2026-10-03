@@ -401,9 +401,7 @@ def test_cli_legacy_two_file_mode(
     prev_file.write_text(yaml.safe_dump(base_contract), encoding="utf-8")
 
     new_file = tmp_path / "new_contract.yaml"
-    new_file.write_text(
-        yaml.safe_dump({"spec": {"schema": {"fields": new_fields}}}), encoding="utf-8"
-    )
+    new_file.write_text(yaml.safe_dump({"spec": {"schema": {"fields": new_fields}}}), encoding="utf-8")
 
     result = _run_cli("--file", str(new_file), "--prev-file", str(prev_file))
 

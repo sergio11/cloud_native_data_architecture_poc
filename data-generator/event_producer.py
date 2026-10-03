@@ -33,7 +33,6 @@ DEFAULT_TOPIC_ORDERS: str = "sales.orders.events"
 DEFAULT_TOPIC_CLICKSTREAM: str = "marketing.clickstream.raw"
 DEFAULT_RATE: int = 10
 MAX_RATE: int = 100
-DEFAULT_DURATION: int = 3600
 
 FUNNEL_STAGES: list[str] = ["view", "click", "add_to_cart", "checkout", "purchase"]
 PAGES: dict[str, list[str]] = {
@@ -138,13 +137,22 @@ def generate_clickstream_event(session_id: str, customer_id: int | None) -> Clic
 @click.option("--bootstrap-servers", default=DEFAULT_BOOTSTRAP_SERVERS, help="Kafka bootstrap brokers")
 @click.option("--topic-orders", default=DEFAULT_TOPIC_ORDERS, help="Kafka topic for orders")
 @click.option("--topic-clickstream", default=DEFAULT_TOPIC_CLICKSTREAM, help="Kafka topic for clickstream")
-@click.option("--rate", default=DEFAULT_RATE, type=int, help="Events per second")
+@click.option("--rate", default=DEFAULT_RATE, type=int, help="Total events per second across both topics")
 @click.option("--duration", default=10, type=int, help="Execution duration in seconds")
-@click.option("--simulate", is_flag=True, default=False,
-              help="Print generated events to stdout (one JSON line per event) without requiring Kafka")
+@click.option(
+    "--simulate",
+    is_flag=True,
+    default=False,
+    help="Print generated events to stdout (one JSON line per event) without requiring Kafka",
+)
 def main(bootstrap_servers, topic_orders, topic_clickstream, rate, duration, simulate):
     logger.info("Starting event producer to %s...", bootstrap_servers)
-    logger.info("Publishing to topics: '%s' and '%s' at %d events/sec", topic_orders, topic_clickstream, rate)
+    logger.info(
+        "Publishing to topics: '%s' and '%s' at %d events/sec (total across both topics)",
+        topic_orders,
+        topic_clickstream,
+        rate,
+    )
 
     producer = None
     if simulate:
@@ -152,6 +160,7 @@ def main(bootstrap_servers, topic_orders, topic_clickstream, rate, duration, sim
     else:
         try:
             from confluent_kafka import Producer
+
             producer = Producer({"bootstrap.servers": bootstrap_servers})
         except Exception as exc:
             logger.error(
@@ -173,15 +182,18 @@ def main(bootstrap_servers, topic_orders, topic_clickstream, rate, duration, sim
         if simulate:
             click.echo(json.dumps(order_evt.to_dict()))
             click.echo(json.dumps(click_evt.to_dict()))
+            events_sent += 2
         elif producer:
             try:
                 producer.produce(topic_orders, key=str(order_evt.order_id), value=json.dumps(order_evt.to_dict()))
                 producer.produce(topic_clickstream, key=click_evt.session_id, value=json.dumps(click_evt.to_dict()))
                 producer.poll(0)
+                events_sent += 2
             except Exception as e:
                 logger.warning("Error producing message: %s", e)
-        events_sent += 2
-        time.sleep(1.0 / max(1, rate))
+        # 2 events per tick, so the tick interval is 2/rate seconds to keep
+        # the overall throughput equal to --rate events per second.
+        time.sleep(2.0 / max(1, rate))
 
     if producer:
         producer.flush(5)

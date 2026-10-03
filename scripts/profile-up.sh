@@ -14,8 +14,30 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# Per-step accounting: never report success when a critical step failed.
+failures=0
+deployed=0
+
+deploy_chart() {
+    local chart="$1"
+    if [ ! -d "infra/helm/$chart" ]; then
+        echo -e "  ${RED}MISSING${NC}: infra/helm/$chart not found"
+        failures=$((failures + 1))
+        return 0
+    fi
+    echo -e "Deploying Helm chart: ${GREEN}${chart}${NC}"
+    if helm upgrade --install "$chart" "infra/helm/$chart" -n platform -f "$VALUES_FILE"; then
+        echo -e "  ${GREEN}OK${NC}: ${chart}"
+        deployed=$((deployed + 1))
+    else
+        echo -e "  ${RED}FAILED${NC}: ${chart}"
+        failures=$((failures + 1))
+    fi
+    return 0
+}
+
 echo -e "${BLUE}==================================================================${NC}"
-echo -e "${BLUE}   ACTIVATING OPERATIONAL PROFILE: ${YELLOW}${PROFILE^^}${NC}"
+echo -e "${BLUE}   ACTIVATING OPERATIONAL PROFILE: ${YELLOW}$(printf '%s' "$PROFILE" | tr '[:lower:]' '[:upper:]')${NC}"
 echo -e "${BLUE}==================================================================${NC}"
 
 VALUES_FILE="infra/profiles/${PROFILE}.yaml"
@@ -25,34 +47,36 @@ if [ ! -f "$VALUES_FILE" ]; then
     exit 1
 fi
 
+if ! command -v helm >/dev/null 2>&1; then
+    echo -e "${RED}Error: helm is not installed or not on PATH.${NC}"
+    exit 1
+fi
+
 case "$PROFILE" in
     platform)
         echo -e "${YELLOW}Deploying Platform Base: MinIO, PostgreSQL, Kafka, Polaris, Marquez...${NC}"
-        helm upgrade --install s1-ingestion infra/helm/s1-ingestion -n platform -f "$VALUES_FILE"
-        helm upgrade --install s2-lakehouse infra/helm/s2-lakehouse -n platform -f "$VALUES_FILE"
-        helm upgrade --install s7-fabric infra/helm/s7-fabric -n platform -f "$VALUES_FILE"
+        deploy_chart s1-ingestion
+        deploy_chart s2-lakehouse
+        deploy_chart s7-fabric
         ;;
     stream)
         echo -e "${YELLOW}Deploying Stream/Kappa Profile: Kafka, Flink Operator, Serving Views...${NC}"
-        helm upgrade --install s1-ingestion infra/helm/s1-ingestion -n platform -f "$VALUES_FILE"
-        helm upgrade --install s2-lakehouse infra/helm/s2-lakehouse -n platform -f "$VALUES_FILE"
-        helm upgrade --install s4-stream infra/helm/s4-stream -n platform -f "$VALUES_FILE"
-        helm upgrade --install s5-serving infra/helm/s5-serving -n platform -f "$VALUES_FILE"
+        deploy_chart s1-ingestion
+        deploy_chart s2-lakehouse
+        deploy_chart s4-stream
+        deploy_chart s5-serving
         ;;
     batch)
         echo -e "${YELLOW}Deploying Batch/Lambda Profile: Spark on K8s, Medallion, Dagster, Trino...${NC}"
-        helm upgrade --install s1-ingestion infra/helm/s1-ingestion -n platform -f "$VALUES_FILE"
-        helm upgrade --install s2-lakehouse infra/helm/s2-lakehouse -n platform -f "$VALUES_FILE"
-        helm upgrade --install s3-batch infra/helm/s3-batch -n platform -f "$VALUES_FILE"
-        helm upgrade --install s5-serving infra/helm/s5-serving -n platform -f "$VALUES_FILE"
+        deploy_chart s1-ingestion
+        deploy_chart s2-lakehouse
+        deploy_chart s3-batch
+        deploy_chart s5-serving
         ;;
     demo)
         echo -e "${YELLOW}Deploying DEMO Profile (RF-24): All subsystems active in lightweight mode...${NC}"
         for chart in s1-ingestion s2-lakehouse s3-batch s4-stream s5-serving s6-mesh s7-fabric s8-ops; do
-            if [ -d "infra/helm/$chart" ]; then
-                echo -e "Deploying Helm chart: ${GREEN}$chart${NC}"
-                helm upgrade --install "$chart" "infra/helm/$chart" -n platform -f "$VALUES_FILE" || true
-            fi
+            deploy_chart "$chart"
         done
         ;;
     *)
@@ -61,4 +85,9 @@ case "$PROFILE" in
         ;;
 esac
 
-echo -e "\n${GREEN}Profile '${PROFILE}' applied successfully!${NC}"
+echo ""
+if [ "$failures" -gt 0 ]; then
+    echo -e "${RED}Profile '${PROFILE}' FAILED: ${deployed} chart(s) deployed, ${failures} step(s) failed.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}Profile '${PROFILE}' applied successfully! (${deployed} chart(s) deployed)${NC}"

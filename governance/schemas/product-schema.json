@@ -40,7 +40,12 @@
             "properties": {
               "name": { "type": "string" },
               "type": { "type": "string" },
-              "path": { "type": "string" }
+              "path": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["active", "planned"],
+                "description": "Lifecycle state of the asset. 'planned' marks an asset that no pipeline produces yet; omit for produced assets."
+              }
             }
           }
         },

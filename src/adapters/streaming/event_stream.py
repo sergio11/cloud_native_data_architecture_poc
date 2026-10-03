@@ -37,11 +37,14 @@ class EventStreamAdapter(EventBrokerPort):
     Backend selection is driven by the ``KAFKA_BOOTSTRAP_SERVERS`` environment
     variable: when it is set and non-empty the adapter talks ONLY to Kafka,
     otherwise it uses ONLY the embedded SQLite log (no double writes and no
-    silent fallbacks). ``confluent_kafka`` is imported lazily inside the Kafka
-    code paths so the SQLite profile never requires the package. An optional
-    ``consumer_factory`` seam (a callable receiving the consumer config dict
-    and returning a ``confluent_kafka.Consumer``-like object) allows tests to
-    inject a fake consumer.
+    silent fallbacks). The variable is read ONCE at construction and the
+    backend is then fixed for the adapter's lifetime, so every publish and
+    consume call hits the same backend (the SQLite schema is initialised only
+    when that backend is selected). ``confluent_kafka`` is imported lazily
+    inside the Kafka code paths so the SQLite profile never requires the
+    package. An optional ``consumer_factory`` seam (a callable receiving the
+    consumer config dict and returning a ``confluent_kafka.Consumer``-like
+    object) allows tests to inject a fake consumer.
     """
 
     def __init__(
@@ -51,11 +54,11 @@ class EventStreamAdapter(EventBrokerPort):
     ) -> None:
         self._db_path = db_path
         self._consumer_factory = consumer_factory
-        # The embedded SQLite log is backend state: with the Kafka backend
-        # selected this adapter talks ONLY to Kafka, so it must not create
-        # local files or schemas as a side effect of construction.
-        self._sqlite_backend = self._kafka_bootstrap() is None
-        if self._sqlite_backend:
+        # Backend decided ONCE here (never re-read per call): with the Kafka
+        # backend selected this adapter talks ONLY to Kafka, so it must not
+        # create local files or schemas as a side effect of construction.
+        self._bootstrap = self._resolve_bootstrap()
+        if self._bootstrap is None:
             ensure_parent_dir(db_path)
             self._init_db()
 
@@ -80,7 +83,8 @@ class EventStreamAdapter(EventBrokerPort):
             """)
             conn.commit()
 
-    def _kafka_bootstrap(self) -> str | None:
+    @staticmethod
+    def _resolve_bootstrap() -> str | None:
         """Returns the configured Kafka bootstrap servers, or None for the SQLite backend."""
         value = os.getenv(KAFKA_ENV_VAR)
         if value is None or not value.strip():
@@ -88,10 +92,9 @@ class EventStreamAdapter(EventBrokerPort):
         return value.strip()
 
     def publish_event(self, topic: str, key: str, payload: dict[str, Any]) -> bool:
-        """Publishes to the selected backend only (Kafka when configured, else SQLite)."""
-        bootstrap = self._kafka_bootstrap()
-        if bootstrap is not None:
-            self._publish_to_kafka(bootstrap, topic, key, payload)
+        """Publishes to the backend selected at construction (Kafka or SQLite)."""
+        if self._bootstrap is not None:
+            self._publish_to_kafka(self._bootstrap, topic, key, payload)
             return True
         self._publish_to_sqlite(topic, key, payload)
         return True
@@ -137,14 +140,14 @@ class EventStreamAdapter(EventBrokerPort):
         replay=True: reads the full topic log from offset 0 (ascending) and
         never touches consumer cursors. Never fabricates events when empty.
 
-        Backend selection: Kafka when ``KAFKA_BOOTSTRAP_SERVERS`` is set and
-        non-empty (consuming ONLY from Kafka), SQLite otherwise. An
-        unreachable Kafka broker raises ``RuntimeError`` (fail-fast, never a
-        silent fallback to SQLite).
+        Backend selection is fixed at construction: Kafka when
+        ``KAFKA_BOOTSTRAP_SERVERS`` was set and non-empty at that moment
+        (consuming ONLY from Kafka), SQLite otherwise. An unreachable Kafka
+        broker raises ``RuntimeError`` (fail-fast, never a silent fallback
+        to SQLite).
         """
-        bootstrap = self._kafka_bootstrap()
-        if bootstrap is not None:
-            return self._consume_from_kafka(bootstrap, topic, max_messages, replay, consumer_group)
+        if self._bootstrap is not None:
+            return self._consume_from_kafka(self._bootstrap, topic, max_messages, replay, consumer_group)
         return self._consume_from_sqlite(topic, max_messages, replay, consumer_group)
 
     def _consume_from_sqlite(
@@ -174,10 +177,7 @@ class EventStreamAdapter(EventBrokerPort):
                 ).fetchone()
                 committed = int(cursor_row[0]) if cursor_row else 0
 
-                query = (
-                    "SELECT offset, payload FROM event_log "
-                    "WHERE topic = ? AND offset > ? ORDER BY offset ASC"
-                )
+                query = "SELECT offset, payload FROM event_log WHERE topic = ? AND offset > ? ORDER BY offset ASC"
                 params = [topic, committed]
                 if max_messages is not None:
                     query += " LIMIT ?"
@@ -293,9 +293,7 @@ class EventStreamAdapter(EventBrokerPort):
                 consumed.append(message)
                 raw = message.value()
                 if raw is None:
-                    logger.warning(
-                        "Skipping Kafka tombstone at offset %s on topic '%s'", message.offset(), topic
-                    )
+                    logger.warning("Skipping Kafka tombstone at offset %s on topic '%s'", message.offset(), topic)
                     continue
                 try:
                     text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)

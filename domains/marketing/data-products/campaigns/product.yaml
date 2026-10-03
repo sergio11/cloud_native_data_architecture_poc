@@ -17,17 +17,19 @@ spec:
   assets:
     - name: gold_campaigns
       type: iceberg_table
-      path: "s3a://gold/marketing/campaigns/"
+      path: "s3://datalake/warehouse/gold/marketing/campaigns"
       format: parquet
       partitioned_by: ["channel"]
       description: "Aggregated campaign performance and ROI metrics"
       access_tier: internal
+      status: planned
     - name: silver_campaigns
       type: iceberg_table
-      path: "s3a://silver/marketing/campaigns/"
+      path: "s3://datalake/warehouse/silver/marketing/campaigns"
       format: parquet
       description: "Cleaned campaign records validated against business rules"
       access_tier: internal
+      status: planned
   quality:
     completeness: 0.99
     uniqueness: 1.00

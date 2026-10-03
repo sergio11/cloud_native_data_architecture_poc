@@ -3,17 +3,19 @@
 # ==============================================================================
 # Configuration of real-time rules evaluated by the Lineage Webhook Service
 # against incoming OpenLineage events (runs, datasets, schemas, and assertions).
+#
+# Every BEHAVIOURAL key below is read by lineage_webhook_service.py:
+#   target.event_types / target.namespace / target.dataset_pattern -> gates
+#   criteria.*             -> detection settings (incl. sla_definitions)
+#   severity_mapping.*     -> alert severity per condition
+#   actions.webhook.*      -> outbound alert delivery (endpoint + retries)
+# Dead keys that no code read were removed so this file stays honest.
 # ==============================================================================
 
 version: "1.0.0"
 service: "lineage-webhook-service"
-evaluation_interval_seconds: 10
 
 defaults:
-  environment: "production"
-  notification_channels:
-    - "webhook"
-    - "prometheus_metric"
   throttling:
     deduplication_window_seconds: 300
 
@@ -33,7 +35,6 @@ rules:
       dataset_pattern: "^(silver|gold)\\..*"
       event_types: ["START", "RUNNING", "COMPLETE"]
     criteria:
-      type: "schema_drift"
       detect_added_columns: true
       detect_removed_columns: true
       detect_type_changes: true
@@ -48,11 +49,6 @@ rules:
       webhook:
         endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
         retry_count: 3
-      annotations:
-        summary: "Schema drift detected on {{ dataset_name }}"
-        description: "Dataset {{ dataset_name }} schema changed: {{ diff_summary }}"
-        runbook_url: "https://wiki.internal/runbooks/schema-drift"
-        domain: "{{ domain }}"
 
   # ----------------------------------------------------------------------------
   # Rule 2: Quality Threshold Breach Alert
@@ -69,7 +65,6 @@ rules:
       dataset_pattern: ".*"
       event_types: ["COMPLETE", "FAIL"]
     criteria:
-      type: "quality_assertion"
       facet_key: "dataQualityAssertions"
       metrics_facet_key: "dataQuality"
       min_pass_rate: 0.95
@@ -83,11 +78,6 @@ rules:
       webhook:
         endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
         retry_count: 3
-      annotations:
-        summary: "Data quality breach on {{ dataset_name }} (pass rate: {{ pass_rate }})"
-        description: "Validation suite {{ suite_name }} failed {{ failed_count }} assertions on table {{ dataset_name }}"
-        runbook_url: "https://wiki.internal/runbooks/quality-breach"
-        domain: "{{ domain }}"
 
   # ----------------------------------------------------------------------------
   # Rule 3: Pipeline Failure Alert
@@ -100,27 +90,16 @@ rules:
       ABORT event, capturing execution stack trace, job metadata, and parent run context.
     target:
       namespace: ".*"
-      dataset_pattern: ".*"
       event_types: ["FAIL", "ABORT"]
     criteria:
-      type: "pipeline_status"
       terminal_states: ["FAIL", "ABORT"]
       exclude_job_patterns:
         - "^test_.*"
         - ".*_dry_run"
-    severity_mapping:
-      medallion_core: "CRITICAL"
-      streaming_core: "CRITICAL"
-      auxiliary: "WARNING"
     actions:
       webhook:
         endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
         retry_count: 3
-      annotations:
-        summary: "Pipeline failed: {{ job_name }} (run_id: {{ run_id }})"
-        description: "Job {{ job_name }} failed in namespace {{ namespace }} with error: {{ error_message }}"
-        runbook_url: "https://wiki.internal/runbooks/pipeline-failure"
-        domain: "{{ domain }}"
 
   # ----------------------------------------------------------------------------
   # Rule 4: SLA Freshness Breach Alert
@@ -131,13 +110,14 @@ rules:
     description: >
       Triggers when dataset output timestamps or pipeline run times exceed
       contractual SLA freshness windows (e.g., 3600 seconds for hourly batch
-      medallion layers, 5 seconds for streaming processing).
+      medallion layers, 5 seconds for streaming processing). An unparsable
+      eventTime cannot prove freshness and is therefore treated as a breach
+      (fail-closed), never as lag 0.
     target:
       namespace: ".*"
       dataset_pattern: ".*"
       event_types: ["COMPLETE", "CHECK"]
     criteria:
-      type: "sla_freshness"
       sla_definitions:
         - pattern: "^bronze\\..*"
           max_staleness_seconds: 3600
@@ -159,8 +139,3 @@ rules:
       webhook:
         endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
         retry_count: 3
-      annotations:
-        summary: "SLA Freshness breach on {{ dataset_name }}"
-        description: "Dataset {{ dataset_name }} has staleness of {{ staleness_seconds }}s exceeding SLA of {{ max_sla_seconds }}s"
-        runbook_url: "https://wiki.internal/runbooks/sla-freshness"
-        domain: "{{ domain }}"

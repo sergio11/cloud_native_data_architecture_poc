@@ -65,7 +65,8 @@ def seed_demo_events_if_empty(topic: str, explicit_flag: bool) -> int:
             logger.warning(
                 "Seeded %d demo events into topic %s (auto demo seeding: event log was empty; "
                 "scripts/demo.sh and the Rakefile invoke this pipeline without --seed-if-empty)",
-                seeded, topic,
+                seeded,
+                topic,
             )
     return seeded
 
@@ -81,15 +82,21 @@ def main() -> None:
         action="store_true",
         help="Full replay of the topic log from offset 0 (RF-10 full recompute)",
     )
-    parser.add_argument("--seed-if-empty", action="store_true", default=False,
-                        help="Publish a deterministic 14-event demo burst when the topic log is empty "
-                             "(an empty log is also auto-seeded loudly for demo-script compatibility)")
+    parser.add_argument(
+        "--seed-if-empty",
+        action="store_true",
+        default=False,
+        help="Publish a deterministic 14-event demo burst when the topic log is empty "
+        "(an empty log is also auto-seeded loudly for demo-script compatibility)",
+    )
     args = parser.parse_args()
 
     replay_mode = args.replay or args.start_offset == "earliest"
     logger.info(
         "Starting Streaming Speed Layer Pipeline on topic '%s' (offset=%s, replay=%s)...",
-        args.topic, args.start_offset, replay_mode,
+        args.topic,
+        args.start_offset,
+        replay_mode,
     )
 
     seed_demo_events_if_empty(args.topic, args.seed_if_empty)

@@ -19,20 +19,20 @@ spec:
   assets:
     - name: gold_orders
       type: iceberg_table
-      path: "s3a://gold/sales/orders/"
+      path: "s3://datalake/warehouse/gold/sales/daily_metrics"
       format: parquet
       partitioned_by: ["order_date"]
       description: "Aggregated order metrics and sales reporting ready for analytical querying"
       access_tier: internal
     - name: silver_orders
       type: iceberg_table
-      path: "s3a://silver/sales/orders/"
+      path: "s3://datalake/warehouse/silver/sales/orders"
       format: parquet
       description: "Cleaned, typed, and referentially validated order transactions"
       access_tier: internal
     - name: bronze_orders
       type: iceberg_table
-      path: "s3a://bronze/sales/orders/"
+      path: "s3://datalake/warehouse/bronze/sales/orders"
       format: parquet
       description: "Raw ingested order records from PostgreSQL OLTP"
       access_tier: restricted
@@ -45,7 +45,7 @@ spec:
     completeness: 0.98
     uniqueness: 1.00
     timeliness: 0.99
-    validity: 0.995
+    validity: 0.99
     suite: "quality/expectations/silver_orders_suite.json"
   contract: "./contract.yaml"
   schema: "./schema.json"

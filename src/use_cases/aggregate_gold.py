@@ -91,7 +91,17 @@ class AggregateGoldUseCase(AggregateGoldPort):
             try:
                 results[product.result_key] = publish(quality_threshold, suite_path)  # type: ignore[literal-required]
             except QualityGateBreachError as exc:
-                breach = breach or exc
+                if breach is None:
+                    breach = exc
+                else:
+                    # Both targets breached concurrently: the first recorded
+                    # breach is the one re-raised (fail-closed either way), but
+                    # discarding this one without a trace would hide a real breach.
+                    logger.warning(
+                        "Second concurrent QualityGateBreachError while one is already "
+                        "recorded; keeping the first breach (both block publication): %s",
+                        exc,
+                    )
 
         if breach is not None:
             raise breach
@@ -133,9 +143,7 @@ class AggregateGoldUseCase(AggregateGoldPort):
         customers_silver = self._reader.read_table(_SILVER_CUSTOMERS_TABLE)
         logger.info("Applying GDPR Art.25 pseudonymization on %d customers...", len(customers_silver))
 
-        masked_customers: list[dict[str, Any]] = [
-            PrivacyPolicy.apply_customer_masking(c) for c in customers_silver
-        ]
+        masked_customers: list[dict[str, Any]] = [PrivacyPolicy.apply_customer_masking(c) for c in customers_silver]
 
         target_cust_table = _GOLD_CUSTOMERS_TABLE
         enforce_quality_gate(

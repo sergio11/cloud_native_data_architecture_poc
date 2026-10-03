@@ -3,6 +3,7 @@ Modern Data Architecture POC - Ports Package.
 Contains Driving (Inbound) and Driven (Outbound) interface definitions.
 """
 
+from src.domain.quality_gate import FAIL_CLOSED_RULE
 from src.ports.inbound import (
     AggregateGoldPort,
     AggregateGoldResult,
@@ -19,7 +20,6 @@ from src.ports.inbound import (
     ValidateContractResult,
 )
 from src.ports.outbound import (
-    FAIL_CLOSED_RULE,
     ContractCatalogPort,
     DomainCatalogPort,
     EventBrokerPort,

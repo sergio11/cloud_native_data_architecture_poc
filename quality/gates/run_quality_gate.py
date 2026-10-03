@@ -7,7 +7,10 @@ Blocks pipeline progression if quality threshold is not met (RF-06).
 The CLI never evaluates expectations itself: it delegates to
 ``container.run_quality_gate.execute(...)`` so the fail-closed core rules
 (missing suite -> SuiteNotFoundError, empty record set -> failed evaluation)
-always apply.
+always apply. Threshold precedence mirrors the Silver/Gold promotion gate: the
+thresholds declared by the contract governing the table's entity win per
+dimension, and ``--threshold`` is only the fallback when that contract declares
+none - so this CLI can never PASS a table that promotion then rejects.
 
 Exit codes:
   0: Quality gate PASSED
@@ -39,7 +42,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from src.container import container
 from src.domain.entities import QualityGateEvaluation
 from src.domain.exceptions import QualityGateBreachError, SuiteNotFoundError
-from src.ports.outbound import FAIL_CLOSED_RULE
+from src.domain.quality_gate import FAIL_CLOSED_RULE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,11 +79,7 @@ def _print_results_table(evaluation: QualityGateEvaluation) -> None:
 
 
 def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float) -> None:
-    status_text = (
-        "[bold green]PASSED[/bold green]"
-        if evaluation.passed
-        else "[bold red]FAILED[/bold red]"
-    )
+    status_text = "[bold green]PASSED[/bold green]" if evaluation.passed else "[bold red]FAILED[/bold red]"
     pct = evaluation.pass_rate * 100.0
     thresh_pct = threshold * 100.0
 
@@ -105,7 +104,12 @@ def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float) ->
 @click.command()
 @click.option("--suite", required=True, help="Path to Great Expectations suite JSON")
 @click.option("--table", required=True, help="Target Lakehouse table (e.g. silver.sales.orders)")
-@click.option("--threshold", default=0.95, type=float, help="Pass rate threshold (0.0 to 1.0)")
+@click.option(
+    "--threshold",
+    default=0.95,
+    type=float,
+    help="Fallback pass-rate threshold (0.0-1.0) when the contract declares no thresholds",
+)
 @click.option("--input-file", default=None, help="Optional local JSON/Parquet file to validate")
 @click.option("--marquez-url", default=None, help="Marquez URL")
 @click.option("--output-dir", default=None, help="Directory to save run results JSON")
@@ -174,14 +178,18 @@ def main(
             out_path.mkdir(parents=True, exist_ok=True)
             res_file = out_path / f"quality_result_{evaluation.suite_name}_{run_id[:8]}.json"
             with open(res_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "suite": evaluation.suite_name,
-                    "table": table,
-                    "passed": evaluation.passed,
-                    "pass_rate": evaluation.pass_rate,
-                    "threshold": threshold,
-                    "timestamp": datetime.now(UTC).isoformat(),
-                }, f, indent=2)
+                json.dump(
+                    {
+                        "suite": evaluation.suite_name,
+                        "table": table,
+                        "passed": evaluation.passed,
+                        "pass_rate": evaluation.pass_rate,
+                        "threshold": threshold,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    },
+                    f,
+                    indent=2,
+                )
 
         exit_code = 0 if evaluation.passed else 1
         sys.exit(exit_code)

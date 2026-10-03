@@ -1,5 +1,5 @@
 # =============================================================================
-# .gitignore — Modern Data Architecture POC
+# .gitignore â€” Modern Data Architecture POC
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -51,6 +51,9 @@ dmypy.json
 .pyre/
 .pytype/
 pyrightconfig.json
+
+# Linters
+.ruff_cache/
 
 # Testing
 .pytest_cache/
@@ -127,7 +130,7 @@ kubeconfig.yaml
 crash.log
 
 # -----------------------------------------------------------------------------
-# Secrets & credentials — NEVER commit these
+# Secrets & credentials â€” NEVER commit these
 # -----------------------------------------------------------------------------
 *.pem
 *.key
@@ -176,7 +179,7 @@ nohup.out
 openlineage-events/
 
 # -----------------------------------------------------------------------------
-# Data files — do not commit generated/downloaded data
+# Data files â€” do not commit generated/downloaded data
 # -----------------------------------------------------------------------------
 *.parquet
 *.avro
@@ -190,6 +193,9 @@ warehouse/
 checkpoint/
 checkpoints/
 iceberg-data/
+# Local databases created in the working directory (lineage webhook service
+# writes lineage_events.db to $PWD; data/ is already fully ignored above)
+/*.db
 
 # -----------------------------------------------------------------------------
 # MinIO / S3 local mirror
@@ -200,7 +206,6 @@ minio-data/
 # -----------------------------------------------------------------------------
 # Dagster
 # -----------------------------------------------------------------------------
-$DAGSTER_HOME/
 .dagster/
 dagster_home/
 /storage/

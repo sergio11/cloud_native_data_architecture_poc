@@ -48,8 +48,16 @@ ORDER_STATUSES: list[str] = ["confirmed", "pending", "shipped", "cancelled"]
 STATUS_WEIGHTS: list[float] = [0.70, 0.15, 0.10, 0.05]
 
 PRODUCT_CATEGORIES: list[str] = [
-    "Electronics", "Computers", "Smartphones", "Audio", "Home & Kitchen",
-    "Sports & Outdoors", "Books & Media", "Clothing & Fashion", "Health & Beauty", "Toys & Games"
+    "Electronics",
+    "Computers",
+    "Smartphones",
+    "Audio",
+    "Home & Kitchen",
+    "Sports & Outdoors",
+    "Books & Media",
+    "Clothing & Fashion",
+    "Health & Beauty",
+    "Toys & Games",
 ]
 
 CAMPAIGN_CHANNELS: list[str] = ["email", "sms", "display", "social", "search"]
@@ -93,6 +101,16 @@ CREATE TABLE IF NOT EXISTS order_items (
     quantity   INT    NOT NULL CHECK (quantity > 0),
     unit_price DECIMAL(10, 2) NOT NULL CHECK (unit_price > 0)
 );
+"""
+
+# order_items has only a SERIAL PK, so ON CONFLICT needs an explicit
+# conflict target: without this unique index, `ON CONFLICT DO NOTHING`
+# would silently re-insert duplicate line items on every re-run.
+# IF NOT EXISTS so pre-existing databases are migrated in place (a database
+# that already contains duplicates must be re-seeded with --recreate first).
+DDL_ORDER_ITEMS_UNIQUE = """
+CREATE UNIQUE INDEX IF NOT EXISTS uq_order_items_order_product
+    ON order_items (order_id, product_id);
 """
 
 DDL_CAMPAIGNS = """
@@ -148,6 +166,7 @@ def create_schema(conn: psycopg2.extensions.connection, recreate: bool = False) 
         cur.execute(DDL_CUSTOMERS)
         cur.execute(DDL_ORDERS)
         cur.execute(DDL_ORDER_ITEMS)
+        cur.execute(DDL_ORDER_ITEMS_UNIQUE)
         cur.execute(DDL_CAMPAIGNS)
         conn.commit()
     logger.info("Schema created successfully.")
@@ -251,23 +270,35 @@ def seed_orders(
             items_to_insert.extend(order_item_records)
 
             if len(orders_to_insert) >= BATCH_SIZE:
-                cur.execute("INSERT INTO orders (id, customer_id, total_amount, status, order_date) VALUES " +
-                            ",".join(["(%s,%s,%s,%s,%s)"] * len(orders_to_insert)) + " ON CONFLICT (id) DO NOTHING;",
-                            [v for row in orders_to_insert for v in row])
-                cur.execute("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES " +
-                            ",".join(["(%s,%s,%s,%s)"] * len(items_to_insert)) + " ON CONFLICT DO NOTHING;",
-                            [v for row in items_to_insert for v in row])
+                cur.execute(
+                    "INSERT INTO orders (id, customer_id, total_amount, status, order_date) VALUES "
+                    + ",".join(["(%s,%s,%s,%s,%s)"] * len(orders_to_insert))
+                    + " ON CONFLICT (id) DO NOTHING;",
+                    [v for row in orders_to_insert for v in row],
+                )
+                cur.execute(
+                    "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES "
+                    + ",".join(["(%s,%s,%s,%s)"] * len(items_to_insert))
+                    + " ON CONFLICT (order_id, product_id) DO NOTHING;",
+                    [v for row in items_to_insert for v in row],
+                )
                 conn.commit()
                 orders_to_insert = []
                 items_to_insert = []
 
         if orders_to_insert:
-            cur.execute("INSERT INTO orders (id, customer_id, total_amount, status, order_date) VALUES " +
-                        ",".join(["(%s,%s,%s,%s,%s)"] * len(orders_to_insert)) + " ON CONFLICT (id) DO NOTHING;",
-                        [v for row in orders_to_insert for v in row])
-            cur.execute("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES " +
-                        ",".join(["(%s,%s,%s,%s)"] * len(items_to_insert)) + " ON CONFLICT DO NOTHING;",
-                        [v for row in items_to_insert for v in row])
+            cur.execute(
+                "INSERT INTO orders (id, customer_id, total_amount, status, order_date) VALUES "
+                + ",".join(["(%s,%s,%s,%s,%s)"] * len(orders_to_insert))
+                + " ON CONFLICT (id) DO NOTHING;",
+                [v for row in orders_to_insert for v in row],
+            )
+            cur.execute(
+                "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES "
+                + ",".join(["(%s,%s,%s,%s)"] * len(items_to_insert))
+                + " ON CONFLICT (order_id, product_id) DO NOTHING;",
+                [v for row in items_to_insert for v in row],
+            )
             conn.commit()
 
 
@@ -297,8 +328,11 @@ def seed_campaigns(conn: psycopg2.extensions.connection, n: int = 100) -> None:
 @click.option("--port", default=lambda: int(os.getenv("PGPORT", "5432")), type=int)
 @click.option("--db", default=lambda: os.getenv("PGDATABASE", "ecommerce"))
 @click.option("--user", default=lambda: os.getenv("PGUSER", "postgres"))
-@click.option("--password", default=lambda: os.getenv("PGPASSWORD"),
-              help="PostgreSQL password (or set PGPASSWORD env var). No default: must be provided.")
+@click.option(
+    "--password",
+    default=lambda: os.getenv("PGPASSWORD"),
+    help="PostgreSQL password (or set PGPASSWORD env var). No default: must be provided.",
+)
 @click.option("--records", default=1000, type=int, help="Target order record count")
 @click.option("--recreate", is_flag=True, default=False)
 def main(host, port, db, user, password, records, recreate):

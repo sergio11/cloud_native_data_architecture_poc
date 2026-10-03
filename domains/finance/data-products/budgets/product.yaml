@@ -17,11 +17,12 @@ spec:
   assets:
     - name: gold_budgets
       type: iceberg_table
-      path: "s3a://gold/finance/budgets/"
+      path: "s3://datalake/warehouse/gold/finance/budgets"
       format: parquet
       partitioned_by: ["fiscal_year", "cost_center"]
       description: "Aggregated department budgets and actual spend metrics"
       access_tier: internal
+      status: planned
   quality:
     completeness: 0.99
     uniqueness: 1.00

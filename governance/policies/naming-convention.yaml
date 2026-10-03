@@ -16,7 +16,23 @@ spec:
               kinds:
                 - DataProduct
       validate:
-        message: "DataProduct name must be lowercase alphanumeric with hyphens (e.g. orders, customers, daily-metrics)."
-        pattern:
-          metadata:
-            name: "?*([a-z0-9-])"
+        # Kyverno pattern wildcards (*, ?, ?*) have NO character classes and
+        # every other character is matched literally, so a pattern value such
+        # as "?*([a-z0-9-])" would only match names literally ending in
+        # "([a-z0-9-])" (i.e. nothing), while a bare "?*" would also accept
+        # "-leading", "UPPER" or dotted names. The rule is therefore expressed
+        # as a regex deny condition, which is the only place Kyverno accepts a
+        # real character class ([a-z0-9_-]).
+        message: >-
+          DataProduct name must start with a lowercase alphanumeric character and may
+          then contain only lowercase alphanumeric characters, hyphens or underscores
+          (regex ^[a-z0-9][a-z0-9_-]*$), e.g. orders, customers, financial_closings.
+        deny:
+          conditions:
+            all:
+              - key: "{{ regex_match('^[a-z0-9][a-z0-9_-]*$', request.object.metadata.name || '') }}"
+                operator: Equals
+                value: false
+                message: >-
+                  DataProduct metadata.name does not match ^[a-z0-9][a-z0-9_-]*$
+                  (lowercase alphanumeric start; hyphens and underscores allowed afterwards).

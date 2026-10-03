@@ -43,11 +43,13 @@ spec:
           description: "Available across all company domains"
         - level: confidential
           description: "Access requires formal consumer registration"
+        - level: restricted
+          description: "Access restricted to a named allowlist of consumers (schema, DataProduct CRD and Kyverno policy all accept this level)."
         - level: pii
           description: "Personal Identifiable Information. Mandatory pseudonymization or masking in Silver and Gold tiers."
 
     lakehouse_naming:
-      storage_pattern: "s3a://{layer}/{domain}/{product}/"
+      storage_pattern: "s3://datalake/warehouse/{layer}/{domain}/{product}/"
       layers:
         - bronze
         - silver

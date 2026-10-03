@@ -43,9 +43,7 @@ def _setup_db(
         )
         n = 6 if superseded_column else 5
         placeholders = ", ".join(["?"] * n)
-        conn.executemany(
-            f"INSERT INTO gold_sales_daily_metrics VALUES ({placeholders})", batch_rows
-        )
+        conn.executemany(f"INSERT INTO gold_sales_daily_metrics VALUES ({placeholders})", batch_rows)
         conn.executemany(
             f"INSERT INTO stream_sales_orders_windowed VALUES ({placeholders})",
             stream_rows,
@@ -135,10 +133,7 @@ def test_fallback_logging(tmp_path, monkeypatch, caplog):
         rows = adapter.execute_query("SELECT order_date FROM gold_sales_daily_metrics")
 
     assert rows == [{"order_date": "2026-09-20"}]
-    assert any(
-        "Serving query executed by backend=" in record.getMessage()
-        for record in caplog.records
-    )
+    assert any("Serving query executed by backend=" in record.getMessage() for record in caplog.records)
 
     with pytest.raises(RuntimeError, match="serving query failed"):
         adapter.execute_query("SELECT * FROM table_that_does_not_exist")

@@ -50,9 +50,7 @@ def _run_medallion_chain(world) -> dict:
     for entity in ("orders", "customers"):
         results["ingest"][entity] = world.ingest_bronze.execute(entity)
     for entity, suite in (("orders", world.orders_suite), ("customers", world.customers_suite)):
-        results["cleanse"][entity] = world.cleanse_silver.execute(
-            entity, quality_threshold=0.95, suite_path=suite
-        )
+        results["cleanse"][entity] = world.cleanse_silver.execute(entity, quality_threshold=0.95, suite_path=suite)
     results["gold"] = world.aggregate_gold.execute(
         "all",
         daily_metrics_suite=world.gold_daily_metrics_suite,
@@ -104,9 +102,9 @@ def test_full_demo_flow(world) -> None:
     assert "email" not in columns and "name" not in columns
     assert "email_hash" in columns and "name_masked" in columns
 
-    raw_values = {
-        str(customer["email"]) for customer in world.demo_customers
-    } | {str(customer["name"]) for customer in world.demo_customers}
+    raw_values = {str(customer["email"]) for customer in world.demo_customers} | {
+        str(customer["name"]) for customer in world.demo_customers
+    }
     for row in gold_customers:
         assert "email" not in row and "name" not in row
         assert "email_hash" in row and "name_masked" in row
@@ -118,9 +116,7 @@ def test_full_demo_flow(world) -> None:
     # --- F4/F5: seed stream log + speed layer ------------------------------
     for index, event in enumerate(STREAM_EVENTS, start=1):
         world.broker.publish_event(STREAM_TOPIC, str(index), event)
-    stream_result = world.process_stream.execute(
-        topic=STREAM_TOPIC, target_table=STREAM_TARGET
-    )
+    stream_result = world.process_stream.execute(topic=STREAM_TOPIC, target_table=STREAM_TARGET)
     assert stream_result["status"] == "SUCCESS"
     assert stream_result["events_consumed"] == len(STREAM_EVENTS)
     assert stream_result["windows_written"] > 0
@@ -131,13 +127,9 @@ def test_full_demo_flow(world) -> None:
     unified = world.query_serving.execute_unified_revenue_query()
     assert unified, "unified serving query returned no rows"
     assert {row["source_tier"] for row in unified} == {"batch_historical", "stream_speed"}
+    assert any(row["order_date"] == "2026-09-27" and row["source_tier"] == "stream_speed" for row in unified)
     assert any(
-        row["order_date"] == "2026-09-27" and row["source_tier"] == "stream_speed"
-        for row in unified
-    )
-    assert any(
-        row["order_date"] in ("2026-09-25", "2026-09-26")
-        and row["source_tier"] == "batch_historical"
+        row["order_date"] in ("2026-09-25", "2026-09-26") and row["source_tier"] == "batch_historical"
         for row in unified
     )
 

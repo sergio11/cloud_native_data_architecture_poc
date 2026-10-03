@@ -12,31 +12,58 @@ from typing import TYPE_CHECKING, Any
 import requests
 from dagster import ConfigurableResource
 
+from pipelines.orchestration.local_dispatch import run_script
+
 if TYPE_CHECKING:
     from src.domain.entities import QualityGateEvaluation
 
 logger = logging.getLogger("dagster.resources")
 
 
-class SparkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base; K8s-only stub
-    """Resource to dispatch PySpark jobs on Kubernetes."""
+class SparkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
+    """Resource to dispatch pipeline scripts for Spark jobs.
+
+    The K8s profile would submit to the cluster; the LOCAL profile (RF-22)
+    dispatches the equivalent local pipeline script in a subprocess via
+    :mod:`pipelines.orchestration.local_dispatch`.
+    """
+
     master_url: str = "k8s://https://kubernetes.default.svc"
     spark_image: str = "docker.io/apache/spark:3.5.0-scala2.12-java17-python3"
 
     def submit_job(self, script_path: str, args: list[str] | None = None) -> bool:
-        raise NotImplementedError("K8s profile only: Spark job submission is not wired in the local profile")
+        """Run the pipeline script locally; non-zero exit raises so the asset fails."""
+        run_script(script_path, args)
+        return True
 
 
-class FlinkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base; K8s-only stub
-    """Resource to interact with Apache Flink Kubernetes Operator."""
+class FlinkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
+    """Resource to interact with Apache Flink (K8s Operator in the K8s profile)."""
+
     operator_endpoint: str = "http://flink-operator.platform.svc:8080"
 
     def trigger_savepoint_and_replay(self, deployment_name: str, earliest_offset: bool = True) -> bool:
-        raise NotImplementedError("K8s profile only: Flink savepoint and replay is not wired in the local profile")
+        """Replay the orders stream locally (mirrors `rake stream:replay`).
+
+        Runs ``pipelines/stream/flink_orders_stream.py --topic sales.orders.events``
+        with ``--start-offset earliest`` when ``earliest_offset`` is set; a
+        non-zero exit raises so Dagster marks the asset failed.
+        """
+        logger.info(
+            "LOCAL profile: replaying stream deployment '%s' (earliest_offset=%s) via local dispatch",
+            deployment_name,
+            earliest_offset,
+        )
+        args = ["--topic", "sales.orders.events"]
+        if earliest_offset:
+            args.extend(["--start-offset", "earliest"])
+        run_script("pipelines/stream/flink_orders_stream.py", args)
+        return True
 
 
-class MarquezResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base; K8s-only stub
+class MarquezResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
     """Resource to query OpenLineage/Marquez metadata graph and alerts."""
+
     marquez_url: str = "http://marquez.platform.svc:5000"
 
     def get_dataset_lineage(self, namespace: str, dataset_name: str) -> dict[str, Any]:
@@ -47,13 +74,20 @@ class MarquezResource(ConfigurableResource):  # type: ignore[type-arg]  # dagste
                 payload = resp.json()
                 if isinstance(payload, dict):
                     return payload
+            logger.warning(
+                "Marquez lineage API unavailable for %s.%s (HTTP %s); returning mocked marker",
+                namespace,
+                dataset_name,
+                resp.status_code,
+            )
         except Exception as e:
             logger.warning("Could not reach Marquez lineage API: %s", e)
-        return {"namespace": namespace, "dataset": dataset_name, "status": "mocked"}
+        return {"namespace": namespace, "dataset": dataset_name, "status": "mocked", "mocked": True}
 
 
 class GreatExpectationsResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
     """Resource to execute data quality suites via the hexagonal core quality gate."""
+
     suites_dir: str = "quality/expectations"
 
     @staticmethod
@@ -83,11 +117,7 @@ class GreatExpectationsResource(ConfigurableResource):  # type: ignore[type-arg]
         """
         from src.domain.exceptions import SuiteNotFoundError
 
-        suite_path = (
-            suite_name
-            if os.path.dirname(suite_name)
-            else os.path.join(self.suites_dir, suite_name)
-        )
+        suite_path = suite_name if os.path.dirname(suite_name) else os.path.join(self.suites_dir, suite_name)
         logger.info("Executing quality gate suite '%s' against '%s'", suite_path, table_ref)
         try:
             evaluation = self._execute_quality_gate(

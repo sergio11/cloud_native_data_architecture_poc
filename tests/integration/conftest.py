@@ -34,6 +34,7 @@ from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.serving.sql_serving import SqlServingAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
 from src.adapters.streaming.event_stream import EventStreamAdapter
+from src.domain.entities import ExtractionResult
 from src.use_cases.aggregate_gold import AggregateGoldUseCase
 from src.use_cases.cleanse_silver import CleanseSilverUseCase
 from src.use_cases.ingest_bronze import IngestBronzeUseCase
@@ -111,12 +112,14 @@ class DeterministicOltpSource:
         self._tables = tables
         self.extract_calls: list[str] = []
 
-    def extract_table(self, table_name: str, limit: int | None = None) -> list[dict[str, Any]]:
+    def extract_table(self, table_name: str, limit: int | None = None) -> ExtractionResult:
         self.extract_calls.append(table_name)
         rows = self._tables.get(table_name, [])
         if limit is not None:
             rows = rows[: int(limit)]
-        return [dict(row) for row in rows]
+        # Fixed fixture rows, not a live database: the honest origin is
+        # "synthetic" so Bronze lineage/audit provenance never claims PostgreSQL.
+        return ExtractionResult(records=[dict(row) for row in rows], origin="synthetic")
 
 
 @pytest.fixture
@@ -136,9 +139,7 @@ def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
     quality_engine = ExpectationEngineAdapter()
     serving_sql = SqlServingAdapter(db_path=str(lakehouse_db))
     domain_catalog = FsDomainCatalogAdapter(repo_root=str(REPO_ROOT))
-    source = DeterministicOltpSource(
-        {"orders": DEMO_ORDERS, "customers": DEMO_CUSTOMERS}
-    )
+    source = DeterministicOltpSource({"orders": DEMO_ORDERS, "customers": DEMO_CUSTOMERS})
 
     def _lineage_events() -> list[dict[str, Any]]:
         """Parses the local OpenLineage audit trail written so far."""
@@ -167,9 +168,7 @@ def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
         demo_orders=DEMO_ORDERS,
         demo_customers=DEMO_CUSTOMERS,
         lineage_events=_lineage_events,
-        ingest_bronze=IngestBronzeUseCase(
-            source=source, storage=storage, lineage=lineage
-        ),
+        ingest_bronze=IngestBronzeUseCase(source=source, storage=storage, lineage=lineage),
         cleanse_silver=CleanseSilverUseCase(
             storage_reader=storage,
             storage_writer=storage,
@@ -184,12 +183,8 @@ def world(tmp_path: Path, _hermetic_environment: None) -> SimpleNamespace:
             quality_engine=quality_engine,
             catalog=domain_catalog,
         ),
-        process_stream=ProcessStreamUseCase(
-            broker=broker, storage=storage, lineage=lineage
-        ),
+        process_stream=ProcessStreamUseCase(broker=broker, storage=storage, lineage=lineage),
         query_serving=QueryServingUseCase(query_executor=serving_sql),
-        run_quality_gate=RunQualityGateUseCase(
-            storage=storage, quality_engine=quality_engine
-        ),
+        run_quality_gate=RunQualityGateUseCase(storage=storage, quality_engine=quality_engine, catalog=domain_catalog),
         validate_contract=ValidateContractUseCase(catalog=domain_catalog),
     )

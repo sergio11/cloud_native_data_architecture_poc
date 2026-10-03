@@ -21,6 +21,8 @@ import os
 import re
 import sqlite3
 import threading
+import time
+import urllib.request
 import uuid
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -57,6 +59,30 @@ ALERT_RULES_PATH = os.getenv(
     "ALERT_RULES_PATH",
     str(Path(__file__).parent / "alert-rules.yaml"),
 )
+
+# Outbound alert webhook delivery (best-effort; never blocks ingestion on failure).
+WEBHOOK_DELIVERY_ENABLED = os.getenv("LINEAGE_WEBHOOK_DELIVERY", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+WEBHOOK_TIMEOUT_SECONDS = float(os.getenv("LINEAGE_WEBHOOK_TIMEOUT", "3"))
+
+# CORS: explicit origins (comma-separated) enable credentials; otherwise the
+# wildcard origin is used WITHOUT credentials (the CORS spec forbids
+# ``Access-Control-Allow-Origin: *`` together with
+# ``Access-Control-Allow-Credentials: true``).
+CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()]
+
+
+def _like_escape(value: str) -> str:
+    r"""Escape LIKE wildcards so user-supplied input matches literally.
+
+    Must be paired with ``ESCAPE '\'`` in the SQL statement.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 
 # -----------------------------------------------------------------------------
 # Pydantic Schemas for OpenLineage Spec (Simplified & Extensible)
@@ -133,8 +159,20 @@ class StorageManager:
 
     def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
-        self._lock = threading.Lock()
-        self._init_db()
+        # RLock: insert paths hold the lock while ``_connection()`` lazily
+        # initializes the schema on first use.
+        self._lock = threading.RLock()
+        self._initialized = False
+
+    def _ensure_initialized(self) -> None:
+        """Create the database file/schema on FIRST use (never at import)."""
+        if self._initialized:
+            return
+        with self._lock:
+            if self._initialized:
+                return
+            self._init_db()
+            self._initialized = True
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15.0)
@@ -150,6 +188,7 @@ class StorageManager:
         Shares the lifecycle contract of ``src.adapters._sqlite``: commit on
         clean exit, rollback on error, ``close()`` in all cases.
         """
+        self._ensure_initialized()
         conn = self._get_connection()
         try:
             with conn:
@@ -158,8 +197,10 @@ class StorageManager:
             conn.close()
 
     def _init_db(self) -> None:
-        with self._lock:
-            with self._connection() as conn:
+        """Create tables/indexes. Idempotent; the caller must hold ``self._lock``."""
+        conn = self._get_connection()
+        try:
+            with conn:
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS events (
@@ -222,6 +263,8 @@ class StorageManager:
                     CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
                     """
                 )
+        finally:
+            conn.close()
 
     def insert_event(self, event: OpenLineageEvent, raw_json: str) -> None:
         received_at = datetime.now(UTC).isoformat()
@@ -362,34 +405,80 @@ class StorageManager:
                     )
                     return False, None, schema_dict
 
+    _ALERT_INSERT_SQL = """
+        INSERT INTO alerts (
+            alert_id, rule_id, rule_name, severity, dataset_name,
+            job_name, summary, description, details_json, created_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    @staticmethod
+    def _alert_row(alert: AlertItem) -> tuple[Any, ...]:
+        return (
+            alert.alert_id,
+            alert.rule_id,
+            alert.rule_name,
+            alert.severity,
+            alert.dataset_name,
+            alert.job_name,
+            alert.summary,
+            alert.description,
+            json.dumps(alert.details),
+            alert.created_at,
+            alert.status,
+        )
+
     def insert_alert(self, alert: AlertItem) -> None:
         with self._lock:
             with self._connection() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO alerts (
-                        alert_id, rule_id, rule_name, severity, dataset_name,
-                        job_name, summary, description, details_json, created_at, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        alert.alert_id,
-                        alert.rule_id,
-                        alert.rule_name,
-                        alert.severity,
-                        alert.dataset_name,
-                        alert.job_name,
-                        alert.summary,
-                        alert.description,
-                        json.dumps(alert.details),
-                        alert.created_at,
-                        alert.status,
-                    ),
-                )
+                conn.execute(self._ALERT_INSERT_SQL, self._alert_row(alert))
 
-    def is_recent_alert_duplicate(
-        self, rule_id: str, identifier: str, window_seconds: int = 300
-    ) -> bool:
+    @staticmethod
+    def _within_dedup_window(created_at: Any, window_seconds: int) -> bool:
+        """True when ``created_at`` is inside the throttle window.
+
+        An unparsable timestamp is logged and treated as "not a duplicate"
+        (allow the alert) rather than silently swallowing the parse failure.
+        """
+        try:
+            alert_time = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "Dedup check: stored alert created_at=%r is unparsable (%s); treating as outside the window",
+                created_at,
+                exc,
+            )
+            return False
+        if alert_time.tzinfo is None:
+            alert_time = alert_time.replace(tzinfo=UTC)
+        return (datetime.now(UTC) - alert_time).total_seconds() < window_seconds
+
+    def insert_alert_if_new(self, alert: AlertItem, window_seconds: int = 300) -> bool:
+        """Atomically persist ``alert`` unless a recent duplicate exists.
+
+        The duplicate check and the INSERT share a single IMMEDIATE
+        transaction, so concurrent evaluators (threads or processes) cannot
+        both pass the check before either one writes (no check-then-insert
+        TOCTOU). Returns True only when the row was actually persisted.
+        """
+        identifier = alert.dataset_name or alert.job_name or "unknown"
+        with self._lock:
+            with self._connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT created_at FROM alerts
+                    WHERE rule_id = ? AND (dataset_name = ? OR job_name = ?)
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (alert.rule_id, identifier, identifier),
+                ).fetchone()
+                if row is not None and self._within_dedup_window(row["created_at"], window_seconds):
+                    return False
+                conn.execute(self._ALERT_INSERT_SQL, self._alert_row(alert))
+                return True
+
+    def is_recent_alert_duplicate(self, rule_id: str, identifier: str, window_seconds: int = 300) -> bool:
         """Check if an identical alert was fired recently to avoid spam."""
         with self._connection() as conn:
             cursor = conn.execute(
@@ -403,13 +492,7 @@ class StorageManager:
             row = cursor.fetchone()
             if not row:
                 return False
-
-            try:
-                alert_time = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
-                diff = (datetime.now(UTC) - alert_time).total_seconds()
-                return diff < window_seconds
-            except Exception:
-                return False
+            return self._within_dedup_window(row["created_at"], window_seconds)
 
     def query_alerts(
         self,
@@ -433,8 +516,10 @@ class StorageManager:
             query += " AND status = ?"
             params.append(status.upper())
         if dataset:
-            query += " AND dataset_name LIKE ?"
-            params.append(f"%{dataset}%")
+            # Documented substring filter, but wildcards in the input are
+            # escaped so "%"/"_" in user input match literally (ESCAPE '\').
+            query += " AND dataset_name LIKE ? ESCAPE '\\'"
+            params.append(f"%{_like_escape(dataset)}%")
 
         query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -469,17 +554,27 @@ class StorageManager:
                 return cur.rowcount > 0
 
     def get_dataset_lineage(self, dataset_name: str) -> dict[str, Any]:
-        """Fetch lineage connections: all jobs consuming or producing this dataset."""
+        """Fetch lineage connections: all jobs consuming or producing this dataset.
+
+        Dataset identity is matched EXACTLY (either the bare ``name`` or the
+        ``namespace.name`` key), never by substring, so ``silver.orders`` no
+        longer matches ``silver.orders_archive``.
+        """
         with self._connection() as conn:
             # Producers (where dataset in outputs)
             producers = conn.execute(
                 """
                 SELECT DISTINCT job_namespace, job_name, event_type, event_time, run_id
                 FROM events
-                WHERE outputs_json LIKE ?
+                WHERE EXISTS (
+                    SELECT 1 FROM json_each(events.outputs_json) je
+                    WHERE json_extract(je.value, '$.name') = ?
+                       OR json_extract(je.value, '$.namespace') || '.' ||
+                          json_extract(je.value, '$.name') = ?
+                )
                 ORDER BY event_time DESC LIMIT 20
                 """,
-                (f"%{dataset_name}%",),
+                (dataset_name, dataset_name),
             ).fetchall()
 
             # Consumers (where dataset in inputs)
@@ -487,21 +582,26 @@ class StorageManager:
                 """
                 SELECT DISTINCT job_namespace, job_name, event_type, event_time, run_id
                 FROM events
-                WHERE inputs_json LIKE ?
+                WHERE EXISTS (
+                    SELECT 1 FROM json_each(events.inputs_json) je
+                    WHERE json_extract(je.value, '$.name') = ?
+                       OR json_extract(je.value, '$.namespace') || '.' ||
+                          json_extract(je.value, '$.name') = ?
+                )
                 ORDER BY event_time DESC LIMIT 20
                 """,
-                (f"%{dataset_name}%",),
+                (dataset_name, dataset_name),
             ).fetchall()
 
-            # Schema history
+            # Schema history (exact "namespace.name" key or bare-name suffix)
             schemas = conn.execute(
                 """
                 SELECT schema_hash, schema_json, captured_at, run_id
                 FROM schema_history
-                WHERE dataset_key LIKE ?
+                WHERE dataset_key = ? OR dataset_key LIKE ? ESCAPE '\\'
                 ORDER BY captured_at DESC LIMIT 10
                 """,
-                (f"%{dataset_name}%",),
+                (dataset_name, f"%.{_like_escape(dataset_name)}"),
             ).fetchall()
 
             return {
@@ -532,9 +632,7 @@ class StorageManager:
             total_events = conn.execute("SELECT COUNT(*) as c FROM events").fetchone()["c"]
             total_datasets = conn.execute("SELECT COUNT(*) as c FROM datasets").fetchone()["c"]
             total_alerts = conn.execute("SELECT COUNT(*) as c FROM alerts").fetchone()["c"]
-            active_alerts = conn.execute(
-                "SELECT COUNT(*) as c FROM alerts WHERE status = 'ACTIVE'"
-            ).fetchone()["c"]
+            active_alerts = conn.execute("SELECT COUNT(*) as c FROM alerts WHERE status = 'ACTIVE'").fetchone()["c"]
             critical_alerts = conn.execute(
                 "SELECT COUNT(*) as c FROM alerts WHERE severity = 'CRITICAL' AND status = 'ACTIVE'"
             ).fetchone()["c"]
@@ -545,6 +643,54 @@ class StorageManager:
                 "active_alerts": active_alerts,
                 "critical_alerts": critical_alerts,
             }
+
+
+# -----------------------------------------------------------------------------
+# Outbound Alert Webhook Delivery (best-effort, stdlib-only: urllib.request)
+# -----------------------------------------------------------------------------
+def _post_alert_webhook(endpoint: str, payload: dict[str, Any], attempts: int = 1) -> bool:
+    """POST ``payload`` as JSON to ``endpoint``. Never raises.
+
+    Gated by the ``LINEAGE_WEBHOOK_DELIVERY`` env switch (read at call time)
+    and bounded by ``LINEAGE_WEBHOOK_TIMEOUT`` per attempt. Every failure is
+    logged and swallowed so webhook delivery can never crash ingestion.
+    ``attempts`` is the total number of POSTs (1 + ``actions.webhook.retry_count``).
+    """
+    if not WEBHOOK_DELIVERY_ENABLED:
+        return False
+    body = json.dumps(payload, default=str).encode("utf-8")
+    total = max(1, int(attempts))
+    for attempt in range(1, total + 1):
+        request = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SECONDS) as response:
+                status_code = getattr(response, "status", None) or response.getcode()
+            if 200 <= int(status_code) < 300:
+                logger.info("Alert webhook delivered to %s (HTTP %s)", endpoint, status_code)
+                return True
+            logger.warning(
+                "Alert webhook POST %s returned HTTP %s (attempt %d/%d)",
+                endpoint,
+                status_code,
+                attempt,
+                total,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Alert webhook POST %s failed (attempt %d/%d): %s",
+                endpoint,
+                attempt,
+                total,
+                exc,
+            )
+        if attempt < total:
+            time.sleep(0.1)
+    return False
 
 
 # -----------------------------------------------------------------------------
@@ -582,12 +728,83 @@ class RuleEngine:
         """Dedup window from YAML defaults.throttling (fallback: 300s)."""
         try:
             return int(
-                self._raw_config.get("defaults", {}).get("throttling", {}).get(
-                    "deduplication_window_seconds", 300
-                )
+                self._raw_config.get("defaults", {}).get("throttling", {}).get("deduplication_window_seconds", 300)
             )
         except (ValueError, TypeError, AttributeError):
             return 300
+
+    # -- alert-rules.yaml target/actions wiring helpers --------------------
+
+    def _target(self, rule_id: str) -> dict[str, Any]:
+        target = self._rule(rule_id).get("target")
+        return target if isinstance(target, dict) else {}
+
+    def _event_type_allowed(self, rule_id: str, event_type: Any, default: set[str] | None = None) -> bool:
+        """Gate on YAML ``target.event_types`` (case-insensitive).
+
+        An absent/empty key (or ``default=None``) preserves the legacy
+        unfiltered behaviour of the rule.
+        """
+        raw = self._target(rule_id).get("event_types")
+        allowed = {str(s).upper() for s in raw} if isinstance(raw, list) and raw else default
+        return allowed is None or str(event_type).upper() in allowed
+
+    def _namespace_allowed(self, rule_id: str, namespace: Any) -> bool:
+        """Gate on YAML ``target.namespace`` regex (absent/invalid -> allow all)."""
+        pattern = self._target(rule_id).get("namespace")
+        if not isinstance(pattern, str) or not pattern:
+            return True
+        try:
+            return re.search(pattern, str(namespace)) is not None
+        except re.error:
+            logger.warning("Invalid target.namespace regex %r in %s; ignoring", pattern, rule_id)
+            return True
+
+    def _dataset_allowed(self, rule_id: str, dataset_name: Any) -> bool:
+        """Gate on YAML ``target.dataset_pattern`` regex (absent/invalid -> allow all)."""
+        pattern = self._target(rule_id).get("dataset_pattern")
+        if not isinstance(pattern, str) or not pattern:
+            return True
+        try:
+            return re.search(pattern, str(dataset_name)) is not None
+        except re.error:
+            logger.warning("Invalid target.dataset_pattern regex %r in %s; ignoring", pattern, rule_id)
+            return True
+
+    def _webhook_config(self, rule_id: str) -> dict[str, Any]:
+        actions = self._rule(rule_id).get("actions")
+        webhook = actions.get("webhook") if isinstance(actions, dict) else None
+        return webhook if isinstance(webhook, dict) else {}
+
+    def _webhook_endpoint(self, rule_id: str) -> str | None:
+        """YAML ``actions.webhook.endpoint`` for rule_id (None when absent)."""
+        endpoint = self._webhook_config(rule_id).get("endpoint")
+        if isinstance(endpoint, str) and endpoint.strip():
+            return endpoint.strip()
+        return None
+
+    def _webhook_attempts(self, rule_id: str) -> int:
+        """Total POSTs = 1 + YAML ``actions.webhook.retry_count`` (retries after first)."""
+        try:
+            retries = int(self._webhook_config(rule_id).get("retry_count", 0))
+        except (TypeError, ValueError):
+            retries = 0
+        return 1 + max(0, retries)
+
+    def _deliver_alert_webhook(self, alert: AlertItem) -> bool:
+        """Best-effort webhook delivery for a persisted alert. Never raises."""
+        try:
+            endpoint = self._webhook_endpoint(alert.rule_id)
+            if not endpoint:
+                return False
+            return _post_alert_webhook(
+                endpoint,
+                alert.model_dump(mode="json"),
+                self._webhook_attempts(alert.rule_id),
+            )
+        except Exception as exc:
+            logger.warning("Alert webhook delivery skipped for %s: %s", alert.alert_id, exc)
+            return False
 
     def _load_rules(self) -> list[dict[str, Any]]:
         """Load rules from YAML file or return fallback default rules."""
@@ -653,26 +870,34 @@ class RuleEngine:
         sla_alerts = self._check_sla_freshness(event)
         alerts.extend(sla_alerts)
 
-        # Persist triggered alerts (respecting deduplication)
+        # Persist triggered alerts atomically (dedup inside a single IMMEDIATE
+        # transaction) and deliver webhooks best-effort. Only alerts that were
+        # actually persisted are returned, so suppressed duplicates never
+        # inflate ``alerts_triggered``.
         dedup_window = self._dedup_window_seconds()
+        persisted: list[AlertItem] = []
         for alert in alerts:
+            if not self.storage.insert_alert_if_new(alert, dedup_window):
+                continue
             target_key = alert.dataset_name or alert.job_name or "unknown"
-            if not self.storage.is_recent_alert_duplicate(alert.rule_id, target_key, dedup_window):
-                self.storage.insert_alert(alert)
-                logger.warning(
-                    "TRIGGERED ALERT [%s - %s]: %s (target=%s)",
-                    alert.severity,
-                    alert.rule_name,
-                    alert.summary,
-                    target_key,
-                )
+            logger.warning(
+                "TRIGGERED ALERT [%s - %s]: %s (target=%s)",
+                alert.severity,
+                alert.rule_name,
+                alert.summary,
+                target_key,
+            )
+            self._deliver_alert_webhook(alert)
+            persisted.append(alert)
 
-        return alerts
+        return persisted
 
     def _check_schema_changes(self, event: OpenLineageEvent) -> list[AlertItem]:
         """Rule 1: Detect schema modifications in Silver and Gold tables."""
         alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-001"):
+            return alerts
+        if not self._event_type_allowed("RF20-RULE-001", event.eventType):
             return alerts
         rule = self._rule("RF20-RULE-001")
         target = rule.get("target", {})
@@ -692,6 +917,10 @@ class RuleEngine:
         removed_sev = str(sev_map.get("removed_column", "CRITICAL"))
         altered_sev = str(sev_map.get("type_altered", "CRITICAL"))
         added_sev = str(sev_map.get("added_column", "WARNING"))
+        # Nullability detection is opt-in: without the YAML key the legacy
+        # (pre-wiring) behaviour of ignoring nullability is preserved.
+        detect_nullability = bool(criteria.get("detect_nullability_changes", False))
+        nullability_sev = str(sev_map.get("nullability_changed", "WARNING"))
         detect_added = bool(criteria.get("detect_added_columns", True))
         detect_removed = bool(criteria.get("detect_removed_columns", True))
         detect_types = bool(criteria.get("detect_type_changes", True))
@@ -699,7 +928,9 @@ class RuleEngine:
         datasets_to_check = (event.outputs or []) + (event.inputs or [])
 
         for ds in datasets_to_check:
-            # Check pattern match
+            # Check namespace + pattern match
+            if not self._namespace_allowed("RF20-RULE-001", ds.namespace):
+                continue
             if not silver_gold_regex.search(ds.name) and not silver_gold_regex.search(f"{ds.namespace}.{ds.name}"):
                 continue
 
@@ -721,6 +952,8 @@ class RuleEngine:
                 # Compare fields
                 old_fields = {f.get("name"): f.get("type") for f in old_schema.get("fields", [])}
                 new_fields = {f.get("name"): f.get("type") for f in fields}
+                old_meta = {f.get("name"): f for f in old_schema.get("fields", []) if isinstance(f, dict)}
+                new_meta = {f.get("name"): f for f in fields if isinstance(f, dict)}
 
                 added = set(new_fields.keys()) - set(old_fields.keys())
                 removed = set(old_fields.keys()) - set(new_fields.keys())
@@ -728,6 +961,16 @@ class RuleEngine:
                     col: {"old": old_fields[col], "new": new_fields[col]}
                     for col in set(old_fields.keys()) & set(new_fields.keys())
                     if old_fields[col] != new_fields[col]
+                }
+                # Only flag explicit nullability flips (both schemas must carry
+                # the key) so a producer newly emitting `nullable` metadata does
+                # not raise a false drift alert.
+                nullability_altered = {
+                    col: {"old": old_meta[col].get("nullable"), "new": new_meta[col].get("nullable")}
+                    for col in old_meta.keys() & new_meta.keys()
+                    if old_meta[col].get("nullable") is not None
+                    and new_meta[col].get("nullable") is not None
+                    and old_meta[col].get("nullable") != new_meta[col].get("nullable")
                 }
 
                 diff_parts = []
@@ -738,6 +981,10 @@ class RuleEngine:
                 if altered and detect_types:
                     severity = altered_sev
                     diff_parts.append(f"Type changed: {altered}")
+                if nullability_altered and detect_nullability:
+                    if severity == "WARNING":
+                        severity = nullability_sev
+                    diff_parts.append(f"Nullability changed: {nullability_altered}")
                 if added and detect_added:
                     if strict_mode:
                         severity = "CRITICAL"
@@ -748,9 +995,8 @@ class RuleEngine:
                     continue
 
                 summary = f"Schema drift detected on {ds.name}"
-                description = (
-                    f"Dataset {ds.name} schema updated by job {event.job.name}. "
-                    f"Details: " + "; ".join(diff_parts)
+                description = f"Dataset {ds.name} schema updated by job {event.job.name}. Details: " + "; ".join(
+                    diff_parts
                 )
 
                 alerts.append(
@@ -771,6 +1017,7 @@ class RuleEngine:
                             "added_columns": list(added),
                             "removed_columns": list(removed),
                             "type_changes": altered,
+                            "nullability_changes": nullability_altered,
                             "total_fields": len(fields),
                         },
                         created_at=datetime.now(UTC).isoformat(),
@@ -783,6 +1030,8 @@ class RuleEngine:
         """Rule 2: Detect quality threshold breach in dataQuality / dataQualityAssertions facets."""
         alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-002"):
+            return alerts
+        if not self._event_type_allowed("RF20-RULE-002", event.eventType):
             return alerts
         rule = self._rule("RF20-RULE-002")
         criteria = rule.get("criteria", {})
@@ -807,10 +1056,18 @@ class RuleEngine:
 
         # 1. Run-level dataQuality facet
         run_facets = event.run.facets or {}
-        dq_facet = run_facets.get("dataQuality") or run_facets.get("dataQualityMetrics")
+        metrics_facet_key = criteria.get("metrics_facet_key")
+        if isinstance(metrics_facet_key, str) and metrics_facet_key:
+            dq_facet = run_facets.get(metrics_facet_key) or run_facets.get("dataQualityMetrics")
+        else:
+            dq_facet = run_facets.get("dataQuality") or run_facets.get("dataQualityMetrics")
 
-        if dq_facet:
-            pass_rate = dq_facet.get("passRate") or dq_facet.get("pass_rate")
+        if dq_facet and self._namespace_allowed("RF20-RULE-002", event.job.namespace):
+            # Explicit None checks: a pass rate of 0.0 (total quality failure)
+            # is falsy but MUST still trigger the alert.
+            pass_rate = dq_facet.get("passRate")
+            if pass_rate is None:
+                pass_rate = dq_facet.get("pass_rate")
             suite_name = dq_facet.get("suiteName", "unknown_suite")
             failed_count = dq_facet.get("failedExpectations", 0)
 
@@ -834,11 +1091,18 @@ class RuleEngine:
                 )
 
         # 2. Dataset-level dataQualityAssertions facets
+        facet_key = criteria.get("facet_key")
+        if not isinstance(facet_key, str) or not facet_key:
+            facet_key = "dataQualityAssertions"
         all_datasets = (event.inputs or []) + (event.outputs or [])
         for ds in all_datasets:
             if not ds.facets:
                 continue
-            assertions_facet = ds.facets.get("dataQualityAssertions")
+            if not self._namespace_allowed("RF20-RULE-002", ds.namespace):
+                continue
+            if not self._dataset_allowed("RF20-RULE-002", ds.name):
+                continue
+            assertions_facet = ds.facets.get(facet_key)
             if not assertions_facet:
                 continue
 
@@ -847,7 +1111,8 @@ class RuleEngine:
 
             if failed_assertions:
                 critical_failed = [
-                    a for a in failed_assertions
+                    a
+                    for a in failed_assertions
                     if str((a.get("meta") or {}).get("severity", "")).lower() in critical_sevs
                 ]
                 if critical_failed and fail_on_critical:
@@ -884,6 +1149,10 @@ class RuleEngine:
         alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-003"):
             return alerts
+        if not self._event_type_allowed("RF20-RULE-003", event.eventType):
+            return alerts
+        if not self._namespace_allowed("RF20-RULE-003", event.job.namespace):
+            return alerts
         rule = self._rule("RF20-RULE-003")
         criteria = rule.get("criteria", {})
         if not isinstance(criteria, dict):
@@ -919,8 +1188,7 @@ class RuleEngine:
                 job_name=event.job.name,
                 summary=f"Pipeline job execution failed: {event.job.name}",
                 description=(
-                    f"Job {event.job.name} (runId: {event.run.runId}) "
-                    f"failed with state {event.eventType}. {error_msg}"
+                    f"Job {event.job.name} (runId: {event.run.runId}) failed with state {event.eventType}. {error_msg}"
                 ),
                 details={
                     "job": event.job.name,
@@ -979,50 +1247,81 @@ class RuleEngine:
         return str(sev_map.get(f"{sla_tier}_breach", defaults.get(sla_tier, "WARNING")))
 
     def _check_sla_freshness(self, event: OpenLineageEvent) -> list[AlertItem]:
-        """Rule 4: SLA freshness breach alert."""
+        """Rule 4: SLA freshness breach alert.
+
+        eventTime handling is FAIL-CLOSED: freshness is the whole contract of
+        this rule, so a timestamp we cannot parse cannot prove the SLA was met
+        and is treated as a breach candidate (details carry
+        ``event_time_error``) instead of the legacy fail-open ``lag=0`` that
+        silently swallowed corrupt timestamps. Naive (offset-less) timestamps
+        parse but violate the OpenLineage RFC3339 requirement; they are
+        interpreted as UTC so a missing offset alone never zeroes the lag.
+        """
         alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-004"):
             return alerts
-        if event.eventType not in ("COMPLETE", "CHECK"):
+        if not self._event_type_allowed("RF20-RULE-004", event.eventType, default={"COMPLETE", "CHECK"}):
             return alerts
 
+        event_time_error: str | None = None
+        lag_seconds: float | None = None
         try:
             event_dt = datetime.fromisoformat(event.eventTime.replace("Z", "+00:00"))
-            now_dt = datetime.now(UTC)
-            lag_seconds = (now_dt - event_dt).total_seconds()
-        except Exception:
-            lag_seconds = 0.0
+        except (ValueError, TypeError, AttributeError) as exc:
+            event_time_error = f"unparsable eventTime {event.eventTime!r}: {exc}"
+        else:
+            if event_dt.tzinfo is None:
+                event_dt = event_dt.replace(tzinfo=UTC)
+            lag_seconds = (datetime.now(UTC) - event_dt).total_seconds()
 
         # Check outputs SLA against SLA table
-        for ds in (event.outputs or []):
+        for ds in event.outputs or []:
+            if not self._namespace_allowed("RF20-RULE-004", ds.namespace):
+                continue
+            if not self._dataset_allowed("RF20-RULE-004", ds.name):
+                continue
             max_staleness, sla_tier = self._sla_lookup(ds.name)
             is_stream = sla_tier == "real_time" or ds.name.startswith("stream.")
 
-            if lag_seconds > max_staleness:
-                severity = self._sla_severity(sla_tier, max_staleness, is_stream)
-                alerts.append(
-                    AlertItem(
-                        alert_id=str(uuid.uuid4()),
-                        rule_id="RF20-RULE-004",
-                        rule_name="SLAFreshnessBreachAlert",
-                        severity=severity,
-                        dataset_name=ds.name,
-                        job_name=event.job.name,
-                        summary=f"SLA Freshness breach on {ds.name} (lag: {lag_seconds:.1f}s)",
-                        description=(
-                            f"Dataset {ds.name} produced with lag of {lag_seconds:.1f}s, "
-                            f"exceeding maximum SLA threshold of {max_staleness}s."
-                        ),
-                        details={
-                            "dataset": ds.name,
-                            "job": event.job.name,
-                            "lag_seconds": lag_seconds,
-                            "max_staleness_seconds": max_staleness,
-                            "eventTime": event.eventTime,
-                        },
-                        created_at=datetime.now(UTC).isoformat(),
-                    )
+            lag_known = lag_seconds is not None
+            if not (event_time_error is not None or (lag_known and lag_seconds > max_staleness)):
+                continue
+
+            severity = self._sla_severity(sla_tier, max_staleness, is_stream)
+            if lag_known:
+                summary = f"SLA Freshness breach on {ds.name} (lag: {lag_seconds:.1f}s)"
+                description = (
+                    f"Dataset {ds.name} produced with lag of {lag_seconds:.1f}s, "
+                    f"exceeding maximum SLA threshold of {max_staleness}s."
                 )
+            else:
+                summary = f"SLA Freshness breach on {ds.name} (unparsable eventTime)"
+                description = (
+                    f"Dataset {ds.name} has unparsable eventTime {event.eventTime!r}; "
+                    f"freshness cannot be verified, so the {max_staleness}s SLA is "
+                    f"treated as breached (fail-closed)."
+                )
+            alerts.append(
+                AlertItem(
+                    alert_id=str(uuid.uuid4()),
+                    rule_id="RF20-RULE-004",
+                    rule_name="SLAFreshnessBreachAlert",
+                    severity=severity,
+                    dataset_name=ds.name,
+                    job_name=event.job.name,
+                    summary=summary,
+                    description=description,
+                    details={
+                        "dataset": ds.name,
+                        "job": event.job.name,
+                        "lag_seconds": lag_seconds,
+                        "max_staleness_seconds": max_staleness,
+                        "eventTime": event.eventTime,
+                        "event_time_error": event_time_error,
+                    },
+                    created_at=datetime.now(UTC).isoformat(),
+                )
+            )
 
         return alerts
 
@@ -1050,11 +1349,15 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    # Explicit CORS_ALLOW_ORIGINS -> those origins WITH credentials; no config
+    # -> wildcard WITHOUT credentials (the CORS spec forbids "*" together
+    # with Access-Control-Allow-Credentials: true).
+    allow_origins=CORS_ORIGINS or ["*"],
+    allow_credentials=bool(CORS_ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # -----------------------------------------------------------------------------
 # Endpoints

@@ -35,12 +35,24 @@ def _make_use_case(tmp_path: Path):
 
 def test_window_bucketing(tmp_path: Path):
     events = [
-        {"timestamp": "2026-01-15T12:00:00+00:00", "status": "confirmed", "total_amount": 10.0,
-         "order_date": "2026-01-15"},
-        {"timestamp": "2026-01-15T12:03:00+00:00", "status": "confirmed", "total_amount": 20.0,
-         "order_date": "2026-01-15"},
-        {"timestamp": "2026-01-15T12:07:00+00:00", "status": "confirmed", "total_amount": 40.0,
-         "order_date": "2026-01-15"},
+        {
+            "timestamp": "2026-01-15T12:00:00+00:00",
+            "status": "confirmed",
+            "total_amount": 10.0,
+            "order_date": "2026-01-15",
+        },
+        {
+            "timestamp": "2026-01-15T12:03:00+00:00",
+            "status": "confirmed",
+            "total_amount": 20.0,
+            "order_date": "2026-01-15",
+        },
+        {
+            "timestamp": "2026-01-15T12:07:00+00:00",
+            "status": "confirmed",
+            "total_amount": 40.0,
+            "order_date": "2026-01-15",
+        },
     ]
 
     windows = BusinessAggregator.aggregate_tumbling_window(events, window_size_seconds=300)
@@ -120,14 +132,26 @@ def test_process_stream_two_runs_no_duplicate_windows(tmp_path: Path):
     use_case, broker, storage = _make_use_case(tmp_path)
     topic = "unit.two_runs"
 
-    broker.publish_event(topic, "1", {
-        "timestamp": "2026-01-15T12:01:00+00:00", "status": "confirmed",
-        "total_amount": 50.0, "order_date": "2026-01-15",
-    })
-    broker.publish_event(topic, "2", {
-        "timestamp": "2026-01-15T12:02:00+00:00", "status": "confirmed",
-        "total_amount": 70.0, "order_date": "2026-01-15",
-    })
+    broker.publish_event(
+        topic,
+        "1",
+        {
+            "timestamp": "2026-01-15T12:01:00+00:00",
+            "status": "confirmed",
+            "total_amount": 50.0,
+            "order_date": "2026-01-15",
+        },
+    )
+    broker.publish_event(
+        topic,
+        "2",
+        {
+            "timestamp": "2026-01-15T12:02:00+00:00",
+            "status": "confirmed",
+            "total_amount": 70.0,
+            "order_date": "2026-01-15",
+        },
+    )
 
     first = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
     assert first["status"] == "SUCCESS"
@@ -150,14 +174,26 @@ def test_incremental_batches_share_window_without_fragmentation(tmp_path: Path):
     use_case, broker, storage = _make_use_case(tmp_path)
     topic = "unit.shared_window"
 
-    broker.publish_event(topic, "1", {
-        "timestamp": "2026-01-15T12:01:00+00:00", "status": "confirmed",
-        "total_amount": 50.0, "order_date": "2026-01-15",
-    })
-    broker.publish_event(topic, "2", {
-        "timestamp": "2026-01-15T12:02:00+00:00", "status": "confirmed",
-        "total_amount": 70.0, "order_date": "2026-01-15",
-    })
+    broker.publish_event(
+        topic,
+        "1",
+        {
+            "timestamp": "2026-01-15T12:01:00+00:00",
+            "status": "confirmed",
+            "total_amount": 50.0,
+            "order_date": "2026-01-15",
+        },
+    )
+    broker.publish_event(
+        topic,
+        "2",
+        {
+            "timestamp": "2026-01-15T12:02:00+00:00",
+            "status": "confirmed",
+            "total_amount": 70.0,
+            "order_date": "2026-01-15",
+        },
+    )
 
     first = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
     assert first["status"] == "SUCCESS"
@@ -169,10 +205,16 @@ def test_incremental_batches_share_window_without_fragmentation(tmp_path: Path):
     assert int(rows_first[0]["window_orders"]) == 2
     assert float(rows_first[0]["window_revenue"]) == 120.0
 
-    broker.publish_event(topic, "3", {
-        "timestamp": "2026-01-15T12:03:00+00:00", "status": "confirmed",
-        "total_amount": 30.0, "order_date": "2026-01-15",
-    })
+    broker.publish_event(
+        topic,
+        "3",
+        {
+            "timestamp": "2026-01-15T12:03:00+00:00",
+            "status": "confirmed",
+            "total_amount": 30.0,
+            "order_date": "2026-01-15",
+        },
+    )
 
     second = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)
     assert second["status"] == "SUCCESS"
@@ -192,12 +234,16 @@ def test_process_stream_replay_overwrites(tmp_path: Path):
     topic = "unit.replay_overwrite"
 
     for i in range(4):
-        broker.publish_event(topic, str(i), {
-            "timestamp": f"2026-01-15T12:0{i}:00+00:00",
-            "status": "confirmed" if i % 2 == 0 else "pending",
-            "total_amount": 10.0 * (i + 1),
-            "order_date": "2026-01-15",
-        })
+        broker.publish_event(
+            topic,
+            str(i),
+            {
+                "timestamp": f"2026-01-15T12:0{i}:00+00:00",
+                "status": "confirmed" if i % 2 == 0 else "pending",
+                "total_amount": 10.0 * (i + 1),
+                "order_date": "2026-01-15",
+            },
+        )
 
     first = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=True)
     assert first["status"] == "SUCCESS"
@@ -240,8 +286,14 @@ def test_replay_empty_log_clears_stale_speed_rows(tmp_path: Path):
     # Simulate rows left behind by a previous log generation.
     storage.write_table(
         TARGET_TABLE,
-        [{"window_start": "2026-01-15T12:00:00+00:00", "status": "confirmed",
-          "window_orders": 2, "window_revenue": 120.0}],
+        [
+            {
+                "window_start": "2026-01-15T12:00:00+00:00",
+                "status": "confirmed",
+                "window_orders": 2,
+                "window_revenue": 120.0,
+            }
+        ],
         mode="overwrite",
     )
     assert len(storage.read_table(TARGET_TABLE)) == 1
@@ -298,14 +350,26 @@ def test_write_failure_does_not_advance_cursor(tmp_path: Path):
     use_case = ProcessStreamUseCase(broker=broker, storage=FlakyStorage(real_storage), lineage=lineage)  # type: ignore[arg-type]
     topic = "unit.cursor_after_write"
 
-    broker.publish_event(topic, "1", {
-        "timestamp": "2026-01-15T12:01:00+00:00", "status": "confirmed",
-        "total_amount": 50.0, "order_date": "2026-01-15",
-    })
-    broker.publish_event(topic, "2", {
-        "timestamp": "2026-01-15T12:02:00+00:00", "status": "confirmed",
-        "total_amount": 70.0, "order_date": "2026-01-15",
-    })
+    broker.publish_event(
+        topic,
+        "1",
+        {
+            "timestamp": "2026-01-15T12:01:00+00:00",
+            "status": "confirmed",
+            "total_amount": 50.0,
+            "order_date": "2026-01-15",
+        },
+    )
+    broker.publish_event(
+        topic,
+        "2",
+        {
+            "timestamp": "2026-01-15T12:02:00+00:00",
+            "status": "confirmed",
+            "total_amount": 70.0,
+            "order_date": "2026-01-15",
+        },
+    )
 
     with pytest.raises(RuntimeError, match="simulated speed-table write failure"):
         use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=False)

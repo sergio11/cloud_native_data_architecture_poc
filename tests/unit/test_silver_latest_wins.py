@@ -59,16 +59,16 @@ def test_silver_keeps_latest_snapshot(tmp_path: Path) -> None:
 
 def test_synthetic_source_is_deterministic(monkeypatch) -> None:
     monkeypatch.delenv("PGPASSWORD", raising=False)
-    first = OltpSourceAdapter(seed=42).extract_table("orders", limit=10)
-    second = OltpSourceAdapter(seed=42).extract_table("orders", limit=10)
+    first = OltpSourceAdapter(seed=42).extract_table("orders", limit=10).records
+    second = OltpSourceAdapter(seed=42).extract_table("orders", limit=10).records
     assert first == second
     assert len(first) == 10
 
     # POC_DATA_SEED env override respected.
     monkeypatch.setenv("POC_DATA_SEED", "999")
     monkeypatch.delenv("PGPASSWORD", raising=False)
-    env_a = OltpSourceAdapter().extract_table("orders", limit=10)
-    env_b = OltpSourceAdapter().extract_table("orders", limit=10)
+    env_a = OltpSourceAdapter().extract_table("orders", limit=10).records
+    env_b = OltpSourceAdapter().extract_table("orders", limit=10).records
     assert env_a == env_b
     assert OltpSourceAdapter()._seed == 999
     # Explicit seed overrides env.
@@ -78,8 +78,13 @@ def test_synthetic_source_is_deterministic(monkeypatch) -> None:
 def test_rerun_is_idempotent_and_reflects_same_values(tmp_path: Path) -> None:
     storage = LakehouseStorageAdapter(db_path=str(tmp_path / "lakehouse.db"))
     records = [
-        {"order_date": "2026-09-01", "status": "confirmed", "gross_revenue": 100.0,
-         "total_orders": 1, "average_order_value": 100.0},
+        {
+            "order_date": "2026-09-01",
+            "status": "confirmed",
+            "gross_revenue": 100.0,
+            "total_orders": 1,
+            "average_order_value": 100.0,
+        },
     ]
     assert storage.write_table("gold.sales.daily_metrics", records, mode="append") == 1
     rerun = storage.write_table("gold.sales.daily_metrics", records, mode="append")

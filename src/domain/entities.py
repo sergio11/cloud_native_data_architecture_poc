@@ -7,12 +7,29 @@ Follows GRASP Information Expert and SOLID principles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class ExtractionResult:
+    """Records extracted from an operational source plus their honest origin.
+
+    ``origin`` is the provenance of ``records`` as observed during extraction:
+    ``"postgresql"`` means the rows came from a real query (an empty real table
+    still yields ``records=[]`` with this origin), while ``"synthetic"`` means
+    the source was unavailable and the rows were fabricated by the embedded
+    demo generator. Downstream audit columns and lineage events must report the
+    origin verbatim instead of assuming a live database.
+    """
+
+    records: list[dict[str, Any]]
+    origin: Literal["postgresql", "synthetic"]
 
 
 @dataclass(frozen=True)
 class DailySalesMetrics:
     """Curated business aggregation for the Gold tier."""
+
     order_date: str
     status: str
     gross_revenue: float
@@ -32,6 +49,7 @@ class DailySalesMetrics:
 @dataclass(frozen=True)
 class QualityAssertionResult:
     """Result of evaluating a single data quality expectation."""
+
     rule_name: str
     column: str | None
     success: bool
@@ -43,6 +61,7 @@ class QualityAssertionResult:
 @dataclass(frozen=True)
 class QualityGateEvaluation:
     """Aggregated outcome of a quality gate execution."""
+
     suite_name: str
     table_name: str
     total_assertions: int

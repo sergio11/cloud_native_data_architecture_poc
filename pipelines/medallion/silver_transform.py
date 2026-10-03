@@ -54,12 +54,16 @@ def main() -> None:
             res = container.cleanse_silver.execute(ent, quality_threshold=args.threshold, suite_path=suite_path)
             logger.info(
                 "Silver promotion successful for '%s': %d rows conformed (Quality score: %.2f)",
-                res["target_table"], res["rows_promoted"], res["quality_pass_rate"]
+                res["target_table"],
+                res["rows_promoted"],
+                res["quality_pass_rate"],
             )
         except QualityGateBreachError as exc:
             logger.error(
                 "Promotion to Silver blocked by Quality Gate: %s (pass rate %.2f < threshold %.2f)",
-                exc, exc.pass_rate, exc.threshold,
+                exc,
+                exc.pass_rate,
+                exc.threshold,
             )
             sys.exit(1)
         except Exception as exc:

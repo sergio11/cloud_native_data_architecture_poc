@@ -76,12 +76,14 @@ def enforce_quality_gate(
     if contract_thresholds is not None and quality_threshold is not None:
         logger.info(
             "contract thresholds take precedence over explicit quality_threshold=%.2f for '%s'",
-            quality_threshold, table_name,
+            quality_threshold,
+            table_name,
         )
     effective_threshold = quality_threshold if quality_threshold is not None else DEFAULT_QUALITY_THRESHOLD
     logger.info(
         "Evaluating Quality Gate suite '%s' (threshold=%.2f)...",
-        suite_path, effective_threshold,
+        suite_path,
+        effective_threshold,
     )
     evaluation = quality_engine.evaluate_suite(
         records=records,
@@ -93,7 +95,8 @@ def enforce_quality_gate(
     if not verdict.approved:
         logger.error(
             "Quality gate FAILED for '%s'! %s. Blocking promotion.",
-            table_name, verdict.reason,
+            table_name,
+            verdict.reason,
         )
         # RF-06 owner notification trail: record the FAILED run before raising.
         lineage.emit_job_event(
@@ -106,6 +109,7 @@ def enforce_quality_gate(
             f"Quality gate breached for {table_name} ({verdict.reason})",
             pass_rate=verdict.rate if verdict.rate is not None else evaluation.pass_rate,
             threshold=verdict.required if verdict.required is not None else effective_threshold,
+            evaluation=evaluation,
         )
     logger.info("Quality gate PASSED for '%s' (%s)", table_name, verdict.reason)
     return evaluation.pass_rate

@@ -21,6 +21,7 @@ from src.container import container
 try:
     from rich.console import Console
     from rich.table import Table
+
     has_rich = True
 except ImportError:
     has_rich = False
@@ -33,6 +34,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Unified Serving Layer Query Runner (RF-11)")
     parser.add_argument("--date-gte", default=None, help="Filter order_date greater than or equal to YYYY-MM-DD")
     parser.add_argument("--limit", default=10, type=int, help="Maximum rows to display")
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Exit 0 when the serving query returns no rows (default: exit 1, fail-closed)",
+    )
     args = parser.parse_args()
 
     results = container.query_serving.execute_unified_revenue_query(
@@ -41,12 +47,14 @@ def main() -> None:
     )
 
     if not results:
-        print("No records found in serving layer.")
+        print("No records found in serving layer.", file=sys.stderr)
+        if not args.allow_empty:
+            sys.exit(1)
         return
 
     if has_rich:
         console = Console()
-        table = Table(title="Unified Serving Layer: serving.sales.unified_revenue (Batch + Stream)")
+        table = Table(title="Unified Serving Layer: iceberg.serving.sales_unified_revenue (Batch + Stream)")
         table.add_column("Order Date", style="cyan", justify="center")
         table.add_column("Status", style="magenta")
         table.add_column("Total Orders", style="green", justify="right")
@@ -72,9 +80,11 @@ def main() -> None:
         print(f"{'Order Date':<12} | {'Status':<10} | {'Orders':<8} | {'Revenue':<12} | {'Source Tier':<16}")
         print("-" * 80)
         for r in results:
+            tot_orders = int(r.get("total_orders") or 0)
+            tot_revenue = float(r.get("total_revenue") or 0.0)
             print(
-                f"{r.get('order_date'):<12} | {r.get('status'):<10} | {r.get('total_orders'):<8} | "
-                f"{r.get('total_revenue'):<12.2f} | {r.get('source_tier'):<16}"
+                f"{str(r.get('order_date')):<12} | {str(r.get('status')):<10} | {tot_orders:<8} | "
+                f"{tot_revenue:<12.2f} | {str(r.get('source_tier')):<16}"
             )
         print("-" * 80)
 

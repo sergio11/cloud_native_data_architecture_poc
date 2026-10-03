@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import typing
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -53,9 +54,7 @@ def write_contract_product(
             "description": f"Test data product {name}",
             "classification": "internal",
             "sla": {"freshness": "1h"},
-            "assets": [
-                {"name": f"gold_{name}", "type": "iceberg_table", "path": f"s3a://gold/{name}/"}
-            ],
+            "assets": [{"name": f"gold_{name}", "type": "iceberg_table", "path": f"s3a://gold/{name}/"}],
             "quality": {"suite": "quality/expectations/suite.json"},
             "contract": "./contract.yaml",
         },
@@ -115,12 +114,14 @@ class StubLineage:
         outputs: list[str],
         status: str = "COMPLETE",
     ) -> bool:
-        self.events.append({
-            "job_name": job_name,
-            "inputs": list(inputs),
-            "outputs": list(outputs),
-            "status": status,
-        })
+        self.events.append(
+            {
+                "job_name": job_name,
+                "inputs": list(inputs),
+                "outputs": list(outputs),
+                "status": status,
+            }
+        )
         return True
 
 
@@ -138,19 +139,39 @@ class EmptyContractCatalog:
 def check_lsp(port_method: Callable[..., Any], impl_method: Callable[..., Any]) -> None:
     """Asserts the implementation honours the port contract (Liskov).
 
-    Every port-declared parameter must exist on the implementation (with a
-    default when the port makes it optional), and the implementation must not
-    REQUIRE parameters the port does not declare - otherwise a caller using
-    only the port signature cannot invoke it.
+    Checks, in order:
+
+    1. Every port-declared parameter must exist on the implementation (with a
+       default when the port makes it optional), and the implementation must
+       not REQUIRE parameters the port does not declare - otherwise a caller
+       using only the port signature cannot invoke it.
+    2. When BOTH the port and the implementation declare a default for a
+       parameter, the default VALUES must be equal, so port-level calls like
+       ``execute()`` pick the same behaviour as direct implementation calls.
+    3. The implementation's return annotation must equal the port's (both
+       resolved through ``typing.get_type_hints`` so ``from __future__``
+       string annotations compare as real types).
+
+    Widening allowance (documented): NONE is currently needed - every port
+    pair in ``tests/unit/test_port_conformance.py`` declares identical return
+    types and default values. If a future pair legitimately diverges (e.g. an
+    implementation returning a narrower concrete type), add a targeted
+    allowlist entry HERE with the rationale rather than weakening the check.
     """
     port_params = [p for p in inspect.signature(port_method).parameters.values() if p.name != "self"]
     impl_by_name = {p.name: p for p in inspect.signature(impl_method).parameters.values() if p.name != "self"}
     port_by_name = {p.name: p for p in port_params}
     for name, port_param in port_by_name.items():
         assert name in impl_by_name, f"implementation is missing port-declared parameter '{name}'"
+        impl_param = impl_by_name[name]
         if port_param.default is not inspect.Parameter.empty:
-            assert impl_by_name[name].default is not inspect.Parameter.empty, (
+            assert impl_param.default is not inspect.Parameter.empty, (
                 f"port parameter '{name}' is optional but the implementation requires it"
+            )
+            assert impl_param.default == port_param.default, (
+                f"port parameter '{name}' default {port_param.default!r} differs from "
+                f"implementation default {impl_param.default!r}: a port-level call would "
+                f"behave differently than an implementation-level call"
             )
     position_kinds = {
         inspect.Parameter.POSITIONAL_ONLY,
@@ -159,6 +180,15 @@ def check_lsp(port_method: Callable[..., Any], impl_method: Callable[..., Any]) 
     }
     for name, impl_param in impl_by_name.items():
         if impl_param.kind in position_kinds and impl_param.default is inspect.Parameter.empty:
-            assert name in port_by_name, (
-                f"implementation requires '{name}' which the port contract does not declare"
-            )
+            assert name in port_by_name, f"implementation requires '{name}' which the port contract does not declare"
+    # Return-annotation equality (resolved types, not raw strings). A port
+    # declaring a return type at all obliges the implementation to declare the
+    # same one: callers typed against the port must not receive surprises.
+    port_hints = typing.get_type_hints(port_method)
+    impl_hints = typing.get_type_hints(impl_method)
+    port_return = port_hints.get("return", inspect.Signature.empty)
+    if port_return is not inspect.Signature.empty:
+        impl_return = impl_hints.get("return", inspect.Signature.empty)
+        assert impl_return == port_return, (
+            f"return annotation mismatch: port declares {port_return!r} but implementation declares {impl_return!r}"
+        )

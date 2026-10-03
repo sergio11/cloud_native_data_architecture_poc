@@ -88,9 +88,7 @@ class ValidateContractUseCase(ValidateContractPort):
 
         product_paths = {_norm_path(p) for p, _ in products}
         contract_paths = {_norm_path(p) for p, _ in contracts}
-        schemas_by_dir = {
-            _norm_path(_parent_dir(p)): (p, data) for p, data in schemas
-        }
+        schemas_by_dir = {_norm_path(_parent_dir(p)): (p, data) for p, data in schemas}
 
         # 1. Validate DataProduct manifests (structure + governance JSON schema)
         for path, data in products:
@@ -110,9 +108,7 @@ class ValidateContractUseCase(ValidateContractPort):
         # 2-4. Validate DataContracts: structure, compatibility mode,
         #      governance JSON schema, and BACKWARD evolution vs schema.json.
         for path, data in contracts:
-            errs = self._validate_contract(
-                data, path, product_paths, schemas_by_dir
-            )
+            errs = self._validate_contract(data, path, product_paths, schemas_by_dir)
             self._record(results, errs, path, kind="DataContract")
             if not errs:
                 meta = data.get("metadata") or {}
@@ -163,11 +159,7 @@ class ValidateContractUseCase(ValidateContractPort):
         if not contract_ref and sibling not in contract_paths:
             errs.append("Missing spec.contract reference or sibling contract.yaml")
         else:
-            target = (
-                _norm_path(str(PurePath(parent, str(contract_ref))))
-                if contract_ref
-                else sibling
-            )
+            target = _norm_path(str(PurePath(parent, str(contract_ref)))) if contract_ref else sibling
             if target not in contract_paths:
                 errs.append(f"Referenced contract.yaml missing or unreadable: {target}")
 
@@ -225,9 +217,7 @@ class ValidateContractUseCase(ValidateContractPort):
         paired = schemas_by_dir.get(_norm_path(_parent_dir(path)))
         if paired is None:
             expected = str(PurePath(_parent_dir(path), "schema.json"))
-            return [
-                f"Missing sibling schema.json for backward compatibility check: {expected}"
-            ]
+            return [f"Missing sibling schema.json for backward compatibility check: {expected}"]
 
         schema_path, schema_data = paired
         prev_fields = extract_schema_fields(schema_data)
@@ -239,10 +229,7 @@ class ValidateContractUseCase(ValidateContractPort):
             prev_fields=prev_fields,
             new_fields=new_fields,
         )
-        return [
-            f"Backward compatibility violation against {schema_path}: {message}"
-            for message in violations
-        ]
+        return [f"Backward compatibility violation against {schema_path}: {message}" for message in violations]
 
     # ------------------------------------------------------------------
     # Governance JSON schema validation (optional dependency)
@@ -280,7 +267,9 @@ class ValidateContractUseCase(ValidateContractPort):
             # it as a validation error instead of silently passing (RF-15).
             logger.error(
                 "Governance JSON-schema '%s' is invalid; failing closed for %s: %s",
-                schema_filename, file_path, exc,
+                schema_filename,
+                file_path,
+                exc,
             )
             return [f"Governance JSON-schema '{schema_filename}' is invalid: {exc}"]
         except Exception as exc:

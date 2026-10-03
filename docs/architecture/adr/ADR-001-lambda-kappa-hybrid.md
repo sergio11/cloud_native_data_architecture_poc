@@ -73,4 +73,4 @@ We select a **Hybrid Lambda + Kappa Architecture** that synthesizes the strength
 
 ## Compliance & Verification
 - **Functional Requirements**: Satisfies RF-03, RF-04, RF-10, and RF-11.
-- **Verification**: Verified via `pipelines/serving/unified_view.sql` and the local end-to-end flow in `scripts/demo.sh` (pure-Python drivers + `pytest`; K8s Spark/Flink engines are a deployment target, not the executor).
+- **Verification**: Verified **locally** by the anti-join query in `src/use_cases/query_serving.py` (exercised by `tests/unit/test_query_serving.py` and friends) and by the end-to-end `rake demo` flow (pure-Python drivers + `pytest`). `pipelines/serving/unified_view.sql` is the **Trino target expression of the same semantics and is not executed anywhere in the local repo** (the K8s `trino-views-init-job` runs `CREATE SCHEMA` only); K8s Spark/Flink engines are a deployment target, not the executor.

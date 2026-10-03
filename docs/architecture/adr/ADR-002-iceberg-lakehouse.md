@@ -27,7 +27,7 @@ We select **Apache Iceberg (v2 specification)** as the authoritative Lakehouse o
    - Enforces column-level statistics (min/max bounds, null counts) within metadata files, enabling Trino to skip non-matching files without opening Parquet footers.
 2. **Apache Polaris REST Catalog**:
    - An open-source, multi-engine catalog implementing the standard Iceberg REST OpenAPI specification.
-    - Serves as the single source of truth for namespace hierarchies (`sales`, `marketing`, `finance`, `stream`) and table commit points.
+   - Serves as the single source of truth for namespace hierarchies (`sales`, `marketing`, `finance` — registered by `pipelines/serving/catalog_registration.py`; `stream`/`gold` are Trino **catalog aliases of the same Iceberg catalog**, not Polaris namespaces) and table commit points.
    - Eliminates legacy Hive Metastore / Thrift dependencies, running as a lightweight container consuming ~512 MB RAM.
    - Allows Spark, Flink, and Trino to use an identical catalog interface (`type: rest`, URI `http://polaris:8181`).
 3. **MinIO Object Storage**:
@@ -74,4 +74,4 @@ We select **Apache Iceberg (v2 specification)** as the authoritative Lakehouse o
 
 ## Compliance & Verification
 - **Functional Requirements**: Satisfies RF-05, RF-06, RF-07, RF-08, and RF-09.
-- **Verification**: Verified via `pipelines/serving/catalog_registration.py` and Trino snapshot queries (`SELECT * FROM "gold.sales.daily_metrics$snapshots"`).
+- **Verification**: **K8s profile only** for the external pieces: `pipelines/serving/catalog_registration.py` registers namespaces `sales`, `marketing`, `finance` in Polaris and publishes Marquez datasets, but it needs a live `POLARIS_URL`/`POLARIS_TOKEN`/`MARQUEZ_URL` (fail-closed exit `1` otherwise) and is only unit-tested here with mocked clients (`tests/unit/test_catalog_manifest.py`); Trino snapshot queries (`SELECT * FROM "gold.sales.daily_metrics$snapshots"`) likewise need Trino + Iceberg. **Locally** the equivalent guarantees are covered by the SQLite lakehouse implementation (`data/lakehouse.db`, `_lakehouse_snapshots`, `_row_version` time travel) and the RF-07/RF-08 test suites.

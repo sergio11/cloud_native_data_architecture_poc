@@ -41,10 +41,7 @@ def test_append_idempotent(storage: LakehouseStorageAdapter) -> None:
         for column in INTERNAL_COLUMNS:
             assert column not in row
 
-    rerun = [
-        {**r, "_batch_id": "batch-2", "_ingested_at": "2026-01-01T00:00:00+00:00"}
-        for r in records
-    ]
+    rerun = [{**r, "_batch_id": "batch-2", "_ingested_at": "2026-01-01T00:00:00+00:00"} for r in records]
     assert storage.write_table("bronze.demo.items", rerun, mode="append") == 0
 
     rows = storage.read_table("bronze.demo.items")
@@ -136,9 +133,7 @@ def test_concurrent_writes_produce_unique_sequential_versions(tmp_path: Path) ->
         try:
             adapter = LakehouseStorageAdapter(db_path=db_path)
             for i in range(5):
-                adapter.write_table(
-                    "silver.demo.concurrent", [{"w": worker_id, "i": i}], mode="append"
-                )
+                adapter.write_table("silver.demo.concurrent", [{"w": worker_id, "i": i}], mode="append")
         except BaseException as exc:
             errors.append(exc)
 
@@ -155,12 +150,8 @@ def test_concurrent_writes_produce_unique_sequential_versions(tmp_path: Path) ->
 
 
 def test_append_after_overwrite_time_travel(storage: LakehouseStorageAdapter) -> None:
-    assert storage.write_table(
-        "silver.demo.orders", [{"id": 1}, {"id": 2}, {"id": 3}], mode="append"
-    ) == 3
-    assert storage.write_table(
-        "silver.demo.orders", [{"id": 1}, {"id": 2}], mode="overwrite"
-    ) == 2
+    assert storage.write_table("silver.demo.orders", [{"id": 1}, {"id": 2}, {"id": 3}], mode="append") == 3
+    assert storage.write_table("silver.demo.orders", [{"id": 1}, {"id": 2}], mode="overwrite") == 2
     assert storage.write_table("silver.demo.orders", [{"id": 9}], mode="append") == 1
 
     versions = storage.list_versions("silver.demo.orders")
@@ -170,9 +161,7 @@ def test_append_after_overwrite_time_travel(storage: LakehouseStorageAdapter) ->
     assert versions[-1]["row_count"] == 1
 
     assert [row["id"] for row in storage.read_table("silver.demo.orders")] == ["1", "2", "9"]
-    assert [
-        row["id"] for row in storage.read_table("silver.demo.orders", version=latest - 1)
-    ] == ["1", "2"]
+    assert [row["id"] for row in storage.read_table("silver.demo.orders", version=latest - 1)] == ["1", "2"]
     assert [row["id"] for row in storage.read_table("silver.demo.orders", version=1)] == [
         "1",
         "2",
@@ -182,9 +171,7 @@ def test_append_after_overwrite_time_travel(storage: LakehouseStorageAdapter) ->
 
 def test_schema_evolution(storage: LakehouseStorageAdapter) -> None:
     assert storage.write_table("bronze.demo.wide", [{"id": 1, "name": "a"}]) == 1
-    assert (
-        storage.write_table("bronze.demo.wide", [{"id": 2, "name": "b", "extra": "x"}]) == 1
-    )
+    assert storage.write_table("bronze.demo.wide", [{"id": 2, "name": "b", "extra": "x"}]) == 1
 
     rows = storage.read_table("bronze.demo.wide")
     assert len(rows) == 2
@@ -199,7 +186,7 @@ def test_legacy_table_compatibility(tmp_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute('CREATE TABLE "legacy_demo" ("id" TEXT, "name" TEXT, _snapshot_time TEXT);')
     conn.execute(
-        "INSERT INTO \"legacy_demo\" (\"id\", \"name\", _snapshot_time) "
+        'INSERT INTO "legacy_demo" ("id", "name", _snapshot_time) '
         "VALUES ('1', 'alpha', '2024-01-01T00:00:00+00:00');"
     )
     conn.commit()

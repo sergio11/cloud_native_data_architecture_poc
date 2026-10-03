@@ -112,9 +112,7 @@ def test_rf06_null_breach_blocks_silver_and_alerts_via_lineage(world, tmp_path: 
     QualityGateBreachError, Silver stays untouched and a FAIL lineage event
     (the owner alert trail) is appended to the audit file."""
     suite_path = _copy_suite(tmp_path, world.orders_suite, "silver_orders_suite.json")
-    world.storage.write_table(
-        "bronze.sales.orders", _bronze_orders_with_null_status(), mode="append"
-    )
+    world.storage.write_table("bronze.sales.orders", _bronze_orders_with_null_status(), mode="append")
 
     with pytest.raises(QualityGateBreachError) as exc_info:
         world.cleanse_silver.execute("orders", quality_threshold=0.95, suite_path=suite_path)
@@ -158,9 +156,7 @@ def test_rf06_clean_rows_pass_gate_and_reach_silver(world, tmp_path: Path) -> No
     assert "_ingested_at" not in silver_rows[0]
 
     complete = [
-        e
-        for e in world.lineage_events()
-        if e["job"]["name"] == "silver_clean_orders" and e["eventType"] == "COMPLETE"
+        e for e in world.lineage_events() if e["job"]["name"] == "silver_clean_orders" and e["eventType"] == "COMPLETE"
     ]
     assert len(complete) == 1
     assert [i["name"] for i in complete[0]["inputs"]] == ["bronze.sales.orders"]
@@ -178,18 +174,43 @@ def test_rf07_time_travel_returns_previous_gold_version_unchanged(world) -> None
     list_versions() reports both snapshots with the right row counts."""
     storage = world.storage
     version_1 = [
-        {"order_date": "2026-09-20", "status": "confirmed", "total_orders": 5,
-         "gross_revenue": 1000.0, "average_order_value": 200.0},
-        {"order_date": "2026-09-21", "status": "shipped", "total_orders": 3,
-         "gross_revenue": 450.0, "average_order_value": 150.0},
-        {"order_date": "2026-09-22", "status": "pending", "total_orders": 2,
-         "gross_revenue": 80.0, "average_order_value": 40.0},
+        {
+            "order_date": "2026-09-20",
+            "status": "confirmed",
+            "total_orders": 5,
+            "gross_revenue": 1000.0,
+            "average_order_value": 200.0,
+        },
+        {
+            "order_date": "2026-09-21",
+            "status": "shipped",
+            "total_orders": 3,
+            "gross_revenue": 450.0,
+            "average_order_value": 150.0,
+        },
+        {
+            "order_date": "2026-09-22",
+            "status": "pending",
+            "total_orders": 2,
+            "gross_revenue": 80.0,
+            "average_order_value": 40.0,
+        },
     ]
     version_2 = [
-        {"order_date": "2026-09-23", "status": "confirmed", "total_orders": 9,
-         "gross_revenue": 2000.0, "average_order_value": 222.22},
-        {"order_date": "2026-09-24", "status": "cancelled", "total_orders": 1,
-         "gross_revenue": 25.0, "average_order_value": 25.0},
+        {
+            "order_date": "2026-09-23",
+            "status": "confirmed",
+            "total_orders": 9,
+            "gross_revenue": 2000.0,
+            "average_order_value": 222.22,
+        },
+        {
+            "order_date": "2026-09-24",
+            "status": "cancelled",
+            "total_orders": 1,
+            "gross_revenue": 25.0,
+            "average_order_value": 25.0,
+        },
     ]
 
     assert storage.write_table(GOLD_METRICS, version_1, mode="append") == 3
@@ -269,16 +290,12 @@ def test_rf10_replay_is_deterministic_and_ignores_consumer_cursor(world) -> None
         world.broker.publish_event(STREAM_TOPIC, str(index), event)
 
     # Incremental mode consumes everything and advances the cursor.
-    incremental = world.process_stream.execute(
-        topic=STREAM_TOPIC, target_table=STREAM_TARGET, replay=False
-    )
+    incremental = world.process_stream.execute(topic=STREAM_TOPIC, target_table=STREAM_TARGET, replay=False)
     assert incremental["status"] == "SUCCESS"
     assert incremental["events_consumed"] == 3
     assert len(world.storage.read_table(STREAM_TARGET)) == 2
 
-    first_replay = world.process_stream.execute(
-        topic=STREAM_TOPIC, target_table=STREAM_TARGET, replay=True
-    )
+    first_replay = world.process_stream.execute(topic=STREAM_TOPIC, target_table=STREAM_TARGET, replay=True)
     assert first_replay["status"] == "SUCCESS"
     assert first_replay["mode"] == "replay_full"
     # Cursor ignored: already-consumed events are reprocessed from offset 0.
@@ -286,9 +303,7 @@ def test_rf10_replay_is_deterministic_and_ignores_consumer_cursor(world) -> None
     snapshot = sorted(world.storage.read_table(STREAM_TARGET), key=_window_sort_key)
     assert len(snapshot) == 2
 
-    second_replay = world.process_stream.execute(
-        topic=STREAM_TOPIC, target_table=STREAM_TARGET, replay=True
-    )
+    second_replay = world.process_stream.execute(topic=STREAM_TOPIC, target_table=STREAM_TARGET, replay=True)
     assert second_replay["status"] == "SUCCESS"
     assert second_replay["events_consumed"] == 3
     second_snapshot = sorted(world.storage.read_table(STREAM_TARGET), key=_window_sort_key)
@@ -318,23 +333,29 @@ def test_rf11_batch_wins_and_stream_fills_gaps_in_single_query(world) -> None:
         }
     ]
     stream_rows = [
-        {"order_date": "2026-09-25", "status": "confirmed", "window_orders": 3,
-         "window_revenue": 600.0, "avg_order_value": 200.0},
-        {"order_date": "2026-09-26", "status": "confirmed", "window_orders": 2,
-         "window_revenue": 300.0, "avg_order_value": 150.0},
+        {
+            "order_date": "2026-09-25",
+            "status": "confirmed",
+            "window_orders": 3,
+            "window_revenue": 600.0,
+            "avg_order_value": 200.0,
+        },
+        {
+            "order_date": "2026-09-26",
+            "status": "confirmed",
+            "window_orders": 2,
+            "window_revenue": 300.0,
+            "avg_order_value": 150.0,
+        },
     ]
     assert world.storage.write_table(GOLD_METRICS, gold_rows, mode="append") == 1
     assert world.storage.write_table(STREAM_TARGET, stream_rows, mode="append") == 2
 
     rows = world.query_serving.execute_unified_revenue_query()
 
-    assert isinstance(rows, list) and rows == sorted(
-        rows, key=lambda r: (r["order_date"], r["status"]), reverse=True
-    )
+    assert isinstance(rows, list) and rows == sorted(rows, key=lambda r: (r["order_date"], r["status"]), reverse=True)
 
-    d1_confirmed = [
-        r for r in rows if r["order_date"] == "2026-09-25" and r["status"] == "confirmed"
-    ]
+    d1_confirmed = [r for r in rows if r["order_date"] == "2026-09-25" and r["status"] == "confirmed"]
     assert len(d1_confirmed) == 1  # exactly once - the batch value wins
     batch = d1_confirmed[0]
     assert batch["source_tier"] == "batch_historical"
@@ -411,11 +432,14 @@ def test_rf19_lineage_records_connected_bronze_to_gold_chain(world) -> None:
         result = world.cleanse_silver.execute(entity, quality_threshold=0.95, suite_path=suite)
         assert result["status"] == "SUCCESS"
 
-    assert world.aggregate_gold.execute(
-        "all",
-        daily_metrics_suite=world.gold_daily_metrics_suite,
-        customers_suite=world.gold_customers_suite,
-    )["status"] == "SUCCESS"
+    assert (
+        world.aggregate_gold.execute(
+            "all",
+            daily_metrics_suite=world.gold_daily_metrics_suite,
+            customers_suite=world.gold_customers_suite,
+        )["status"]
+        == "SUCCESS"
+    )
 
     events = world.lineage_events()
     job_names = [e["job"]["name"] for e in events]
@@ -447,7 +471,9 @@ def test_rf19_lineage_records_connected_bronze_to_gold_chain(world) -> None:
     assert _io(events[5]) == (["silver.sales.customers"], ["gold.sales.customers"])
 
     # Bronze jobs come from the source, silver from bronze, gold from silver.
-    assert _io(events[0])[0] == ["postgresql.public.orders"]
-    assert _io(events[1])[0] == ["postgresql.public.customers"]
+    # The hermetic source serves fixture rows (origin="synthetic"), so Bronze
+    # provenance must honestly read synthetic.local.* rather than postgresql.*.
+    assert _io(events[0])[0] == ["synthetic.local.orders"]
+    assert _io(events[1])[0] == ["synthetic.local.customers"]
     assert events[0]["eventTime"] <= events[2]["eventTime"] <= events[4]["eventTime"]
     assert events[1]["eventTime"] <= events[3]["eventTime"] <= events[5]["eventTime"]

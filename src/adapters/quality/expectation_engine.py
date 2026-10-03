@@ -31,8 +31,8 @@ from typing import Any
 
 from src.domain.entities import QualityAssertionResult, QualityGateEvaluation
 from src.domain.exceptions import SuiteNotFoundError
-from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD
-from src.ports.outbound import FAIL_CLOSED_RULE, QualityEnginePort
+from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD, FAIL_CLOSED_RULE
+from src.ports.outbound import QualityEnginePort
 
 logger = logging.getLogger("adapter.quality.engine")
 
@@ -102,14 +102,16 @@ class ExpectationEngineAdapter(QualityEnginePort):
                 pass_rate=0.0,
                 threshold=threshold,
                 passed=False,
-                failures=[QualityAssertionResult(
-                    rule_name=FAIL_CLOSED_RULE,
-                    column=None,
-                    success=False,
-                    observed_value=f"{len(records)} records, {total_assertions} expectations",
-                    expected_value={"min_records": 1, "min_expectations": 1},
-                    details=reason,
-                )],
+                failures=[
+                    QualityAssertionResult(
+                        rule_name=FAIL_CLOSED_RULE,
+                        column=None,
+                        success=False,
+                        observed_value=f"{len(records)} records, {total_assertions} expectations",
+                        expected_value={"min_records": 1, "min_expectations": 1},
+                        details=reason,
+                    )
+                ],
             )
 
         passed_count = 0
@@ -147,10 +149,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
                     f"the quality engine cannot verify '{exp_type}'; unsupported expectations "
                     "are recorded as failures and block approval (fail-closed, RF-06)"
                 )
-                logger.error(
-                    "Unsupported expectation type '%s' in suite '%s'; failing closed.",
-                    exp_type, suite_name
-                )
+                logger.error("Unsupported expectation type '%s' in suite '%s'; failing closed.", exp_type, suite_name)
             else:
                 success, observed, details, col = handler(records, kwargs, mostly, col, col_key)
 
@@ -163,14 +162,16 @@ class ExpectationEngineAdapter(QualityEnginePort):
             if success:
                 passed_count += 1
             else:
-                failures.append(QualityAssertionResult(
-                    rule_name=exp_type or "unknown_expectation",
-                    column=col,
-                    success=False,
-                    observed_value=observed,
-                    expected_value=kwargs,
-                    details=details,
-                ))
+                failures.append(
+                    QualityAssertionResult(
+                        rule_name=exp_type or "unknown_expectation",
+                        column=col,
+                        success=False,
+                        observed_value=observed,
+                        expected_value=kwargs,
+                        details=details,
+                    )
+                )
 
         pass_rate = round(passed_count / total_assertions, 4)
         # Threshold governs the verdict, but fail-closed conditions (unsupported
@@ -204,10 +205,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
         nulls = sum(1 for r in records if r.get(col_key) is None or str(r.get(col_key)).strip() == "")
         success = (nulls / len(records)) <= (1.0 - mostly)
         observed = f"{nulls} nulls ({nulls / len(records):.1%})"
-        details = (
-            f"mostly={mostly}: null/blank fraction must be <= {1.0 - mostly:.2f} "
-            "(nulls counted over all rows)"
-        )
+        details = f"mostly={mostly}: null/blank fraction must be <= {1.0 - mostly:.2f} (nulls counted over all rows)"
         return success, observed, details, col
 
     def _eval_unique(
@@ -304,9 +302,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
         min_rows = kwargs.get("min_value")
         max_rows = kwargs.get("max_value")
         count = len(records)
-        success = (min_rows is None or count >= min_rows) and (
-            max_rows is None or count <= max_rows
-        )
+        success = (min_rows is None or count >= min_rows) and (max_rows is None or count <= max_rows)
         observed = f"{count} rows (expected between {min_rows} and {max_rows})"
         details = "row count bounds are inclusive; None means unbounded"
         return success, observed, details, None

@@ -9,6 +9,13 @@
 
 require 'rake'
 
+# Runs a preflight probe, aborting with an actionable message when it fails.
+def preflight_require!(cmd, name, remedy)
+  sh cmd
+rescue StandardError
+  abort "\e[31mPre-flight failed: #{name} check did not run: #{cmd}\e[0m\n\e[33m#{remedy}\e[0m"
+end
+
 desc 'Default task: Run full end-to-end automated demo (RF-24)'
 task default: :demo
 
@@ -35,14 +42,19 @@ end
 desc 'Verify system pre-flight dependencies and Python environment'
 task :preflight do
   puts "\n\e[33m[Step 1/8] Pre-flight Environment Checks...\e[0m"
-  sh 'python --version'
-  puts "\e[32mPython runtime verified.\e[0m"
+  preflight_require!('python --version', 'Python',
+                     'Install Python 3.11+ and make sure `python` is on PATH.')
+  preflight_require!('rake --version', 'Rake',
+                     'Install Rake (gem install rake) and make sure `rake` is on PATH.')
+  preflight_require!('python -m pytest --version', 'pytest',
+                     'Install the dev toolchain: pip install pytest pytest-cov (see pyproject [project.optional-dependencies].dev).')
+  puts "\e[32mPython runtime, Rake and pytest verified.\e[0m"
 end
 
 desc 'Run all automated tests (unit + integration)'
 task :test do
   puts "\n\e[33m[Step 8/8] Executing Automated Test Suite...\e[0m"
-  sh 'python -m pytest tests --cov=src --cov-branch --cov-fail-under=70 -q'
+  sh 'python -m pytest tests --cov=src --cov-branch --cov-fail-under=85 -q'
   puts "\e[32mAll test suites passed.\e[0m"
 end
 
@@ -59,7 +71,7 @@ namespace :test do
 
   desc 'Run unit tests with test coverage report'
   task :coverage do
-    sh 'python -m pytest tests --cov=src --cov-report=term-missing'
+    sh 'python -m pytest tests --cov=src --cov-branch --cov-config=pyproject.toml --cov-report=term-missing'
   end
 end
 
@@ -70,10 +82,25 @@ task :lint do
   puts "\e[32mRuff: all checks passed.\e[0m"
 end
 
+desc 'Format the codebase with ruff (same directories as lint, writes in place)'
+task :format do
+  puts "\n\e[33m[Quality] Running ruff format...\e[0m"
+  sh 'ruff format src tests pipelines governance quality data-generator lineage'
+  puts "\e[32mRuff format: done.\e[0m"
+end
+
+namespace :format do
+  desc 'Verify formatting without writing (CI gate: rake format:check)'
+  task :check do
+    sh 'ruff format --check src tests pipelines governance quality data-generator lineage'
+    puts "\e[32mRuff format: all files formatted.\e[0m"
+  end
+end
+
 desc 'Type-check the hexagonal core with mypy'
 task :typecheck do
   puts "\n\e[33m[Quality] Running mypy...\e[0m"
-  sh 'python -m mypy src'
+  sh 'python -m mypy'
   puts "\e[32mMypy: no errors.\e[0m"
 end
 
@@ -143,14 +170,15 @@ namespace :quality do
     suite = args[:suite] || 'quality/expectations/silver_orders_suite.json'
     table = args[:table] || 'silver.sales.orders'
     thresh = args[:threshold] || '0.95'
-    sh "python quality/gates/run_quality_gate.py --suite #{suite} --table #{table} --threshold #{thresh}"
+    sh 'python', 'quality/gates/run_quality_gate.py', '--suite', suite, '--table', table, '--threshold', thresh
   end
 end
 
 desc 'Clean local database caches and temporary files'
 task :clean do
   puts 'Cleaning local databases, cache files, and bytecode...'
-  FileList['data/*.db', 'data/*.jsonl', '**/*.pyc', '**/.pytest_cache', '**/__pycache__'].each do |f|
+  FileList['data/*.db', 'data/*.jsonl', 'lineage_events.db', '.coverage', '.coverage.*',
+           '**/*.pyc', '**/.pytest_cache', '**/__pycache__'].each do |f|
     rm_rf f
     puts "Removed #{f}"
   end

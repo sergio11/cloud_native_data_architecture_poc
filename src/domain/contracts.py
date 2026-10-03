@@ -265,8 +265,7 @@ def validate_compatibility_mode(contract_data: dict[str, Any]) -> tuple[bool, li
         ]
     if mode not in SUPPORTED_COMPATIBILITY_MODES:
         return False, [
-            f"Unsupported compatibility mode '{mode}'; "
-            f"supported modes: {', '.join(SUPPORTED_COMPATIBILITY_MODES)}"
+            f"Unsupported compatibility mode '{mode}'; supported modes: {', '.join(SUPPORTED_COMPATIBILITY_MODES)}"
         ]
     return True, []
 
@@ -296,8 +295,7 @@ def extract_quality_thresholds(contract_data: dict[str, Any]) -> dict[str, float
         return None
     if not isinstance(thresholds_raw, dict):
         raise ValueError(
-            f"Invalid contract quality thresholds: expected a mapping of dimension to rate, "
-            f"got {thresholds_raw!r}"
+            f"Invalid contract quality thresholds: expected a mapping of dimension to rate, got {thresholds_raw!r}"
         )
     extracted: dict[str, float] = {}
     for dimension in ("completeness", "uniqueness", "validity"):
@@ -306,14 +304,12 @@ def extract_quality_thresholds(contract_data: dict[str, Any]) -> dict[str, float
         value = thresholds_raw[dimension]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(
-                f"Invalid quality threshold for dimension '{dimension}': "
-                f"expected a number in [0, 1], got {value!r}"
+                f"Invalid quality threshold for dimension '{dimension}': expected a number in [0, 1], got {value!r}"
             )
         rate = float(value)
         if not 0.0 <= rate <= 1.0:
             raise ValueError(
-                f"Invalid quality threshold for dimension '{dimension}': "
-                f"expected a number in [0, 1], got {value!r}"
+                f"Invalid quality threshold for dimension '{dimension}': expected a number in [0, 1], got {value!r}"
             )
         extracted[dimension] = rate
     return extracted or None

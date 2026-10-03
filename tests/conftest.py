@@ -25,9 +25,7 @@ def _hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keeps every test offline and CWD-independent (strictest variant)."""
 
     def _unreachable_post(*args: Any, **kwargs: Any) -> Any:
-        raise requests.exceptions.ConnectionError(
-            "network disabled: tests must be hermetic"
-        )
+        raise requests.exceptions.ConnectionError("network disabled: tests must be hermetic")
 
     monkeypatch.setattr(marquez_lineage.requests, "post", _unreachable_post)
     monkeypatch.delenv("TRINO_HOST", raising=False)

@@ -164,6 +164,11 @@ class RunQualityGatePort(Protocol):
         When ``records`` is provided they are evaluated as-is (file-input
         scenarios); otherwise the use case loads the table from storage.
 
+        Threshold precedence mirrors the Silver/Gold promotion gate: the
+        thresholds declared by the contract governing the table's entity take
+        precedence per dimension, and ``threshold`` applies only when no such
+        contract declares any (fallback).
+
         Fail-closed (RF-06): a failing verdict raises
         ``QualityGateBreachError`` carrying the evaluation instead of
         returning it, so programmatic callers cannot ignore a breach; only

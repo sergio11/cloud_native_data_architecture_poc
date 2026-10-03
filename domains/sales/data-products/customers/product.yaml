@@ -17,19 +17,19 @@ spec:
   assets:
     - name: gold_customers
       type: iceberg_table
-      path: "s3a://gold/sales/customers/"
+      path: "s3://datalake/warehouse/gold/sales/customers"
       format: parquet
       description: "Pseudonymized customer master dimension (PII email hashed, names masked)"
       access_tier: internal
     - name: silver_customers
       type: iceberg_table
-      path: "s3a://silver/sales/customers/"
+      path: "s3://datalake/warehouse/silver/sales/customers"
       format: parquet
       description: "Cleaned and validated customer records"
       access_tier: restricted
     - name: bronze_customers
       type: iceberg_table
-      path: "s3a://bronze/sales/customers/"
+      path: "s3://datalake/warehouse/bronze/sales/customers"
       format: parquet
       description: "Raw customer table extracted from OLTP"
       access_tier: restricted

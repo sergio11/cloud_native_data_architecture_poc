@@ -1,7 +1,7 @@
 """
 Modern Data Architecture POC - Outbound (Driven) Ports.
 Defines interfaces that the application core requires from external infrastructure
-(Databases, S3/Iceberg Lakehouse, Kafka broker, OpenLineage, Quality Engine,
+(Databases, Lakehouse storage, event broker, lineage publisher, Quality Engine,
 SQL serving engine, Data Product catalog).
 Follows Liskov Substitution Principle (LSP) and Dependency Inversion Principle (DIP).
 """
@@ -10,21 +10,22 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from src.domain.entities import QualityGateEvaluation
+from src.domain.entities import ExtractionResult, QualityGateEvaluation
 from src.domain.quality_gate import DEFAULT_QUALITY_THRESHOLD
-
-#: Rule name the quality engine assigns to the fail-closed "no records /
-#: no assertions to evaluate" failure (RF-06). Part of the
-#: ``QualityEnginePort`` contract so drivers can recognise the empty-dataset
-#: condition without importing a concrete adapter.
-FAIL_CLOSED_RULE = "fail_closed"
 
 
 class OltpSourcePort(Protocol):
     """Port for extracting operational relational tables."""
 
-    def extract_table(self, table_name: str, limit: int | None = None) -> list[dict[str, Any]]:
-        """Reads snapshot records from source OLTP database."""
+    def extract_table(self, table_name: str, limit: int | None = None) -> ExtractionResult:
+        """Reads snapshot records from source OLTP database.
+
+        The returned ``origin`` must describe where the records actually came
+        from: a successful query (including one returning zero rows) reports
+        ``"postgresql"``, while rows fabricated by a fallback generator report
+        ``"synthetic"``. Callers stamp provenance/lineage from ``origin`` and
+        must never assume a live database.
+        """
         ...
 
 
@@ -60,6 +61,12 @@ class LakehouseTableReader(Protocol):
 
         ``version`` reads the table state AT that snapshot version (time travel,
         RF-07); ``version=None`` reads the current state. ``limit=None`` reads all rows.
+
+        Ordering guarantee: rows come back in INSERTION ORDER (oldest write
+        first, i.e. ascending rowid/monotonic sequence), independent of the
+        ``version`` filter, and ``limit`` is applied AFTER that ordering. Callers
+        whose logic depends on "later row wins" (e.g. Silver latest-snapshot
+        deduplication) may therefore rely on this order without re-sorting.
         """
         ...
 
@@ -84,12 +91,10 @@ class LakehouseTableInspector(Protocol):
         ...
 
 
-class LakehouseStoragePort(
-    LakehouseTableReader, LakehouseTableWriter, LakehouseTableInspector, Protocol
-):
+class LakehouseStoragePort(LakehouseTableReader, LakehouseTableWriter, LakehouseTableInspector, Protocol):
     """Composite port: the full lakehouse capability (Bronze, Silver, Gold, Speed).
 
-    Isolates all Iceberg/SQLite persistence concerns (RF-01 idempotent landing,
+    Isolates all persistence concerns (RF-01 idempotent landing,
     RF-07 snapshot time travel) behind a storage-agnostic interface so the
     application core never depends on a concrete lakehouse engine. Clients
     depend on the narrow ports above; only the composite is implemented.
@@ -132,7 +137,7 @@ class EventBrokerPort(Protocol):
 
 
 class LineagePublisherPort(Protocol):
-    """Port for emitting OpenLineage metadata to Marquez or active metadata webhooks."""
+    """Port for emitting OpenLineage run events to the configured metadata backend."""
 
     def emit_job_event(
         self,
@@ -176,17 +181,18 @@ class QualityEnginePort(Protocol):
 class QueryExecutorPort(Protocol):
     """Port for executing ANSI SQL against the serving/lakehouse surface.
 
-    Keeps SQL execution (Trino when available, embedded SQL fallback) out of the
-    application core while still exposing a single query abstraction (RF-11).
+    Keeps SQL execution out of the application core while still exposing a
+    single query abstraction (RF-11).
     """
 
     def execute_query(self, sql: str) -> list[dict[str, Any]]:
         """Executes an ANSI SQL query and returns rows as dicts.
 
-        The adapter must log explicitly which backend served the query (Trino or
-        embedded fallback) and must never swallow errors silently: a bare
-        ``except: pass`` is forbidden by this contract - failures surface as
-        raised exceptions.
+        Behaviour contract: a query that cannot be executed (unknown backend,
+        invalid SQL, transport failure) surfaces as a raised exception - the
+        adapter must never return an empty result set as a stand-in for a
+        failure, so callers can distinguish "no matching rows" from "query
+        did not run".
         """
         ...
 
@@ -220,7 +226,7 @@ class DomainCatalogPort(ContractCatalogPort, Protocol):
         """Loads a governance JSON-schema document by filename.
 
         Reads ``<repo_root>/governance/schemas/<schema_filename>``. Returns None
-        when the file is missing or invalid (the adapter logs a warning); the
-        validation use case then runs structural checks only.
+        when the file is missing or invalid; the validation use case then runs
+        structural checks only.
         """
         ...

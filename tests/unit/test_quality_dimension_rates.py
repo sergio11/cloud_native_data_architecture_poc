@@ -33,14 +33,18 @@ def _exp(exp_type: str, **kwargs: Any) -> dict[str, Any]:
 
 
 def test_dimension_rates_all_dimensions(tmp_path: Any) -> None:
-    suite_path = _write_suite(tmp_path, "dim_suite", [
-        _exp("expect_column_values_to_not_be_null", column="id"),
-        _exp("expect_table_row_count_to_be_between", min_value=1, max_value=10),
-        _exp("expect_column_values_to_be_unique", column="id"),
-        _exp("expect_column_values_to_be_in_set", column="status", value_set=["confirmed", "pending"]),
-        _exp("expect_column_values_to_be_between", column="amount", min_value=0, max_value=1000),
-        _exp("expect_column_values_to_match_regex", column="code", regex=r"^A-"),
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "dim_suite",
+        [
+            _exp("expect_column_values_to_not_be_null", column="id"),
+            _exp("expect_table_row_count_to_be_between", min_value=1, max_value=10),
+            _exp("expect_column_values_to_be_unique", column="id"),
+            _exp("expect_column_values_to_be_in_set", column="status", value_set=["confirmed", "pending"]),
+            _exp("expect_column_values_to_be_between", column="amount", min_value=0, max_value=1000),
+            _exp("expect_column_values_to_match_regex", column="code", regex=r"^A-"),
+        ],
+    )
     records = [
         {"id": 1, "status": "confirmed", "amount": 10.0, "code": "A-1"},
         {"id": 2, "status": "pending", "amount": 20.0, "code": "A-2"},
@@ -54,12 +58,16 @@ def test_dimension_rates_all_dimensions(tmp_path: Any) -> None:
 
 
 def test_dimension_rates_partial_pass(tmp_path: Any) -> None:
-    suite_path = _write_suite(tmp_path, "partial_suite", [
-        _exp("expect_column_values_to_not_be_null", column="id"),
-        _exp("expect_table_row_count_to_be_between", min_value=100),
-        _exp("expect_column_values_to_be_unique", column="id"),
-        _exp("expect_column_values_to_be_in_set", column="status", value_set=["confirmed"]),
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "partial_suite",
+        [
+            _exp("expect_column_values_to_not_be_null", column="id"),
+            _exp("expect_table_row_count_to_be_between", min_value=100),
+            _exp("expect_column_values_to_be_unique", column="id"),
+            _exp("expect_column_values_to_be_in_set", column="status", value_set=["confirmed"]),
+        ],
+    )
     # Row-count fails (2 rows < 100) but not-null passes => completeness 0.5;
     # duplicated id => uniqueness 0.0; unknown status => validity 0.0.
     records = [
@@ -74,9 +82,13 @@ def test_dimension_rates_partial_pass(tmp_path: Any) -> None:
 
 
 def test_dimension_rates_only_present_dimensions(tmp_path: Any) -> None:
-    suite_path = _write_suite(tmp_path, "unique_only_suite", [
-        _exp("expect_column_values_to_be_unique", column="id"),
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "unique_only_suite",
+        [
+            _exp("expect_column_values_to_be_unique", column="id"),
+        ],
+    )
     records = [{"id": 1}, {"id": 2}]
 
     evaluation = ExpectationEngineAdapter().evaluate_suite(records, suite_path, threshold=1.0)
@@ -86,10 +98,14 @@ def test_dimension_rates_only_present_dimensions(tmp_path: Any) -> None:
 
 
 def test_unsupported_expectation_has_no_dimension_and_fails_closed(tmp_path: Any) -> None:
-    suite_path = _write_suite(tmp_path, "unsupported_suite", [
-        _exp("expect_column_values_to_not_be_null", column="id"),
-        _exp("expect_column_values_to_be_zip_code", column="zip"),
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "unsupported_suite",
+        [
+            _exp("expect_column_values_to_not_be_null", column="id"),
+            _exp("expect_column_values_to_be_zip_code", column="zip"),
+        ],
+    )
 
     evaluation = ExpectationEngineAdapter().evaluate_suite(
         [{"id": 1, "zip": "12345"}],
@@ -103,10 +119,14 @@ def test_unsupported_expectation_has_no_dimension_and_fails_closed(tmp_path: Any
 
 
 def test_dimension_rates_do_not_change_global_verdict(tmp_path: Any) -> None:
-    suite_path = _write_suite(tmp_path, "verdict_suite", [
-        _exp("expect_column_values_to_not_be_null", column="id"),
-        _exp("expect_column_values_to_be_unique", column="id"),
-    ])
+    suite_path = _write_suite(
+        tmp_path,
+        "verdict_suite",
+        [
+            _exp("expect_column_values_to_not_be_null", column="id"),
+            _exp("expect_column_values_to_be_unique", column="id"),
+        ],
+    )
     records = [{"id": 1}, {"id": 1}]
 
     evaluation = ExpectationEngineAdapter().evaluate_suite(records, suite_path, threshold=0.5)

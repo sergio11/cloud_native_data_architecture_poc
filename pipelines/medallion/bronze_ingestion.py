@@ -43,7 +43,9 @@ def main() -> None:
         res = container.ingest_bronze.execute(ent)
         logger.info(
             "Bronze ingestion finished: %s -> %d rows written (batch_id: %s)",
-            res["target_table"], res["rows_ingested"], res["batch_id"],
+            res["target_table"],
+            res["rows_ingested"],
+            res["batch_id"],
         )
 
 

@@ -24,7 +24,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 | **Data Contracts** | Declarative producer-consumer agreements defining schema, quality rules, and terms. | Bitol Open Data Contract Standard (ODCS) YAML specifications. | [`domains/sales/data-products/orders/contract.yaml`](../domains/sales/data-products/orders/contract.yaml)<br>[`domains/marketing/data-products/campaigns/contract.yaml`](../domains/marketing/data-products/campaigns/contract.yaml) |
 | **Data Fabric & Lineage** | Active metadata harvesting generating dynamic, end-to-end lineage graphs. | OpenLineage Spark/Flink listeners emitting events to Marquez. | OpenLineage emitters in [`pipelines/medallion/bronze_ingestion.py`](../pipelines/medallion/bronze_ingestion.py)<br>Marquez client in [`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py) |
 | **Data Quality Gates** | Programmatic test suites blocking pipeline progression upon quality threshold breaches. | Fail-closed engine over Great-Expectations-format suites (missing suite / unknown type / empty data also block). Contract `spec.quality.thresholds` govern per dimension over the `0.95` fallback. | [`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)<br>[`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json) |
-| **Privacy & Governance** | GDPR Article 25 privacy-by-design, pseudonymization, and PII cryptographic hashing. | SHA-256 email hashing, name initial masking, and year-only truncation before Gold tier. | [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py)<br>PII tags in `contract.yaml` |
+| **Privacy & Governance** | GDPR Article 25 privacy-by-design, pseudonymization, and PII cryptographic hashing. | SHA-256 email hashing and name masking (first name + initial) before the Gold tier. | [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py)<br>PII tags in `contract.yaml` |
 | **Modern Orchestration** | Software-Defined Assets (SDAs) tracking data lineage, materializations, and freshness. | Dagster asset graph coordinating pipelines and profiles. | Dagster asset definitions & execution profiles in [`docs/architecture/overview.md`](architecture/overview.md) |
 
 ---
@@ -66,7 +66,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 - **Theoretical Concept**: Earlier data lakes relied on the legacy Hive Metastore (HMS), which suffered from slow Thrift RPCs, single-point-of-failure relational database backends, and tight coupling to the Apache Hadoop ecosystem. The Apache Iceberg REST Catalog specification defines an open, lightweight HTTP/REST interface for discovering and committing table metadata.
 - **Repository Implementation**:
   - **Apache Polaris**: Deployed as a lightweight container on port `8181`.
-  - **Catalog Registration Script** ([`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py)): Uses `PolarisClient` to authenticate, register namespaces (`sales`, `marketing`, `finance`, `stream`), inspect table metadata, and publish table URIs to Marquez and Data Product manifests.
+  - **Catalog Registration Script** ([`pipelines/serving/catalog_registration.py`](../pipelines/serving/catalog_registration.py)): Uses `PolarisClient` to authenticate, register the Polaris namespaces `sales`, `marketing`, `finance` (the Trino catalog names `stream`/`gold` are **aliases of the same catalog, not schemas**, so they are deliberately not registered), register the Gold/stream tables actually produced by the core (`sales.orders_windowed`, `marketing.clickstream_windowed`, `gold.sales.daily_metrics`, `gold.sales.customers`), and publish datasets/jobs to Marquez plus table URIs to the Data Product manifests. The script is fail-closed: it exits `1` when a required env var (`POLARIS_URL`/`POLARIS_TOKEN`/`MARQUEZ_URL`) is missing **or when any registration call fails**.
 
 ---
 
@@ -78,22 +78,37 @@ This document provides a comprehensive, bidirectional mapping between the founda
 - **Repository Implementation**:
   - **Batch Pipeline**: [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py) aggregates historical orders daily.
   - **Stream Pipeline**: [`pipelines/stream/flink_orders_stream.py`](../pipelines/stream/flink_orders_stream.py) consumes events, applies 5-minute tumbling event-time windows, and writes to `stream.sales.orders_windowed`. Event backend: SQLite WAL by default; Kafka is canonical only when `KAFKA_BOOTSTRAP_SERVERS` is set (fail-fast, `src/adapters/streaming/event_stream.py`).
-  - **Unified Serving View** ([`pipelines/serving/unified_view.sql`](../pipelines/serving/unified_view.sql)):
+  - **Unified Serving View** ([`pipelines/serving/unified_view.sql`](../pipelines/serving/unified_view.sql)) — delivered view 1 (`iceberg.serving.sales_unified_revenue`), verbatim structure:
     ```sql
-    CREATE OR REPLACE VIEW serving.sales.unified_revenue AS
-    -- Historical batch layer (T+1 latency, guaranteed accuracy)
-    SELECT CAST(order_date AS DATE) AS order_date, status, total_amount, num_orders, 'batch' AS source_type
-    FROM gold.sales.daily_metrics
-    WHERE CAST(order_date AS DATE) < CURRENT_DATE - INTERVAL '2' DAY
+    CREATE OR REPLACE VIEW iceberg.serving.sales_unified_revenue AS
+    SELECT order_date, status, total_orders, total_revenue, avg_order_value, source_tier
+    FROM (
+        -- 1. Historical Batch Layer (Gold) - exact aggregates, always wins
+        SELECT order_date, status, total_orders,
+               gross_revenue AS total_revenue, average_order_value AS avg_order_value,
+               'batch_historical' AS source_tier
+        FROM gold.sales.daily_metrics
 
-    UNION ALL
+        UNION ALL
 
-    -- Near-real-time streaming buffer (T+5m latency, last 2 days)
-    SELECT CAST(window_start AS DATE) AS order_date, status, SUM(total_amount) AS total_amount, COUNT(*) AS num_orders, 'stream' AS source_type
-    FROM stream.sales.orders_windowed
-    WHERE CAST(window_start AS DATE) >= CURRENT_DATE - INTERVAL '2' DAY
-    GROUP BY CAST(window_start AS DATE), status;
+        -- 2. Near Real-Time Stream Layer (Speed) - day grain, keys ABSENT from batch
+        SELECT s.order_date                AS order_date,
+               s.status                    AS status,
+               SUM(CAST(s.window_orders AS BIGINT))       AS total_orders,
+               SUM(CAST(s.window_revenue AS DECIMAL(14,2))) AS total_revenue,
+               SUM(CAST(s.window_revenue AS DECIMAL(14,2)))
+                   / NULLIF(SUM(CAST(s.window_orders AS BIGINT)), 0) AS avg_order_value,
+               'stream_speed'              AS source_tier
+        FROM stream.sales.orders_windowed s
+        WHERE NOT EXISTS (
+            SELECT 1 FROM gold.sales.daily_metrics b
+            WHERE b.order_date = s.order_date AND b.status = s.status
+        )
+        GROUP BY s.order_date, s.status
+    ) unified
+    ORDER BY order_date DESC, status DESC;
     ```
+    The fusion is an **anti-join on `(order_date, status)` (batch wins)**, not a date-window filter. Views 2 and 3 (`marketing_unified_campaign_performance`, `finance_unified_pl_summary`) are declared **PLANNED** in the same file because their source tables are never produced by this repo, and nothing local executes the file (the K8s `trino-views-init-job` only runs `CREATE SCHEMA`).
 
 ---
 
@@ -131,21 +146,21 @@ This document provides a comprehensive, bidirectional mapping between the founda
 - **Theoretical Concept**: A Data Fabric automates metadata collection and quality enforcement across diverse data pipelines, providing continuous observability into data health and lineage.
 - **Repository Implementation**:
   - **OpenLineage & Marquez**:
-    - Every pipeline use case emits OpenLineage run events (`COMPLETE`/`FAIL`) via `LineagePublisherPort` (`src/adapters/lineage/marquez_lineage.py`): events are POSTed to Marquez when reachable and **always** appended to the local audit trail `data/lineage_audit.jsonl`.
+    - The **pipeline** use cases emit OpenLineage run events (`COMPLETE`/`FAIL`) via `LineagePublisherPort` (`src/adapters/lineage/marquez_lineage.py`) — Bronze, Silver (incl. the `FAIL` on gate breach via `gate_support`), Gold, stream processing, and the standalone quality-gate CLI (the CLI only when `--marquez-url`/`MARQUEZ_URL` is configured). `query_serving` and `validate_contract` emit **no** lineage events. Events are POSTed to Marquez when reachable and **always** appended to the local audit trail `data/lineage_audit.jsonl` when emitted.
     - Marquez records dataset facets, input/output schemas, and parent-child run relationships.
   - **Quality Gates (Great-Expectations-format suites)** ([`quality/gates/run_quality_gate.py`](../quality/gates/run_quality_gate.py)):
     - Evaluates JSON test suites ([`quality/expectations/silver_orders_suite.json`](../quality/expectations/silver_orders_suite.json)) with the built-in fail-closed engine (`src/adapters/quality/expectation_engine.py`) — not the Great Expectations library.
-    - Blocks pipeline progression with exit code `1` if the quality score is below threshold (missing suite, unknown expectation type, or empty data also block); optionally emits alert payloads to webhooks.
-    - Threshold precedence: per-dimension contract thresholds (`spec.quality.thresholds`) govern the verdict via the shared `src/use_cases/gate_support.py::enforce_quality_gate` collaborator (pure verdict in `src/domain/quality_gate.py::assess_gate`); the global/`--threshold` value (default `0.95`) applies only when the contract is silent, and contract dimensions the suite does not measure are skipped.
+    - Blocks pipeline progression with exit code `1` if the quality score is below threshold (missing suite, unknown expectation type, or empty data also block); on a breach the pipeline paths append a lineage `FAIL` event to `data/lineage_audit.jsonl` (and the alert service turns quality `FAIL`/low-pass-rate events into RF-20 alerts + outbound webhooks — that delivery lives in `lineage/config/lineage_webhook_service.py`, not in this CLI).
+    - Threshold precedence: per-dimension contract thresholds (`spec.quality.thresholds`) govern the verdict — for the Silver/Gold promotion path and for this standalone CLI alike (the CLI resolves the contract itself in `src/use_cases/run_quality_gate.py` via `contract_entity_for_table` + `find_contract_thresholds`) — through the shared `src/use_cases/gate_support.py::enforce_quality_gate` / `src/domain/quality_gate.py::assess_gate` policy; the global `--threshold` value (default `0.95`) applies only when the contract is silent (or measures none of its dimensions), and contract dimensions the suite does not measure are skipped.
 
 ---
 
 ### 8. GDPR Privacy Compliance & Cryptographic Masking
 - **Theoretical Concept**: GDPR Article 25 ("Data protection by design and by default") and Article 32 ("Security of processing") mandate that personal data must not be exposed in analytical stores where it is not strictly required for business calculations.
 - **Repository Implementation**:
-  - Implemented in [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py):
-    - **Customer Email**: Transformed via irreversible SHA-256 cryptographic hash (`SHA2(email, 256)`).
-    - **Customer Name**: Masked to first name and last initial only (e.g., "Alice S.").
-    - **Registration Date**: Truncated to registration year (`YEAR(registration_date)`).
-    - Gold tables and unified serving views expose zero plaintext PII attributes.
+  - Implemented in [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py) via [`src/domain/privacy.py`](../src/domain/privacy.py):
+    - **Customer Email**: replaced by an irreversible SHA-256 cryptographic hash (`email_hash = SHA256(lower(trim(email)))`).
+    - **Customer Name**: masked to first name and last initial only (e.g., "Alice S." → `name_masked`); the plaintext `name` column is dropped.
+    - **Registration Date**: **not transformed** — `src/domain/privacy.py` only hashes `email` and masks `name`; `registration_date` is carried into `gold.sales.customers` unchanged (there is no year truncation in the current code).
+    - Gold tables expose no plaintext `name`/`email` columns (the two attributes the masking policy covers).
 

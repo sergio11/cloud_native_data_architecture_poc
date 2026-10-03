@@ -156,6 +156,7 @@ class Container:
         return RunQualityGateUseCase(
             storage=self.storage,
             quality_engine=self.quality_engine,
+            catalog=self.domain_catalog,
         )
 
 

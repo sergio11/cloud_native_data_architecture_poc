@@ -69,9 +69,9 @@ def test_empty_real_table_returns_empty_list_not_synthetic(monkeypatch) -> None:
     monkeypatch.setenv("PGPASSWORD", "secret")
     _install_fake_psycopg2(monkeypatch, [])
 
-    rows = OltpSourceAdapter().extract_table("orders", limit=10)
+    result = OltpSourceAdapter().extract_table("orders", limit=10)
 
-    assert rows == []
+    assert result.records == []
     assert _FakeConnection.instances and _FakeConnection.instances[0].closed
 
 
@@ -80,9 +80,9 @@ def test_populated_real_table_returns_live_rows(monkeypatch) -> None:
     live = [{"id": 1, "status": "real"}]
     _install_fake_psycopg2(monkeypatch, live)
 
-    rows = OltpSourceAdapter().extract_table("orders", limit=5)
+    result = OltpSourceAdapter().extract_table("orders", limit=5)
 
-    assert rows == live
+    assert result.records == live
     assert "LIMIT 5" in _FakeConnection.instances[0].cursor_obj.query
 
 
@@ -90,14 +90,14 @@ def test_connection_error_falls_back_to_synthetic(monkeypatch) -> None:
     monkeypatch.setenv("PGPASSWORD", "secret")
     _install_fake_psycopg2(monkeypatch, ConnectionError("boom"))
 
-    rows = OltpSourceAdapter(seed=42).extract_table("orders", limit=5)
+    result = OltpSourceAdapter(seed=42).extract_table("orders", limit=5)
 
-    assert len(rows) == 5  # synthetic fallback still serves the demo profile
+    assert len(result.records) == 5  # synthetic fallback still serves the demo profile
 
 
 def test_unconfigured_postgres_uses_synthetic_source(monkeypatch) -> None:
     monkeypatch.delenv("PGPASSWORD", raising=False)
 
-    rows = OltpSourceAdapter(seed=42).extract_table("orders", limit=7)
+    result = OltpSourceAdapter(seed=42).extract_table("orders", limit=7)
 
-    assert len(rows) == 7
+    assert len(result.records) == 7

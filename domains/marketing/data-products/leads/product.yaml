@@ -17,17 +17,19 @@ spec:
   assets:
     - name: stream_funnel_metrics
       type: iceberg_table
-      path: "s3a://stream/marketing/funnel_metrics/"
+      path: "s3://datalake/warehouse/stream/marketing/funnel_metrics"
       format: parquet
       partitioned_by: ["event_type", "event_date"]
       description: "Real-time funnel conversion metrics computed by Apache Flink"
       access_tier: internal
+      status: planned
     - name: silver_leads
       type: iceberg_table
-      path: "s3a://silver/marketing/leads/"
+      path: "s3://datalake/warehouse/silver/marketing/leads"
       format: parquet
       description: "Validated and pseudonymized clickstream navigation events"
       access_tier: internal
+      status: planned
     - name: clickstream_events_stream
       type: kafka_topic
       path: "marketing.clickstream.raw"

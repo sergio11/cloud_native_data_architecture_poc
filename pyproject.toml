@@ -36,6 +36,14 @@ select = ["E", "F", "W", "I", "B", "UP"]
 # E501 is covered by line-length; per-file ignores only where justified below.
 ignore = []
 
+[tool.ruff.format]
+# Formatter enabled with ruff's documented defaults (deliberately no overrides):
+# quote-style = "double", indent-style = "space", line-ending = "lf",
+# skip-magic-trailing-comma = false. Guarded in CI by `ruff format --check`
+# (see .github/workflows/ci.yml) and locally by `rake format:check`;
+# `rake format` rewrites in place over the same directories as `rake lint`.
+
+
 [tool.mypy]
 python_version = "3.11"
 files = ["src", "pipelines", "governance", "quality"]
@@ -46,8 +54,25 @@ disallow_any_generics = true
 no_implicit_optional = true
 warn_return_any = true
 strict_equality = true
-ignore_missing_imports = true
 exclude = "__pycache__"
+
+# Scoped `ignore_missing_imports`: the repo-root layout means a typo'd INTERNAL
+# import (e.g. `src.use_casesx`) must fail loudly, so the flag is never global.
+# Only third-party modules that mypy cannot type-check are listed below
+# (verified by running mypy with no global flag: exactly these 8 errors).
+# NOT listed because they ship types and pass as-is: requests, click, rich,
+# dagster. NOT listed because they are outside `files`: faker (data-generator).
+[[tool.mypy.overrides]]
+# Integrations extra — not installed in the dev environment (no stubs).
+module = ["trino", "confluent_kafka", "psycopg2", "psycopg2.extras"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Installed but untyped (upstream ships no py.typed; stubs would come from
+# types-PyYAML / types-jsonschema, not added as deps).
+module = ["yaml", "jsonschema"]
+ignore_missing_imports = true
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -61,5 +86,7 @@ source = ["src"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 70
+# Ratcheted 70 -> 85 (W8): measured 91.24% at ratchet time, so regressions of
+# >6 points fail CI instead of silently eroding the gate.
+fail_under = 85
 show_missing = true

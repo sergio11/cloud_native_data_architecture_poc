@@ -88,17 +88,20 @@ def test_gold_gate_blocks_on_breach(world):
     # outside the allowed status set) and negative amounts (negative
     # gross_revenue, outside [0, 100000000]) on a single business date, so the
     # daily-metrics gate fails on framing AND revenue assertions.
-    storage.write_table("silver.sales.orders", [
-        {
-            "id": i,
-            "customer_id": 101,
-            "total_amount": -50.0,
-            "status": None,
-            "order_date": "2026-09-25",
-            "created_at": "2026-09-25T10:00:00+00:00",
-        }
-        for i in range(1, 4)
-    ])
+    storage.write_table(
+        "silver.sales.orders",
+        [
+            {
+                "id": i,
+                "customer_id": 101,
+                "total_amount": -50.0,
+                "status": None,
+                "order_date": "2026-09-25",
+                "created_at": "2026-09-25T10:00:00+00:00",
+            }
+            for i in range(1, 4)
+        ],
+    )
     storage.write_table("silver.sales.customers", _valid_customers())
 
     with pytest.raises(QualityGateBreachError) as exc_info:
@@ -121,16 +124,43 @@ def test_gold_gate_blocks_on_breach(world):
 
 def test_gold_gate_passes_happy_path(world):
     storage: LakehouseStorageAdapter = world["storage"]
-    storage.write_table("silver.sales.orders", [
-        {"id": 1, "customer_id": 101, "total_amount": 100.0, "status": "confirmed",
-         "order_date": "2026-09-25", "created_at": "2026-09-25T10:00:00+00:00"},
-        {"id": 2, "customer_id": 102, "total_amount": 200.0, "status": "confirmed",
-         "order_date": "2026-09-25", "created_at": "2026-09-25T11:00:00+00:00"},
-        {"id": 3, "customer_id": 101, "total_amount": 50.0, "status": "pending",
-         "order_date": "2026-09-25", "created_at": "2026-09-25T12:00:00+00:00"},
-        {"id": 4, "customer_id": 102, "total_amount": 75.5, "status": "shipped",
-         "order_date": "2026-09-26", "created_at": "2026-09-26T10:00:00+00:00"},
-    ])
+    storage.write_table(
+        "silver.sales.orders",
+        [
+            {
+                "id": 1,
+                "customer_id": 101,
+                "total_amount": 100.0,
+                "status": "confirmed",
+                "order_date": "2026-09-25",
+                "created_at": "2026-09-25T10:00:00+00:00",
+            },
+            {
+                "id": 2,
+                "customer_id": 102,
+                "total_amount": 200.0,
+                "status": "confirmed",
+                "order_date": "2026-09-25",
+                "created_at": "2026-09-25T11:00:00+00:00",
+            },
+            {
+                "id": 3,
+                "customer_id": 101,
+                "total_amount": 50.0,
+                "status": "pending",
+                "order_date": "2026-09-25",
+                "created_at": "2026-09-25T12:00:00+00:00",
+            },
+            {
+                "id": 4,
+                "customer_id": 102,
+                "total_amount": 75.5,
+                "status": "shipped",
+                "order_date": "2026-09-26",
+                "created_at": "2026-09-26T10:00:00+00:00",
+            },
+        ],
+    )
     storage.write_table("silver.sales.customers", _valid_customers())
 
     result = world["use_case"].execute(

@@ -8,9 +8,9 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any
 
 from src.adapters.source._synthetic import DEFAULT_SEED, generate_synthetic_records
+from src.domain.entities import ExtractionResult
 from src.ports.outbound import OltpSourcePort
 
 logger = logging.getLogger("adapter.source.oltp")
@@ -25,6 +25,9 @@ class OltpSourceAdapter(OltpSourcePort):
     RNF-07: no embedded credentials - PGPASSWORD is read only from the environment;
     when it is unset PostgreSQL is treated as unavailable and the embedded
     synthetic generator serves the local demo profile instead.
+    The returned ``ExtractionResult.origin`` is honest provenance: ``"postgresql"``
+    for any successful query (even one returning zero rows), ``"synthetic"`` when
+    the embedded generator served the records.
     """
 
     def __init__(
@@ -58,7 +61,7 @@ class OltpSourceAdapter(OltpSourcePort):
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid limit {limit!r}: must be an integer") from exc
 
-    def extract_table(self, table_name: str, limit: int | None = None) -> list[dict[str, Any]]:
+    def extract_table(self, table_name: str, limit: int | None = None) -> ExtractionResult:
         # 0. Validate inputs before touching any backend (SQL injection guard)
         self._validate_identifier(table_name)
         limit = self._validate_limit(limit)
@@ -75,41 +78,59 @@ class OltpSourceAdapter(OltpSourcePort):
             try:
                 import psycopg2
                 import psycopg2.extras
-                conn = psycopg2.connect(
-                    host=self._pg_host,
-                    port=int(os.getenv("PGPORT", "5432")),
-                    dbname=os.getenv("PGDATABASE", "poc_oltp"),
-                    user=os.getenv("PGUSER", "postgres"),
-                    password=password,
-                    connect_timeout=2,
-                )
-                try:
-                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                        query = f'SELECT * FROM "{table_name}"'
-                        if limit:
-                            query += f" LIMIT {limit}"
-                        cur.execute(query)
-                        rows = [dict(r) for r in cur.fetchall()]
-                finally:
-                    conn.close()
-                # A successful query is authoritative even when it returns zero
-                # rows: an empty real table yields [], never synthetic records.
-                # The synthetic fallback below applies ONLY to connection/query
-                # failures (or an unconfigured PostgreSQL), so lineage always
-                # describes the true origin of the returned rows.
-                logger.info("Extracted %d records from PostgreSQL '%s'", len(rows), table_name)
-                return rows
-            except Exception as exc:
+            except ImportError as exc:
                 logger.warning(
-                    "PostgreSQL source unavailable for '%s' (%s); falling back to embedded synthetic source",
+                    "psycopg2 unavailable for '%s' (%s); falling back to embedded synthetic source",
                     table_name,
                     exc,
                 )
+            else:
+                # Only connection/query failures trigger the synthetic fallback.
+                # psycopg2 reports them as subclasses of ``psycopg2.Error``
+                # (plus OSError for transport-level failures); everything else
+                # (TypeError, ValueError, AttributeError, ...) is a programming
+                # error and must propagate instead of silently serving
+                # fabricated rows.
+                connection_errors: tuple[type[BaseException], ...] = (OSError,)
+                pg_error = getattr(psycopg2, "Error", None)
+                if isinstance(pg_error, type):
+                    connection_errors = (pg_error, OSError)
+                try:
+                    conn = psycopg2.connect(
+                        host=self._pg_host,
+                        port=int(os.getenv("PGPORT", "5432")),
+                        dbname=os.getenv("PGDATABASE", "poc_oltp"),
+                        user=os.getenv("PGUSER", "postgres"),
+                        password=password,
+                        connect_timeout=2,
+                    )
+                    try:
+                        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                            query = f'SELECT * FROM "{table_name}"'
+                            if limit:
+                                query += f" LIMIT {limit}"
+                            cur.execute(query)
+                            rows = [dict(r) for r in cur.fetchall()]
+                    finally:
+                        conn.close()
+                    # A successful query is authoritative even when it returns zero
+                    # rows: an empty real table yields [], never synthetic records.
+                    # The synthetic fallback below applies ONLY to connection/query
+                    # failures (or an unconfigured PostgreSQL), so lineage always
+                    # describes the true origin of the returned rows.
+                    logger.info("Extracted %d records from PostgreSQL '%s'", len(rows), table_name)
+                    return ExtractionResult(records=rows, origin="postgresql")
+                except connection_errors as exc:
+                    logger.warning(
+                        "PostgreSQL source unavailable for '%s' (%s); falling back to embedded synthetic source",
+                        table_name,
+                        exc,
+                    )
 
         # 2. Fallback to generating high-fidelity synthetic relational records
         logger.warning(
-            "SYNTHETIC fallback data: generating embedded demo records for table '%s' "
-            "(not live PostgreSQL rows)",
+            "SYNTHETIC fallback data: generating embedded demo records for table '%s' (not live PostgreSQL rows)",
             table_name,
         )
-        return generate_synthetic_records(table_name, limit or 100, seed=self._seed)
+        records = generate_synthetic_records(table_name, limit or 100, seed=self._seed)
+        return ExtractionResult(records=records, origin="synthetic")

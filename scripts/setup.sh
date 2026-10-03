@@ -12,6 +12,9 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Set when the optional Kyverno governance policies could not be applied.
+governance_warned=0
+
 echo -e "${BLUE}==================================================================${NC}"
 echo -e "${BLUE}   MODERN DATA ARCHITECTURE POC - CLUSTER SETUP & BOOTSTRAP       ${NC}"
 echo -e "${BLUE}==================================================================${NC}"
@@ -46,10 +49,19 @@ for ns in platform sales marketing finance ops; do
 done
 
 # 4. Apply Kyverno Governance Policies
+# NOTE: Kyverno is an OPTIONAL cluster admission component (values-only in
+# infra/helm/s6-mesh; no Kyverno template is rendered yet - see README /
+# docs/architecture/overview.md, RF-17). Applying these ClusterPolicy CRs
+# fails when the Kyverno CRDs are absent, so that failure is reported as a
+# WARN instead of aborting the bootstrap.
 echo -e "\n${YELLOW}[Step 4/6] Applying federated governance policies...${NC}"
 if [ -d "governance/policies" ]; then
-    kubectl apply -f governance/policies/ || true
-    echo -e "${GREEN}Governance admission policies applied.${NC}"
+    if kubectl apply -f governance/policies/; then
+        echo -e "${GREEN}Governance admission policies applied.${NC}"
+    else
+        echo -e "${YELLOW}WARN: could not apply governance/policies (Kyverno not installed?). Admission policies skipped.${NC}"
+        governance_warned=1
+    fi
 fi
 
 # 5. Bootstrap Platform Core Profile
@@ -61,6 +73,11 @@ echo -e "\n${YELLOW}[Step 6/6] Verifying cluster pod status...${NC}"
 kubectl get pods -A
 
 echo -e "\n${GREEN}==================================================================${NC}"
-echo -e "${GREEN} Cluster setup finished successfully!                              ${NC}"
+if [ "${governance_warned:-0}" -eq 1 ]; then
+    echo -e "${YELLOW} Cluster setup finished with WARNINGS:                              ${NC}"
+    echo -e "${YELLOW} governance/policies were NOT applied (Kyverno optional/not found).  ${NC}"
+else
+    echo -e "${GREEN} Cluster setup finished successfully!                              ${NC}"
+fi
 echo -e "${GREEN} Run './scripts/demo.sh' to execute the end-to-end demonstration.   ${NC}"
 echo -e "${GREEN}==================================================================${NC}"

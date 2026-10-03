@@ -113,6 +113,9 @@ fill keys absent from batch — so no key is ever counted twice.
 *Expected Result*: rows labelled `source_tier = 'batch_historical'` (exact,
 older) and `source_tier = 'stream_speed'` (recent windows). Zero duplicate
 `(order_date, status)` keys.
+*Fail-loud behaviour*: if the unified query returns **no rows** the script
+exits `1` (e.g. an empty `data/` state); pass `--allow-empty` to accept an
+empty result with exit `0`.
 
 #### Query 1.2: Verify GDPR PII Masking in Gold (RF-05, RNF-07)
 Query the customer dimension materialised by `AggregateGoldUseCase`
@@ -154,12 +157,25 @@ tables are PLANNED, not produced in this POC.)
 
 ---
 
-### Verification 2: Active Lineage in Marquez UI
-1. Open your web browser and navigate to: **`http://localhost:3001`** (or `http://localhost:5000`).
+### Verification 2: Active Lineage in Marquez UI (K8s profile only)
+
+> Marquez does **not** run in the local profile. Locally the equivalent
+> evidence is the append-only audit trail `data/lineage_audit.jsonl`
+> (`Get-Content data/lineage_audit.jsonl` on PowerShell, `cat` elsewhere),
+> written by the Bronze/Silver/Gold/stream/quality-gate paths regardless of
+> whether Marquez is reachable.
+
+1. Open your web browser and navigate to: **`http://localhost:3001`** (Marquez UI, K8s profile; API port `5000`).
 2. Navigate to the **Namespaces** dropdown and select `default` or `iceberg`.
 3. Select the job **`silver_transform`** or dataset **`silver.sales.orders`**.
 4. **Visual Inspection**:
-   - Verify the directed acyclic graph (DAG) shows lineage from `postgresql.public.orders` -> `bronze_ingestion` -> `bronze.sales.orders` -> `silver_transform` -> `silver.sales.orders` -> `gold_aggregation` -> `gold.sales.daily_metrics`.
+   - Verify the directed acyclic graph (DAG) shows lineage from the OLTP source → `bronze_ingestion` → `bronze.sales.orders` → `silver_transform` → `silver.sales.orders` → `gold_aggregation` → `gold.sales.daily_metrics`.
+   - **Provenance is stamped honestly**: the Bronze `_source` column and the
+     lineage input dataset read `postgresql.public.orders` **only** when the
+     rows really came from PostgreSQL (`PGPASSWORD` set and reachable). On a
+     local run without `PGPASSWORD` the label is `synthetic.local.orders`
+     (`src/use_cases/ingest_bronze.py::provenance_label`) — the lineage never
+     claims a database read that did not happen.
    - Inspect dataset facets to verify the schema and column-level types captured by OpenLineage.
 
 ---
@@ -190,7 +206,7 @@ Quality Gate Summary
 (exit code 0)
 ```
 
-#### Test 3.2: Strict-threshold run (same data, threshold 1.0)
+#### Test 3.2: Strict-threshold run (same data, `--threshold 1.0`)
 Re-run the gate with a strict 100% threshold (there is no
 `--simulate-corrupt-data` flag — the CLI only accepts `--suite`, `--table`,
 `--threshold`, plus optional `--input-file`/`--marquez-url`/`--output-dir` options):
@@ -216,17 +232,25 @@ Quality Gate Summary
 ```
 On the current clean data the strict run also passes. A real breach (e.g. null
 primary keys, see `test_rf06_*` in `tests/integration/test_rf_acceptance.py`)
-fails the gate with exit code 1, emits a lineage `FAIL` event when a
-Marquez/webhook URL is configured, and blocks pipeline progression.
+fails the gate with exit code 1 and blocks pipeline progression. The standalone
+CLI emits a lineage `FAIL` event only when `--marquez-url` / `MARQUEZ_URL` is
+configured; inside the pipeline runs (`silver_transform.py`,
+`gold_aggregation.py`) the `FAIL` event is always appended to
+`data/lineage_audit.jsonl` before the promotion is aborted.
 
-> Threshold-precedence note: the standalone gate above applies `--threshold`
-> directly, but inside the Silver/Gold pipeline runs (`silver_transform.py`,
-> `gold_aggregation.py`) per-dimension contract thresholds
-> (`spec.quality.thresholds`) take precedence and the flag (default `0.95`)
-> is only a fallback when the contract is silent — see the shared
-> `src/use_cases/gate_support.py::enforce_quality_gate` collaborator (pure
-> verdict via `src/domain/quality_gate.py::assess_gate`). Gold additionally
-> requires its suites (`quality/expectations/gold_daily_metrics_suite.json`,
+> Threshold-precedence note (same policy everywhere): `--threshold` is **only a
+> fallback**. The standalone gate resolves the contract that governs the
+> table's entity (`contract_entity_for_table` in `src/domain/naming.py` +
+> `find_contract_thresholds`, wired in `src/use_cases/run_quality_gate.py`) and
+> applies its `spec.quality.thresholds` per dimension — identically to the
+> Silver/Gold promotion path (`src/use_cases/gate_support.py::enforce_quality_gate`,
+> pure verdict in `src/domain/quality_gate.py::assess_gate`). So for
+> `silver.sales.orders` the `--threshold 1.0` above does **not** decide the
+> verdict: the `orders` contract does (`completeness 0.98`, `uniqueness 1.00`,
+> `validity 0.99`). The flag (default `0.95`) applies only when the contract
+> declares no thresholds, or when none of its declared dimensions is measured
+> by the suite. Gold additionally requires its suites
+> (`quality/expectations/gold_daily_metrics_suite.json`,
 > `gold_customers_suite.json`); a missing suite blocks the run.
 
 ---
@@ -238,6 +262,16 @@ Marquez/webhook URL is configured, and blocks pipeline progression.
 > functional evidence via the CLI steps and `data/lineage_audit.jsonl`.
 
 #### Dagster UI (`http://localhost:3000`)
+- The five assets are `bronze_orders`, `bronze_customers`, `silver_orders`,
+  `silver_customers`, `gold_daily_metrics` (`pipelines/orchestration/dagster_repository.py`).
+- **Locally** Dagster is an optional extra (`pip install "dagster>=1.6"` — the
+  `orchestration` extra in `pyproject.toml`); start it in code-location mode
+  with `dagster dev -f pipelines/orchestration/dagster_repository.py` and
+  materialize the assets. Each asset dispatches the real pipeline script in a
+  subprocess via `pipelines/orchestration/local_dispatch.py`, so a run log
+  shows the same commands `rake medallion:*` executes (the K8s `3000` NodePort
+  in `infra/kind/cluster-config.yaml` belongs to the deployed chart, which is
+  not installed in-repo).
 - Navigate to **Assets** -> View the Software-Defined Asset (SDA) dependency graph.
 - Inspect the latest run timeline and materialization logs for the medallion assets.
 

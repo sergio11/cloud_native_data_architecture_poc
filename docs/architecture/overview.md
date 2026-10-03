@@ -7,7 +7,7 @@
 The Modern Data Architecture Proof of Concept (POC) is a **POC-grade, 100% open-source data platform that implements production patterns** (hexagonal architecture, fail-closed quality gates, idempotent ingestion, machine-readable contracts, full traceability). It materialises five paradigms of modern data engineering into one verifiable repository:
 
 1. **Data Mesh**: Decentralized, domain-oriented ownership across sales, marketing, and finance (`domains/**`).
-2. **Data Fabric**: Active metadata (OpenLineage events, local audit trail, optional alert service) with automated lineage emission from every use case.
+2. **Data Fabric**: Active metadata (OpenLineage events, local audit trail, optional alert service) with lineage emission from the pipeline use cases (Bronze, Silver, Gold, stream, quality gate — `query_serving`/`validate_contract` emit none).
 3. **Data Products & Declarative Contracts**: Analytical assets packaged as versioned products bounded by Bitol ODCS-style `contract.yaml` files, validated for BACKWARD compatibility.
 4. **Medallion Lakehouse**: Multi-tier curation (Bronze raw, Silver conformed, Gold aggregated). The local profile implements the lakehouse contract over embedded SQLite (append-only + content-hash idempotency + row-level time travel); the K8s profile targets Apache Iceberg on MinIO governed by Apache Polaris.
 5. **Hybrid Lambda / Kappa Processing**: Batch layer = full recomputation of Gold from Silver on every run; stream layer = persistent event log with real 5-minute tumbling windows and full log replay; both fused at query time by a single anti-join SQL.
@@ -39,11 +39,11 @@ Verified by inspecting `infra/helm/**` before writing this section:
 | `s2-lakehouse` | Yes | MinIO (Deployment/PVC/Service), Apache Polaris (Deployment/Service), bucket-init Job |
 | `s3-batch` | Yes | Spark Operator (Deployment/RBAC) + `ScheduledSparkApplication` medallion jobs |
 | `s4-stream` | Yes | Kafka KRaft (StatefulSet) + Kafka UI, Flink Operator, `FlinkDeployment` CRs running the same `pipelines/stream/*.py` scripts |
-| `s5-serving` | Yes | Trino (Deployment/Service/ConfigMap) + `trino-views-init-job` applying `unified_view.sql` |
+| `s5-serving` | Yes | Trino (Deployment/Service/ConfigMap) + `trino-views-init-job` that **only runs `CREATE SCHEMA` statements** (`iceberg.serving/sales/marketing/finance`) — it does **not** apply `unified_view.sql`; that file is the deployment target applied manually/K8s-side |
 | `s6-mesh` | Yes (partially) | `DataProduct`/`DataContract` CRDs + per-domain `ResourceQuota`/`LimitRange` + `NetworkPolicy`. **Kyverno appears only in `values.yaml` — there is no Kyverno template, so admission control is not rendered yet** |
-| `s7-fabric` | Yes | Marquez (Deployment/Service) + `lineage-alert-service` (the RF-20 webhook service) |
+| `s7-fabric` | Yes (stub) | Marquez (Deployment/Service) + `lineage-alert-service` — the Deployment runs `python -c http.server`, **not** the real RF-20 service (`lineage/config/lineage_webhook_service.py`); only the `lineage/config/Dockerfile` describes how the real one would ship |
 | `s8-ops` | **No templates** | `values.yaml` (Grafana/Prometheus/Metabase), `dashboards/platform-overview.json`, `prometheus/alerts.yaml` — **assets present, no Kubernetes resources rendered yet** |
-| Dagster | **Not in any chart** | `pipelines/orchestration/dagster_repository.py` + `dagster-values.yaml` exist as definitions/values for the upstream chart; nothing in-repo deploys it |
+| Dagster | **Not in any chart** | `pipelines/orchestration/dagster_repository.py` + `dagster-values.yaml` exist as definitions/values for the upstream chart; nothing in-repo deploys it. **Locally** the 5 assets can be materialized (`dagster dev -f pipelines/orchestration/dagster_repository.py`, optional `orchestration` extra) because the resources dispatch real scripts via `pipelines/orchestration/local_dispatch.py` |
 
 **Rule of thumb used in this document:** anything described as *"chart present, not wired"* above is a **deployment target**, not current behaviour. Current behaviour = the local profile.
 
@@ -92,7 +92,7 @@ Verified by inspecting `infra/helm/**` before writing this section:
 - **Domain Boundaries**: three autonomous business units — `Sales`, `Marketing`, `Finance` — each owning `domains/<domain>/data-products/<product>/{product.yaml, contract.yaml, schema.json}`.
 - **Data Products**: manifests carry owner, description, SLA (freshness/availability), classification, quality thresholds, assets, consumers, and declared lineage steps.
 - **Declarative Data Contracts**: `contract.yaml` declares schema fields, compatibility mode, and protected fields. `src/use_cases/validate_contract.py` performs **real BACKWARD compatibility evaluation** of `contract.yaml` vs the sibling `schema.json` snapshot plus optional `jsonschema` structural validation; `governance/contract_validator.py` is a thin CLI delegating to that use case (`rake governance:validate`).
-- **Federated Governance**: policies live in `governance/policies/*.yaml` (owner required, PII classification, naming convention) and are enforced by the contract validation use case at repository level. Per-domain compute quotas are enforced ONLY by the `s6-mesh` Helm chart (`infra/helm/s6-mesh/values.yaml` + `templates/domain-quotas.yaml`, the single source of truth — no duplicate quota file under `governance/`). Deployment-time admission (Kyverno) is a K8s-profile concern (chart values only today, RF-17 DEFERRED).
+- **Federated Governance**: policies live in `governance/policies/*.yaml`, but **not all of them are code-enforced locally**: `src/use_cases/validate_contract.py` enforces the *owner* (`metadata.owner`) and *classification* (`spec.classification`) requirements, JSON-Schema structure (`governance/schemas/*.json`, incl. `format: email` when `jsonschema` is installed), the declared compatibility mode and BACKWARD evolution against `schema.json`; `governance/contract_validator.py` (the CLI) additionally cross-checks `product.yaml` ↔ `contract.yaml` quality thresholds. The **naming-convention policy** (`governance/policies/naming-convention.yaml`, regex `^[a-z0-9][a-z0-9_-]*$`) is a **Kyverno ClusterPolicy for the K8s admission path — no local code runs it** (a repo consistency test only asserts the policy text matches the names actually used). Per-domain compute quotas are enforced ONLY by the `s6-mesh` Helm chart (`infra/helm/s6-mesh/values.yaml` + `templates/domain-quotas.yaml`, the single source of truth — no duplicate quota file under `governance/`). Deployment-time admission (Kyverno) is a K8s-profile concern (chart values only today, RF-17 DEFERRED).
 
 ### 1.2 Processing Plane (Local behaviour vs. K8s target)
 - **Local profile (executes today)**:
@@ -103,10 +103,10 @@ Verified by inspecting `infra/helm/**` before writing this section:
 - **K8s profile (deployment target, charts present)**: the same ports backed by heavyweight open-source engines — Spark Operator for batch (`s3-batch`), Flink Operator for streaming (`s4-stream`), Trino for serving (`s5-serving`), MinIO + Iceberg + Polaris for storage (`s2-lakehouse`), Postgres as the OLTP source (`s1-ingestion`). **These charts are not wired to the local core**: they run the same script paths as container images, while the local profile runs them directly with Python.
 
 ### 1.3 Operations Plane (Active Metadata, Quality & Orchestration)
-- **Active Metadata & Lineage**: every use case emits an OpenLineage `COMPLETE`/`FAIL` event. `MarquezLineageAdapter` always appends to `data/lineage_audit.jsonl` (source of truth) and best-effort POSTs to Marquez (`MARQUEZ_URL`, 2s timeout) — failures are logged, never silent.
-- **Quality Gates**: `quality/gates/run_quality_gate.py` is a CLI wrapper around `RunQualityGateUseCase`; the fail-closed rules live in the core (`src/adapters/quality/expectation_engine.py`): missing suite → `SuiteNotFoundError`, empty data / zero assertions / unknown expectation type → **BLOCKED**. Suites are **Great-Expectations-format JSON** (`quality/expectations/silver_orders_suite.json`, `silver_customers_suite.json`) evaluated by the built-in engine — the Great Expectations *library* itself is not installed or invoked.
-- **Orchestration**: locally, `rake` tasks are the observable, on-demand orchestrator (`rake medallion:all`, `rake stream:orders`, `rake serving:query`, `rake demo`). Schedules exist as Dagster `ScheduleDefinition`s (`pipelines/orchestration/dagster_repository.py`) and K8s `CronJob`/`ScheduledSparkApplication` templates — chart/definition level, not exercised by the local profile.
-- **Alerting (RF-20)**: `lineage/config/lineage_webhook_service.py` is a standalone FastAPI service evaluating four active-metadata rules (schema change, quality breach, pipeline failure, SLA freshness) with `lineage/config/alert-rules.yaml`; it is deployable via `s7-fabric` but **not part of the `rake demo` flow**.
+- **Active Metadata & Lineage**: the **pipeline** use cases emit an OpenLineage `COMPLETE`/`FAIL` event — Bronze, Silver (incl. `FAIL` on breach), Gold, stream, and the standalone quality-gate CLI (only when `--marquez-url`/`MARQUEZ_URL` is set). `query_serving` and `validate_contract` emit **nothing**. `MarquezLineageAdapter` always appends to `data/lineage_audit.jsonl` (source of truth) and best-effort POSTs to Marquez (`MARQUEZ_URL`, 2s timeout) — failures are logged, never silent.
+- **Quality Gates**: `quality/gates/run_quality_gate.py` is a CLI wrapper around `RunQualityGateUseCase`; the fail-closed rules live in the core (`src/adapters/quality/expectation_engine.py`): missing suite → `SuiteNotFoundError`, empty data / zero assertions / unknown expectation type → **BLOCKED**. Suites are **Great-Expectations-format JSON** (`quality/expectations/silver_orders_suite.json`, `silver_customers_suite.json`) evaluated by the built-in engine — the Great Expectations *library* itself is not installed or invoked. Threshold precedence is unified: contract thresholds resolved by `contract_entity_for_table`/`find_contract_thresholds` govern; `--threshold` is the fallback only (see "Flow F3").
+- **Orchestration**: locally, `rake` tasks are the observable, on-demand orchestrator (`rake medallion:all`, `rake stream:orders`, `rake serving:query`, `rake demo`). Schedules exist as Dagster `ScheduleDefinition`s (`pipelines/orchestration/dagster_repository.py`) and K8s `CronJob`/`ScheduledSparkApplication` templates — chart/definition level, not exercised by the local profile (the Dagster *assets* themselves can be materialized locally — see `pipelines/orchestration/local_dispatch.py`).
+- **Alerting (RF-20)**: `lineage/config/lineage_webhook_service.py` is a standalone FastAPI service evaluating four active-metadata rules (schema change, quality breach, pipeline failure, SLA freshness) with `lineage/config/alert-rules.yaml`, persisting alerts in SQLite and POSTing them best-effort to each rule's `actions.webhook.endpoint` (`LINEAGE_WEBHOOK_DELIVERY`/`LINEAGE_WEBHOOK_TIMEOUT`). It is **not part of the `rake demo` flow**, and the `s7-fabric` chart currently deploys an `http.server` stub in its place.
 - **Telemetry**: Prometheus/Grafana/Metabase values and a dashboard JSON exist under `infra/helm/s8-ops` — **assets only, the chart has no templates yet**, so no dashboard is deployed today.
 
 ---
@@ -119,10 +119,10 @@ Verified by inspecting `infra/helm/**` before writing this section:
 | **S2: Lakehouse & Catalog** | ACID storage, versioning, schema evolution | `src/adapters/storage/lakehouse_storage.py` (SQLite, content-hash idempotency, row-version time travel) | `s2-lakehouse`: MinIO + Apache Polaris (+ Iceberg tables written by the jobs) |
 | **S3: Batch compute (Lambda)** | Bronze → Silver → Gold | Pure-Python drivers `pipelines/medallion/*.py` over the core use cases; Gold = full recomputation | `s3-batch`: Spark Operator + `ScheduledSparkApplication` running the same scripts |
 | **S4: Stream compute (Kappa)** | Windows over the event log | `pipelines/stream/flink_orders_stream.py` over `EventStreamAdapter` (SQLite WAL log, cursors, replay) | `s4-stream`: Kafka KRaft + Flink Operator + `FlinkDeployment` CRs |
-| **S5: Serving layer** | One query, no double counting | `pipelines/serving/run_serving_query.py` → single anti-join SQL; Trino if `TRINO_HOST`, else SQLite | `s5-serving`: Trino + `trino-views-init-job` (`unified_view.sql`) |
+| **S5: Serving layer** | One query, no double counting | `pipelines/serving/run_serving_query.py` → single anti-join SQL; Trino if `TRINO_HOST`, else SQLite (exit `1` on an empty result unless `--allow-empty`) | `s5-serving`: Trino + `trino-views-init-job` (**creates the schemas only**; `unified_view.sql` is not applied by the job) |
 | **S6: Data Mesh & Contracts** | Declarative products & contracts | `domains/**` manifests + `ValidateContractUseCase` (`rake governance:validate`) | `s6-mesh`: `DataProduct`/`DataContract` CRDs, per-domain quotas & network policies (Kyverno: values only) |
-| **S7: Data Fabric & Governance** | Lineage, quality, policy | OpenLineage JSON → `data/lineage_audit.jsonl` (+ Marquez if up); fail-closed quality engine; GDPR masking in Gold | `s7-fabric`: Marquez + `lineage-alert-service` (RF-20 rules) |
-| **S8: Orchestration & Observability** | Schedules, state, dashboards | `rake` tasks (observable, on-demand); Dagster definitions in `pipelines/orchestration/**` (not running locally) | `s8-ops`: Grafana/Prometheus/Metabase values + dashboard/alert assets — **no templates yet** |
+| **S7: Data Fabric & Governance** | Lineage, quality, policy | OpenLineage JSON → `data/lineage_audit.jsonl` (+ Marquez if up); fail-closed quality engine; GDPR masking in Gold | `s7-fabric`: Marquez + `lineage-alert-service` (**currently an `http.server` stub**, real service in `lineage/config/`) |
+| **S8: Orchestration & Observability** | Schedules, state, dashboards | `rake` tasks (observable, on-demand); Dagster definitions in `pipelines/orchestration/**` materialize locally through `local_dispatch.py` when the optional `dagster` extra is installed | `s8-ops`: Grafana/Prometheus/Metabase values + dashboard/alert assets — **no templates yet** |
 
 ### Detailed Notes per Subsystem (local reality)
 
@@ -146,6 +146,7 @@ Verified by inspecting `infra/helm/**` before writing this section:
 
 #### S5: Serving Layer
 - One SQL statement unions `gold.sales.daily_metrics` (batch) with `stream.sales.orders_windowed` (stream) using `WHERE NOT EXISTS (... b.order_date = s.order_date AND b.status = s.status)` — batch wins on collision.
+- `pipelines/serving/run_serving_query.py` exits `1` when the unified query returns no rows (pass `--allow-empty` to accept an empty result).
 - `pipelines/serving/unified_view.sql` expresses the identical semantics for Trino (`iceberg.serving.sales_unified_revenue`) when the K8s profile is up.
 
 #### S6: Data Mesh & Data Products
@@ -153,12 +154,12 @@ Verified by inspecting `infra/helm/**` before writing this section:
 - Validation aggregates **all** errors (never early-returns) and reports them deterministically: structure, governance JSON schema, declared compatibility mode, and BACKWARD evolution against `schema.json`.
 
 #### S7: Data Fabric & Governance
-- Lineage: `emit_job_event` is called by every use case (Bronze/Silver/Gold/stream/quality-gate), including `FAIL` on gate breach.
-- Quality: GE-format suites evaluated by the built-in engine; `rake quality:gate[suite,table,threshold]` runs a standalone gate with exit codes 0/1/2 (pass / blocked / execution error).
+- Lineage: `emit_job_event` is called by the pipeline use cases (Bronze, Silver incl. `FAIL` on breach, Gold, stream) and by the standalone quality-gate CLI **only when** `--marquez-url`/`MARQUEZ_URL` is configured; `query_serving` and `validate_contract` emit no events.
+- Quality: GE-format suites evaluated by the built-in engine; `rake quality:gate[suite,table,threshold]` runs a standalone gate with exit codes 0/1/2 (pass / blocked / execution error) — and applies contract thresholds first, `--threshold` only as fallback.
 
 #### S8: Orchestration & Observability
 - Local: `rake -T` lists every runnable task; `rake demo` chains preflight → contracts → bronze → silver → gold → stream → serving → tests.
-- Dagster: asset definitions and cron schedules exist as code (`daily_batch_schedule = 0 2 * * *`, `hourly_ingestion_schedule = 0 * * * *`); the Dagster quality resource **delegates to the core use case** (`container.run_quality_gate.execute`), verified by `tests/unit/test_catalog_manifest.py::test_quality_resource_delegates`.
+- Dagster: asset definitions and cron schedules exist as code (`daily_batch_schedule = 0 2 * * *`, `hourly_ingestion_schedule = 0 * * * *`); the five assets dispatch the real scripts through `pipelines/orchestration/local_dispatch.py` (`sys.executable` subprocess, so the K8s `local:///opt/spark/work-dir/...` submit path and the repo-relative paths resolve to the same local file), and the Dagster quality resource **delegates to the core use case** (`container.run_quality_gate.execute`), verified by `tests/unit/test_catalog_manifest.py::test_quality_resource_delegates` and `tests/unit/test_w5_local_dispatch.py`.
 
 ---
 
@@ -208,7 +209,7 @@ Verified by inspecting `infra/helm/**` before writing this section:
 ### Flow F1: Batch Ingestion (OLTP -> Bronze) — append, never overwrite
 1. **Trigger**: `rake medallion:bronze` (or `python pipelines/medallion/bronze_ingestion.py --entity all`).
 2. **Read**: `OltpSourceAdapter.extract_table` — PostgreSQL over JDBC when `PGPASSWORD` is provided, otherwise the embedded synthetic generator (logged loudly).
-3. **Metadata Enrichment**: audit columns `_ingested_at` (UTC), `_source` (e.g. `oltp.public.orders`), `_batch_id` (UUID per run).
+3. **Metadata Enrichment**: audit columns `_ingested_at` (UTC), `_source` (`postgresql.public.<entity>` for a real database read, `synthetic.local.<entity>` for generated fallback rows — `src/use_cases/ingest_bronze.py::provenance_label`, and the same label is used as the lineage input dataset), `_batch_id` (UUID per run).
 4. **Write**: `write_table(..., mode="append")` inserts only rows whose SHA-256 content hash is not already present. Re-running the same snapshot writes **0 rows** (`idempotent_hit=True`) — Bronze is append-only (RF-01), prior batches stay readable.
 5. **Lineage**: an OpenLineage `COMPLETE` event is appended to `data/lineage_audit.jsonl` (and POSTed to Marquez if reachable).
 
@@ -226,13 +227,13 @@ Verified by inspecting `infra/helm/**` before writing this section:
 5. **Commit**: results land in `gold.sales.daily_metrics` and `gold.sales.customers`, each write versioned for time travel.
 
 ### Flow F4: Unified Serving Layer (ONE SQL, anti-join)
-1. **Client request**: `rake serving:query` (or `python pipelines/serving/run_serving_query.py --limit 10`).
+1. **Client request**: `rake serving:query` (or `python pipelines/serving/run_serving_query.py --limit 10`). The CLI exits `1` when the unified query returns no rows (fail-closed); `--allow-empty` opts out.
 2. **Single statement**: `QueryServingUseCase._build_unified_sql` unions batch Gold with stream windows and adds `WHERE NOT EXISTS (SELECT 1 FROM gold.sales.daily_metrics b WHERE b.order_date = s.order_date AND b.status = s.status)`.
 3. **Rule**: for the same `(order_date, status)` key the **exact batch value wins**; stream rows only fill keys absent from batch, so **no key is ever counted twice (RF-11)**.
 4. **Backend**: Trino when `TRINO_HOST` is set, embedded SQLite otherwise; the adapter logs `Serving query executed by backend=...` and SQL errors raise (never swallowed).
 
 ### Flow F5: Lineage Harvesting & Quality Enforcement
-1. **Event Emission**: every use case emits OpenLineage JSON (job, inputs, outputs, status) through `LineagePublisherPort`.
+1. **Event Emission**: the pipeline use cases emit OpenLineage JSON (job, inputs, outputs, status) through `LineagePublisherPort` — `ingest_bronze`, `cleanse_silver`/`gate_support`, `aggregate_gold`, `process_stream`, and the quality-gate CLI (only when `--marquez-url`/`MARQUEZ_URL` is set). `query_serving` and `validate_contract` never emit.
 2. **Local audit first**: `data/lineage_audit.jsonl` is the source of truth; the Marquez HTTP POST is best-effort (2s timeout, failures logged as warnings).
 3. **Breach Handling**: a failed gate emits an OpenLineage `FAIL` event for `silver_clean_<entity>` before raising, and `run_quality_gate.py` exits `1` (blocked) or `2` (execution error, e.g. missing suite).
 

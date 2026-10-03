@@ -18,6 +18,7 @@ the catalog port, never by the domain).
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 from src.domain.contracts import extract_quality_thresholds
@@ -109,7 +110,11 @@ def enforce_quality_gate(
             f"Quality gate breached for {table_name} ({verdict.reason})",
             pass_rate=verdict.rate if verdict.rate is not None else evaluation.pass_rate,
             threshold=verdict.required if verdict.required is not None else effective_threshold,
-            evaluation=evaluation,
+            # The breach carries the FAILED verdict: force ``passed=False`` so
+            # consumers rendering/inspecting the attached evaluation never read
+            # the engine's global-threshold arithmetic as a PASS while contract
+            # dimensions blocked promotion.
+            evaluation=replace(evaluation, passed=False),
         )
     logger.info("Quality gate PASSED for '%s' (%s)", table_name, verdict.reason)
     return evaluation.pass_rate

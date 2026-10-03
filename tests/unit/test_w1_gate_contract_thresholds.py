@@ -100,7 +100,11 @@ def test_contract_thresholds_override_the_fallback_threshold(tmp_path) -> None:
 
     breach = exc_info.value
     assert breach.evaluation is not None
-    assert breach.evaluation.passed is True  # engine arithmetic alone was fine
+    # The breach carries the FAILED verdict (QA regression: a contract-dimension
+    # breach used to attach an evaluation with passed=True because the engine's
+    # global-threshold arithmetic was fine — the CLI then exited 0 / printed
+    # PASSED while the contract blocked the gate).
+    assert breach.evaluation.passed is False
     assert breach.evaluation.pass_rate == 0.96
     assert breach.evaluation.dimension_rates["completeness"] == 0.96
     assert breach.threshold == 0.98

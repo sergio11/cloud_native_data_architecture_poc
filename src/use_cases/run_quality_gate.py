@@ -103,13 +103,17 @@ class RunQualityGateUseCase(RunQualityGatePort):
         )
         # 5. Fail closed (RF-06): a failing verdict raises with the evaluation
         #    attached, so programmatic callers cannot ignore a breach and CLIs can
-        #    still render results, emit FAIL lineage and persist reports.
+        #    still render results, emit FAIL lineage and persist reports. The
+        #    attached evaluation is the FAILED verdict: ``passed`` is forced to
+        #    False so consumers (exit codes, panels, lineage status) never read
+        #    the engine's global-threshold arithmetic as a PASS while the
+        #    contract dimensions blocked the gate.
         if not verdict.approved:
             raise QualityGateBreachError(
                 f"Quality gate breached for {table_name} ({verdict.reason})",
                 pass_rate=verdict.rate if verdict.rate is not None else result.pass_rate,
                 threshold=verdict.required if verdict.required is not None else threshold,
-                evaluation=result,
+                evaluation=replace(result, passed=False),
             )
         if not result.passed:
             # Contract dimensions govern and all passed while the arithmetic

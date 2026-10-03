@@ -78,7 +78,7 @@ def _print_results_table(evaluation: QualityGateEvaluation) -> None:
     console.print(tbl)
 
 
-def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float) -> None:
+def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float, reason: str | None = None) -> None:
     status_text = "[bold green]PASSED[/bold green]" if evaluation.passed else "[bold red]FAILED[/bold red]"
     pct = evaluation.pass_rate * 100.0
     thresh_pct = threshold * 100.0
@@ -90,6 +90,8 @@ def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float) ->
         f"Pass Rate: [bold]{pct:.1f}%[/bold] (Threshold: {thresh_pct:.1f}%)",
         f"Gate Verdict: {status_text}",
     ]
+    if reason:
+        lines.append(f"Reason: {reason}")
     border_color = "green" if evaluation.passed else "red"
     console.print(
         Panel(
@@ -142,6 +144,7 @@ def main(
         #    there: a failing verdict raises QualityGateBreachError carrying
         #    the evaluation (exit 1: blocked), a missing suite raises
         #    SuiteNotFoundError (exit 2: execution error).
+        breach_reason: str | None = None
         try:
             evaluation = container.run_quality_gate.execute(
                 table_name=table,
@@ -154,9 +157,10 @@ def main(
                 raise
             logger.error("Quality gate FAILED: %s", breach)
             evaluation = breach.evaluation
+            breach_reason = str(breach)
 
         _print_results_table(evaluation)
-        _print_summary_panel(evaluation, threshold)
+        _print_summary_panel(evaluation, threshold, reason=breach_reason)
 
         if not evaluation.passed and any(f.rule_name == FAIL_CLOSED_RULE for f in evaluation.failures):
             console.print(

@@ -16,7 +16,7 @@ from typing import Any
 from src.domain.aggregations import BusinessAggregator
 from src.domain.exceptions import QualityGateBreachError
 from src.domain.naming import GOLD_PRODUCTS, gold_table, silver_table
-from src.domain.privacy import PrivacyPolicy
+from src.domain.privacy import DEFAULT_PII_HASH_SALT, PrivacyPolicy
 from src.ports.inbound import AggregateGoldPort, AggregateGoldResult
 from src.ports.outbound import (
     ContractCatalogPort,
@@ -49,12 +49,14 @@ class AggregateGoldUseCase(AggregateGoldPort):
         lineage: LineagePublisherPort,
         quality_engine: QualityEnginePort,
         catalog: ContractCatalogPort,
+        privacy_salt: str = DEFAULT_PII_HASH_SALT,
     ) -> None:
         self._reader = storage_reader
         self._writer = storage_writer
         self._lineage = lineage
         self._quality = quality_engine
         self._catalog = catalog
+        self._privacy_salt = privacy_salt
 
     def execute(
         self,
@@ -143,7 +145,9 @@ class AggregateGoldUseCase(AggregateGoldPort):
         customers_silver = self._reader.read_table(_SILVER_CUSTOMERS_TABLE)
         logger.info("Applying GDPR Art.25 pseudonymization on %d customers...", len(customers_silver))
 
-        masked_customers: list[dict[str, Any]] = [PrivacyPolicy.apply_customer_masking(c) for c in customers_silver]
+        masked_customers: list[dict[str, Any]] = [
+            PrivacyPolicy.apply_customer_masking(c, salt=self._privacy_salt) for c in customers_silver
+        ]
 
         target_cust_table = _GOLD_CUSTOMERS_TABLE
         enforce_quality_gate(

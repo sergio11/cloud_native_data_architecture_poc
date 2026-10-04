@@ -34,7 +34,8 @@ def test_append_idempotent(storage: LakehouseStorageAdapter) -> None:
 
     rows = storage.read_table("bronze.demo.items")
     assert len(rows) == 3
-    assert [row["id"] for row in rows] == ["1", "2", "3"]
+    # INTEGER affinity: native ints round-trip (no TEXT coercion).
+    assert [row["id"] for row in rows] == [1, 2, 3]
     for row in rows:
         assert "_batch_id" in row
         assert "_ingested_at" not in row
@@ -46,7 +47,7 @@ def test_append_idempotent(storage: LakehouseStorageAdapter) -> None:
 
     rows = storage.read_table("bronze.demo.items")
     assert len(rows) == 3
-    assert [row["id"] for row in rows] == ["1", "2", "3"]
+    assert [row["id"] for row in rows] == [1, 2, 3]
     for row in rows:
         assert row["_batch_id"] == "batch-1"
         for column in INTERNAL_COLUMNS:
@@ -70,11 +71,11 @@ def test_overwrite_supersedes_and_time_travel(storage: LakehouseStorageAdapter) 
     assert storage.write_table("silver.demo.orders", replacement, mode="overwrite") == 2
 
     live = storage.read_table("silver.demo.orders")
-    assert [row["id"] for row in live] == ["1", "4"]
+    assert [row["id"] for row in live] == [1, 4]
 
     historical = storage.read_table("silver.demo.orders", version=1)
-    assert [row["id"] for row in historical] == ["1", "2", "3"]
-    assert [row["amount"] for row in historical] == ["10", "20", "30"]
+    assert [row["id"] for row in historical] == [1, 2, 3]
+    assert [row["amount"] for row in historical] == [10, 20, 30]
 
     versions = storage.list_versions("silver.demo.orders")
     assert len(versions) >= 2
@@ -160,12 +161,12 @@ def test_append_after_overwrite_time_travel(storage: LakehouseStorageAdapter) ->
     assert latest == 3
     assert versions[-1]["row_count"] == 1
 
-    assert [row["id"] for row in storage.read_table("silver.demo.orders")] == ["1", "2", "9"]
-    assert [row["id"] for row in storage.read_table("silver.demo.orders", version=latest - 1)] == ["1", "2"]
+    assert [row["id"] for row in storage.read_table("silver.demo.orders")] == [1, 2, 9]
+    assert [row["id"] for row in storage.read_table("silver.demo.orders", version=latest - 1)] == [1, 2]
     assert [row["id"] for row in storage.read_table("silver.demo.orders", version=1)] == [
-        "1",
-        "2",
-        "3",
+        1,
+        2,
+        3,
     ]
 
 
@@ -217,10 +218,10 @@ def test_limit_and_deterministic_order(storage: LakehouseStorageAdapter) -> None
     assert storage.write_table("bronze.demo.ordered", records, mode="append") == 5
 
     full = storage.read_table("bronze.demo.ordered")
-    assert [row["id"] for row in full] == ["1", "2", "3", "4", "5"]
+    assert [row["id"] for row in full] == [1, 2, 3, 4, 5]
 
     first_three = storage.read_table("bronze.demo.ordered", limit=3)
-    assert [row["id"] for row in first_three] == ["1", "2", "3"]
+    assert [row["id"] for row in first_three] == [1, 2, 3]
     assert first_three == full[:3]
 
     assert storage.read_table("bronze.demo.ordered", limit=10) == full

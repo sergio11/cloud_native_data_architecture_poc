@@ -54,7 +54,7 @@ end
 desc 'Run all automated tests (unit + integration)'
 task :test do
   puts "\n\e[33m[Step 8/8] Executing Automated Test Suite...\e[0m"
-  sh 'python -m pytest tests --cov=src --cov-branch --cov-fail-under=85 -q'
+  sh 'python -m pytest tests --cov=src --cov=lineage --cov-branch --cov-fail-under=85 -q'
   puts "\e[32mAll test suites passed.\e[0m"
 end
 
@@ -71,7 +71,7 @@ namespace :test do
 
   desc 'Run unit tests with test coverage report'
   task :coverage do
-    sh 'python -m pytest tests --cov=src --cov-branch --cov-config=pyproject.toml --cov-report=term-missing'
+    sh 'python -m pytest tests --cov=src --cov=lineage --cov-branch --cov-config=pyproject.toml --cov-report=term-missing'
   end
 end
 
@@ -161,6 +161,20 @@ namespace :serving do
     puts "\n\e[33m[Step 7/8] Executing Live Unified Serving Query (RF-11: Batch + Stream)...\e[0m"
     sh 'python pipelines/serving/run_serving_query.py --limit 10'
     puts "\e[32mServing query executed.\e[0m"
+  end
+end
+
+namespace :replay do
+  desc 'Replay everything: full Medallion rebuild (Bronze -> Silver -> Gold) + Kappa stream replay + serving check'
+  task :all do
+    puts "\n\e[33m[Replay:all] Rebuilding Medallion tiers (Bronze -> Silver -> Gold)...\e[0m"
+    Rake::Task['medallion:all'].invoke
+    puts "\e[32mMedallion rebuild complete.\e[0m"
+    puts "\n\e[33m[Replay:all] Replaying Kappa stream log from earliest offset (RF-10)...\e[0m"
+    Rake::Task['stream:replay'].invoke
+    puts "\n\e[33m[Replay:all] Verifying unified serving query (RF-11)...\e[0m"
+    Rake::Task['serving:query'].invoke
+    puts "\e[32mReplay:all complete: Bronze -> Gold rebuilt, stream replayed, serving verified.\e[0m"
   end
 end
 

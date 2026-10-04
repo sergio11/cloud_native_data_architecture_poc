@@ -24,15 +24,14 @@ spec:
             - name: ingestion-runner
               image: "{{ .Values.ingestionRunner.image.repository }}:{{ .Values.ingestionRunner.image.tag }}"
               imagePullPolicy: {{ .Values.ingestionRunner.image.pullPolicy }}
+              # Real pipeline: image poc/ingest bakes the repo at /app (see
+              # infra/docker/ingest.Dockerfile), so the repo-relative entrypoint resolves.
               command:
-                - /bin/sh
-                - -c
-                - |
-                  echo "Triggering bronze ingestion cycle..."
-                  echo "Connecting to source: $JDBC_URL"
-                  echo "Lakehouse target catalog: $ICEBERG_CATALOG_URL"
-                  # Python bronze ingestion script trigger or spark-submit trigger
-                  echo "Ingestion cycle completed successfully."
+                - python
+                - pipelines/medallion/bronze_ingestion.py
+                - --entity
+                - all
+              workingDir: /app
               env:
                 {{- range $key, $val := .Values.ingestionRunner.env }}
                 - name: {{ $key }}

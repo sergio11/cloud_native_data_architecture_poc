@@ -69,7 +69,7 @@ def test_batch_wins_no_double_count(tmp_path, monkeypatch):
         ],
     )
 
-    rows = _make_use_case(db_path).execute_unified_revenue_query()
+    rows = _make_use_case(db_path).execute()
 
     assert len(rows) == 2
     tiers = {r["source_tier"] for r in rows}
@@ -104,15 +104,15 @@ def test_order_date_filter_limit_and_types(tmp_path, monkeypatch):
     )
     uc = _make_use_case(db_path)
 
-    filtered = uc.execute_unified_revenue_query(order_date_gte="2026-09-21")
+    filtered = uc.execute(order_date_gte="2026-09-21")
     assert [r["order_date"] for r in filtered] == ["2026-09-26"]
     assert filtered[0]["source_tier"] == "stream_speed"
 
-    limited = uc.execute_unified_revenue_query(order_date_gte="2026-09-19", limit=2)
+    limited = uc.execute(order_date_gte="2026-09-19", limit=2)
     assert len(limited) == 2
     assert [r["order_date"] for r in limited] == ["2026-09-26", "2026-09-20"]
 
-    typed = uc.execute_unified_revenue_query(limit=20)
+    typed = uc.execute(limit=20)
     assert len(typed) == 4
     for r in typed:
         assert isinstance(r["total_orders"], int)
@@ -155,7 +155,7 @@ def test_superseded_rows_excluded_when_column_present(tmp_path, monkeypatch):
         superseded_column=True,
     )
 
-    rows = _make_use_case(db_path).execute_unified_revenue_query()
+    rows = _make_use_case(db_path).execute()
 
     assert len(rows) == 2
     assert all(r["order_date"] != "2026-09-25" for r in rows)

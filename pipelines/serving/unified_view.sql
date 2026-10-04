@@ -12,19 +12,46 @@
 --
 -- Note (VIEW 1):
 --   sales_unified_revenue is the SQL equivalent of
---   src/use_cases/query_serving.py :: QueryServingUseCase.execute_unified_revenue_query,
+--   src/use_cases/query_serving.py :: QueryServingUseCase.execute,
 --   used when Trino is enabled. It expresses the EXACT same Lambda fusion
 --   semantics: batch wins on (order_date, status) key collision and stream
 --   rows only fill keys absent from batch (NOT EXISTS anti-join), so no key
---   is counted twice. The logical table names below (gold.sales.daily_metrics,
---   stream.sales.orders_windowed - also accepted in iceberg.* catalog form)
---   are exactly those the serving adapter rewrites for embedded SQLite.
+--   is counted twice. The base tables below (gold.sales.daily_metrics,
+--   stream.sales.orders_windowed) are the versioned sources; the serving SQL
+--   itself references the LIVE VIEWS above verbatim (no rewriting on any
+--   backend), while VIEW 1 keeps reading the base tables with identical
+--   anti-join semantics.
+--
+-- Deployed objects in this file: schemas (serving/sales/marketing/finance)
+-- + LIVE VIEWS gold_sales_daily_metrics_live / stream_sales_orders_windowed_live
+-- (pass-through twins of the SQLite `<physical>_live` serving views, SSOT
+-- src.domain.naming.serving_view_name - the names the serving SQL references
+-- verbatim on every backend)
+-- + VIEW 1 sales_unified_revenue (RF-11). Former marketing/finance VIEWS 2-3
+-- were REMOVED (K5/K8): their source tables are produced by no pipeline, so
+-- the file deploys exactly what the repo can honestly serve.
 -- =============================================================================
 
 CREATE SCHEMA IF NOT EXISTS iceberg.serving;
 CREATE SCHEMA IF NOT EXISTS iceberg.sales;
 CREATE SCHEMA IF NOT EXISTS iceberg.marketing;
 CREATE SCHEMA IF NOT EXISTS iceberg.finance;
+
+-- ---------------------------------------------------------------------------
+-- LIVE VIEWS: iceberg.serving.<physical>_live (serving no-rewrite contract)
+-- Pure pass-through twins of the SQLite `<physical>_live` views the serving
+-- SQL references verbatim (SSOT src.domain.naming.serving_view_name):
+-- SQLite provisions them as `SELECT * ... WHERE _row_superseded IS NULL`
+-- (or pass-through when that column is absent); here they are plain
+-- pass-through over Iceberg because `_row_superseded` is a SQLite-only
+-- versioning concept, unknown to Iceberg/Trino. Bare view names resolve
+-- against the serving schema (TRINO_SCHEMA=serving in the serving adapter).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW iceberg.serving.gold_sales_daily_metrics_live AS
+SELECT * FROM gold.sales.daily_metrics;
+
+CREATE OR REPLACE VIEW iceberg.serving.stream_sales_orders_windowed_live AS
+SELECT * FROM stream.sales.orders_windowed;
 
 -- ---------------------------------------------------------------------------
 -- VIEW 1: iceberg.serving.sales_unified_revenue (RF-11)
@@ -84,34 +111,22 @@ ORDER BY order_date DESC, status DESC;
 
 
 -- ---------------------------------------------------------------------------
--- VIEW 2: iceberg.serving.marketing_unified_campaign_performance
--- PLANNED (not deployed): iceberg.marketing.funnel_metrics is not produced
--- by any pipeline in this POC (see PIPELINE_JOBS in catalog_registration.py).
+-- VIEWS 2-3 REMOVED (2026-10-04, K8s remediation K5/K8) - DO NOT RE-ADD
+-- WITHOUT A PRODUCING PIPELINE.
+-- The former marketing_unified_campaign_performance read
+-- iceberg.marketing.campaigns + iceberg.marketing.funnel_metrics and
+-- finance_unified_pl_summary read iceberg.finance.financial_closings.
+-- NONE of those three tables is produced by any pipeline in this repo:
+--   * catalog_registration.py registers only gold.sales.daily_metrics,
+--     gold.sales.customers, stream.sales.orders_windowed and
+--     stream.marketing.clickstream_windowed (PIPELINE_JOBS: spark_sales_gold_etl,
+--     flink_orders_stream, flink_clickstream_stream, unified_serving_views);
+--   * the clickstream driver writes generic tumbling-window aggregates
+--     (window_start/window_end/order_date/status/window_revenue/window_orders),
+--     NOT funnel/campaign columns (no campaign_id/channel/budget/clicks);
+--   * no finance pipeline exists at all.
+-- Rewriting the views onto clickstream_windowed / daily_metrics would fake
+-- campaign/finance semantics, so there is NO honest equivalent: the views are
+-- deleted and only VIEW 1 (RF-11) is deployed. Re-introduce them only together
+-- with the pipelines + catalog entries that produce their source tables.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW iceberg.serving.marketing_unified_campaign_performance AS
-SELECT
-    c.id                                           AS campaign_id,
-    c.channel                                      AS channel,
-    c.budget                                       AS allocated_budget,
-    COALESCE(f.total_clicks, 0)                    AS total_clicks,
-    COALESCE(f.total_purchases, 0)                 AS total_conversions,
-    CAST(COALESCE(f.attributed_revenue, 0) AS DECIMAL(14, 2)) AS total_revenue
-FROM iceberg.marketing.campaigns c
-LEFT JOIN iceberg.marketing.funnel_metrics f
-    ON c.channel = f.channel;
-
--- ---------------------------------------------------------------------------
--- VIEW 3: iceberg.serving.finance_unified_pl_summary
--- PLANNED (not deployed): iceberg.finance.financial_closings is not produced
--- by any pipeline in this POC (see PIPELINE_JOBS in catalog_registration.py).
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW iceberg.serving.finance_unified_pl_summary AS
-SELECT
-    fiscal_year,
-    fiscal_period,
-    gross_revenue,
-    net_revenue,
-    total_orders,
-    status AS audit_status,
-    closed_at
-FROM iceberg.finance.financial_closings;

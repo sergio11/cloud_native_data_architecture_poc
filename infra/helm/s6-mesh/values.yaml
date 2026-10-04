@@ -6,10 +6,17 @@
 global:
   namespace: platform
 
+# PREREQUISITE (K-B): installing Kyverno itself is NOT done by this chart.
+# Install it first from its official chart/OCI (offline env: no dependency
+# build is attempted, the Chart.yaml dependency stays commented). The flag
+# below only gates the ClusterPolicies rendered by
+# templates/kyverno-policies.yaml from governance/policies/*.yaml.
 # DEFERRED (RF-17): no template in templates/ consumes this block yet — admission
 # control is not rendered; scripts/setup-cluster.sh only registers the Kyverno repo.
 kyverno:
   enabled: true
+  # Gate for templates/kyverno-policies.yaml (ClusterPolicies only).
+  policiesEnabled: true
   replicaCount: 1
   image:
     repository: ghcr.io/kyverno/kyverno

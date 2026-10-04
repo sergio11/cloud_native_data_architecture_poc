@@ -79,7 +79,7 @@ def test_port_signatures_conform_to_lsp(container: Container) -> None:
     _check_lsp(ProcessStreamPort.execute, container.process_stream.execute)
     _check_lsp(RunQualityGatePort.execute, container.run_quality_gate.execute)
     _check_lsp(ValidateContractPort.execute, container.validate_contract.execute)
-    _check_lsp(QueryServingPort.execute_unified_revenue_query, container.query_serving.execute_unified_revenue_query)
+    _check_lsp(QueryServingPort.execute, container.query_serving.execute)
 
 
 def test_every_inbound_port_is_invocable_by_its_declared_signature(container: Container) -> None:
@@ -138,7 +138,7 @@ def test_every_inbound_port_is_invocable_by_its_declared_signature(container: Co
     assert validation["passed"] is True
 
     # Serving query over the batch + stream tiers just materialised.
-    rows = container.query_serving.execute_unified_revenue_query(limit=5)
+    rows = container.query_serving.execute(limit=5)
     assert isinstance(rows, list)
     assert len(rows) > 0
 

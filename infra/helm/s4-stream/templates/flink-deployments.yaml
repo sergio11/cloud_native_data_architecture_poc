@@ -36,3 +36,41 @@ spec:
     parallelism: 1
     upgradeMode: stateless
 {{- end }}
+{{- if and .Values.flinkOperator.enabled .Values.flinkJobs.clickstreamStream.enabled }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: flink-clickstream-stream
+  namespace: {{ .Values.global.computeNamespace | default "marketing" }}
+  labels:
+    app: flink-clickstream-stream
+    stream: clickstream
+    {{- include "s4-stream.labels" . | nindent 4 }}
+spec:
+  image: {{ .Values.flinkJobs.clickstreamStream.image }}
+  flinkVersion: v1_18
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "2"
+    state.backend: filesystem
+    state.checkpoints.dir: "s3a://checkpoints/flink-clickstream"
+    s3.endpoint: "http://minio.platform.svc.cluster.local:9000"
+    s3.path.style.access: "true"
+    s3.access-key: "minioadmin"
+    s3.secret-key: "minioadmin"
+  serviceAccount: flink-service-account
+  jobManager:
+    resource:
+      memory: {{ .Values.flinkJobs.clickstreamStream.jobManager.memory | quote }}
+      cpu: {{ .Values.flinkJobs.clickstreamStream.jobManager.cpu }}
+  taskManager:
+    resource:
+      memory: {{ .Values.flinkJobs.clickstreamStream.taskManager.memory | quote }}
+      cpu: {{ .Values.flinkJobs.clickstreamStream.taskManager.cpu }}
+    replicas: {{ .Values.flinkJobs.clickstreamStream.taskManager.replicas }}
+  job:
+    jarURI: "local:///opt/flink/opt/flink-python_2.12-1.18.0.jar"
+    entryClass: "org.apache.flink.client.python.PythonDriver"
+    args: ["-py", "/opt/flink/pipelines/stream/flink_clickstream_stream.py"]
+    parallelism: 1
+    upgradeMode: stateless
+{{- end }}

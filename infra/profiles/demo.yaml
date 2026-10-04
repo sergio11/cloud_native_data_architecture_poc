@@ -1,9 +1,15 @@
 # ==============================================================================
 # Modern Data Architecture POC - Startup Profile: Demo (RF-24 Full Suite)
 # File: infra/profiles/demo.yaml
-# Description: Comprehensive demonstration profile activating all subsystems
-#              (S1 through S8) in lightweight, single-replica mode carefully
-#              tuned to execute simultaneously within a strict 7.5 GB RAM ceiling.
+# CONTRACT (K-B): `subsystems.<chart>` is a verbatim Helm values fragment for
+# infra/helm/<chart> (keys verified 1:1 against each chart's values.yaml).
+# scripts/profile-up.sh extracts each section with python3/PyYAML to a temp
+# file and passes it as `helm upgrade --install <chart> <chartdir> -f <tmp>`.
+# Only charts this profile deploys have a section (all 8 here).
+# S8 scope: prometheus+grafana only (dagster/metabase have no templates).
+# S4 note: demo enables ordersStream only; clickstreamStream is explicitly
+# disabled to stay within the 7.5 GB RAM ceiling (old pedidosStream key never
+# existed in s4 values).
 # Target RAM Footprint: ~7.2 GB RAM (Strict < 7.5 GB Ceiling)
 # ==============================================================================
 profile:
@@ -13,20 +19,19 @@ profile:
   targetCpuCores: 6.0
 
 subsystems:
-  # S1: OLTP Demo Ingestion Source
   s1-ingestion:
-    enabled: true
-    replicas: 1
-    resources:
-      postgresql:
+    postgresql:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "192Mi"
         limits:
           cpu: "400m"
           memory: "384Mi"
-      ingestionRunner:
-        enabled: true
+    ingestionRunner:
+      enabled: true
+      resources:
         requests:
           cpu: "50m"
           memory: "96Mi"
@@ -34,19 +39,19 @@ subsystems:
           cpu: "250m"
           memory: "192Mi"
 
-  # S2: Lakehouse Storage and Iceberg Catalog
   s2-lakehouse:
-    enabled: true
-    replicas: 1
-    resources:
-      minio:
+    minio:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "192Mi"
         limits:
           cpu: "400m"
           memory: "384Mi"
-      polaris:
+    polaris:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "256Mi"
@@ -54,85 +59,87 @@ subsystems:
           cpu: "500m"
           memory: "384Mi"
 
-  # S3: Batch Processing Engine (Spark Operator)
   s3-batch:
-    enabled: true
-    replicas: 1
-    resources:
-      sparkOperator:
+    sparkOperator:
+      enabled: true
+      resources:
         requests:
           cpu: "50m"
           memory: "128Mi"
         limits:
           cpu: "250m"
           memory: "256Mi"
-      sparkDriver:
+    sparkDefaults:
+      driver:
+        cores: 1
+        coreLimit: "500m"
         memory: "512m"
-        cpu: 0.5
-      sparkExecutor:
-        memory: "640m"
-        cpu: 0.5
+      executor:
+        cores: 1
+        coreLimit: "500m"
         instances: 1
+        memory: "640m"
 
-  # S4: Stream Processing Engine (Kafka KRaft + Flink)
   s4-stream:
-    enabled: true
-    replicas: 1
-    resources:
-      kafka:
+    kafka:
+      enabled: true
+      resources:
         requests:
           cpu: "200m"
           memory: "384Mi"
         limits:
           cpu: "600m"
           memory: "768Mi"
-      kafkaUi:
+    kafkaUi:
+      enabled: true
+      resources:
         requests:
           cpu: "50m"
           memory: "96Mi"
         limits:
           cpu: "150m"
           memory: "192Mi"
-      flinkOperator:
-        enabled: true
-        replicas: 1
+    flinkOperator:
+      enabled: true
+      replicaCount: 1
+      resources:
         requests:
           cpu: "100m"
           memory: "128Mi"
         limits:
           cpu: "300m"
           memory: "256Mi"
-      flinkJobs:
-        pedidosStream:
-          enabled: true
-          jobmanager:
-            memory: "256m"
-            cpu: 0.3
-          taskmanager:
-            memory: "384m"
-            cpu: 0.4
-            replicas: 1
+    flinkJobs:
+      ordersStream:
+        enabled: true
+        jobManager:
+          memory: "256m"
+          cpu: 0.3
+        taskManager:
+          memory: "384m"
+          cpu: 0.4
+          replicas: 1
+      clickstreamStream:
+        enabled: false
 
-  # S5: Serving Layer (Trino Distributed SQL Engine)
   s5-serving:
-    enabled: true
-    replicas: 1
-    resources:
-      trino:
+    trino:
+      enabled: true
+      resources:
         requests:
           cpu: "400m"
           memory: "896Mi"
         limits:
           cpu: "1200m"
           memory: "1280Mi"
-        jvmHeap: "1024M"
+      jvm:
+        maxHeapSize: "1024M"
 
-  # S6: Data Mesh Governance and Contracts
   s6-mesh:
-    enabled: true
-    replicas: 1
-    resources:
-      kyverno:
+    kyverno:
+      enabled: true
+      policiesEnabled: true
+      resources:
         requests:
           cpu: "50m"
           memory: "96Mi"
@@ -140,69 +147,33 @@ subsystems:
           cpu: "200m"
           memory: "192Mi"
 
-  # S7: Data Fabric & Lineage
   s7-fabric:
-    enabled: true
-    replicas: 1
-    resources:
-      marquez:
+    marquez:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "192Mi"
         limits:
           cpu: "350m"
           memory: "320Mi"
-      marquezDb:
-        requests:
-          cpu: "50m"
-          memory: "96Mi"
-        limits:
-          cpu: "200m"
-          memory: "192Mi"
 
-  # S8: Operations, Orchestration & Observability
   s8-ops:
-    enabled: true
-    replicas: 1
-    resources:
-      dagster:
-        enabled: true
-        webserver:
-          requests:
-            cpu: "100m"
-            memory: "160Mi"
-          limits:
-            cpu: "300m"
-            memory: "256Mi"
-        daemon:
-          requests:
-            cpu: "50m"
-            memory: "96Mi"
-          limits:
-            cpu: "200m"
-            memory: "192Mi"
-      prometheus:
-        enabled: true
+    prometheus:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "160Mi"
         limits:
           cpu: "300m"
           memory: "256Mi"
-      grafana:
-        enabled: true
+    grafana:
+      enabled: true
+      resources:
         requests:
           cpu: "50m"
           memory: "96Mi"
         limits:
           cpu: "200m"
           memory: "192Mi"
-      metabase:
-        enabled: true
-        requests:
-          cpu: "100m"
-          memory: "256Mi"
-        limits:
-          cpu: "350m"
-          memory: "384Mi"
-        javaOpts: "-Xmx320m"

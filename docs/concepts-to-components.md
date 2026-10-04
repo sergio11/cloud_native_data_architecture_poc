@@ -108,7 +108,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
     ) unified
     ORDER BY order_date DESC, status DESC;
     ```
-    The fusion is an **anti-join on `(order_date, status)` (batch wins)**, not a date-window filter. Views 2 and 3 (`marketing_unified_campaign_performance`, `finance_unified_pl_summary`) are declared **PLANNED** in the same file because their source tables are never produced by this repo, and nothing local executes the file (the K8s `trino-views-init-job` only runs `CREATE SCHEMA`).
+    The fusion is an **anti-join on `(order_date, status)` (batch wins)**, not a date-window filter. Former views 2 and 3 (`marketing_unified_campaign_performance`, `finance_unified_pl_summary`) were **REMOVED** (their source tables are produced by no pipeline — see the note at the end of `pipelines/serving/unified_view.sql`); the file deploys schemas + LIVE views + VIEW 1 only, and the K8s `trino-views-init-job` applies it via the `trino-views-sql` ConfigMap.
 
 ---
 
@@ -159,7 +159,7 @@ This document provides a comprehensive, bidirectional mapping between the founda
 - **Theoretical Concept**: GDPR Article 25 ("Data protection by design and by default") and Article 32 ("Security of processing") mandate that personal data must not be exposed in analytical stores where it is not strictly required for business calculations.
 - **Repository Implementation**:
   - Implemented in [`pipelines/medallion/gold_aggregation.py`](../pipelines/medallion/gold_aggregation.py) via [`src/domain/privacy.py`](../src/domain/privacy.py):
-    - **Customer Email**: replaced by an irreversible SHA-256 cryptographic hash (`email_hash = SHA256(lower(trim(email)))`).
+    - **Customer Email**: replaced by an irreversible salted SHA-256 cryptographic hash (`email_hash = SHA256(salt + ":" + lower(trim(email)))`, salt from `PII_HASH_SALT`, default `poc-demo-salt-v1`).
     - **Customer Name**: masked to first name and last initial only (e.g., "Alice S." → `name_masked`); the plaintext `name` column is dropped.
     - **Registration Date**: **not transformed** — `src/domain/privacy.py` only hashes `email` and masks `name`; `registration_date` is carried into `gold.sales.customers` unchanged (there is no year truncation in the current code).
     - Gold tables expose no plaintext `name`/`email` columns (the two attributes the masking policy covers).

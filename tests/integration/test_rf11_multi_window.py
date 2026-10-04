@@ -15,7 +15,7 @@ STREAM_TARGET = "stream.sales.orders_windowed"
 
 def test_stream_windows_merge_to_single_day_row(world) -> None:
     """Given TWO stream windows sharing one (order_date, status) key and no
-    batch coverage, When execute_unified_revenue_query() runs, Then exactly
+    batch coverage, When execute() runs, Then exactly
     ONE stream_speed row appears with summed orders/revenue."""
     stream_rows = [
         {
@@ -53,7 +53,7 @@ def test_stream_windows_merge_to_single_day_row(world) -> None:
         == 1
     )
 
-    rows = world.query_serving.execute_unified_revenue_query()
+    rows = world.query_serving.execute()
 
     keyed = [r for r in rows if r["order_date"] == "2026-09-26" and r["status"] == "confirmed"]
     assert len(keyed) == 1
@@ -96,7 +96,7 @@ def test_batch_wins_over_merged_stream(world) -> None:
     assert world.storage.write_table(GOLD_METRICS, gold_rows, mode="append") == 1
     assert world.storage.write_table(STREAM_TARGET, stream_rows, mode="append") == 2
 
-    rows = world.query_serving.execute_unified_revenue_query()
+    rows = world.query_serving.execute()
 
     keyed = [r for r in rows if r["order_date"] == "2026-09-26" and r["status"] == "confirmed"]
     assert len(keyed) == 1

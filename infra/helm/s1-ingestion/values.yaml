@@ -53,8 +53,9 @@ ingestionRunner:
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   image:
-    repository: python
-    tag: "3.11-slim"
+    # Built from repo root: docker build -f infra/docker/ingest.Dockerfile -t poc/ingest:0.1.0 .
+    repository: poc/ingest
+    tag: "0.1.0"
     pullPolicy: IfNotPresent
   resources:
     requests:

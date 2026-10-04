@@ -18,6 +18,20 @@ Null / ``mostly`` policy:
     ``value_set`` (kept from the previous semantics).
   * between only bounds-checks non-null values; nulls are skipped (not invalid).
   * unique ignores nulls; duplicates among non-null values fail.
+
+Dimension-rate semantics (per RECORD, not per assertion):
+  * ``dimension_rates[dim] = 1 - (distinct rows failing >= 1 attributable
+    assertion of that dimension) / (total rows)``, rounded to 4 decimals, so
+    contract thresholds declared as record-quality percentages (e.g.
+    ``validity 0.99``) are evaluated on the same basis. ``mostly`` keeps its
+    Great Expectations meaning ONLY for each assertion's boolean verdict and
+    never enters the rate arithmetic.
+  * ``expect_table_row_count_to_be_between`` is not attributable to individual
+    rows: when a dimension is measured ONLY by non-attributable assertions,
+    its rate keeps the legacy assertion ratio (``passed/total``). No shipped
+    suite under ``quality/expectations/`` exercises that case (every
+    completeness block also carries attributable ``not_null`` assertions),
+    but the fallback is kept for robustness.
 """
 
 from __future__ import annotations
@@ -51,10 +65,14 @@ DIMENSION_BY_EXPECTATION: dict[str, str] = {
 }
 
 # Shared signature of every per-type handler:
-# (records, kwargs, mostly, col, col_key) -> (success, observed, details, column).
+# (records, kwargs, mostly, col, col_key)
+#   -> (success, observed, details, column, failed_row_indices).
+# ``failed_row_indices`` holds the 0-based indices of the rows violating the
+# assertion, or ``None`` when the assertion is not attributable to individual
+# rows (currently only ``expect_table_row_count_to_be_between``).
 _ExpectationHandler = Callable[
     [list[dict[str, Any]], dict[str, Any], float, Any, str],
-    tuple[bool, Any, str, Any],
+    tuple[bool, Any, str, Any, set[int] | None],
 ]
 
 
@@ -119,6 +137,8 @@ class ExpectationEngineAdapter(QualityEnginePort):
         unsupported = False
         dimension_total: dict[str, int] = {}
         dimension_passed: dict[str, int] = {}
+        dimension_failed_rows: dict[str, set[int]] = {}
+        dimension_attributable: dict[str, bool] = {}
 
         handlers: dict[str, _ExpectationHandler] = {
             "expect_column_values_to_not_be_null": self._eval_not_null,
@@ -140,6 +160,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
             observed: Any = None
 
             handler = handlers.get(exp_type)
+            failed_rows: set[int] | None = None
             if handler is None:
                 # Unknown expectation type: fail closed - the engine cannot verify it.
                 success = False
@@ -151,13 +172,20 @@ class ExpectationEngineAdapter(QualityEnginePort):
                 )
                 logger.error("Unsupported expectation type '%s' in suite '%s'; failing closed.", exp_type, suite_name)
             else:
-                success, observed, details, col = handler(records, kwargs, mostly, col, col_key)
+                success, observed, details, col, failed_rows = handler(records, kwargs, mostly, col, col_key)
 
             dimension = DIMENSION_BY_EXPECTATION.get(exp_type)
             if dimension is not None:
                 dimension_total[dimension] = dimension_total.get(dimension, 0) + 1
                 if success:
                     dimension_passed[dimension] = dimension_passed.get(dimension, 0) + 1
+                if failed_rows is None:
+                    # Non-attributable assertion (row-count): it still votes in
+                    # the assertion arithmetic, but contributes no failing rows.
+                    dimension_attributable.setdefault(dimension, False)
+                else:
+                    dimension_attributable[dimension] = True
+                    dimension_failed_rows.setdefault(dimension, set()).update(failed_rows)
 
             if success:
                 passed_count += 1
@@ -177,10 +205,18 @@ class ExpectationEngineAdapter(QualityEnginePort):
         # Threshold governs the verdict, but fail-closed conditions (unsupported
         # expectation types) force passed=False regardless of the arithmetic.
         passed = (pass_rate >= threshold) and not unsupported
-        dimension_rates = {
-            dimension: round(dimension_passed.get(dimension, 0) / total, 4)
-            for dimension, total in dimension_total.items()
-        }
+        dimension_rates: dict[str, float] = {}
+        for dimension, total in dimension_total.items():
+            if dimension_attributable.get(dimension, False):
+                # Per-record semantics: 1 - (distinct failing rows / total rows).
+                failed = len(dimension_failed_rows.get(dimension, set()))
+                dimension_rates[dimension] = round(1.0 - failed / len(records), 4)
+            else:
+                # Legacy fallback: the dimension is measured ONLY by
+                # non-row-attributable assertions (e.g. a suite with nothing
+                # but expect_table_row_count_to_be_between), so no failing
+                # rows exist and the assertion ratio is the only signal.
+                dimension_rates[dimension] = round(dimension_passed.get(dimension, 0) / total, 4)
         return QualityGateEvaluation(
             suite_name=suite_name,
             table_name=table_name,
@@ -201,12 +237,12 @@ class ExpectationEngineAdapter(QualityEnginePort):
         mostly: float,
         col: Any,
         col_key: str,
-    ) -> tuple[bool, Any, str, Any]:
-        nulls = sum(1 for r in records if r.get(col_key) is None or str(r.get(col_key)).strip() == "")
-        success = (nulls / len(records)) <= (1.0 - mostly)
-        observed = f"{nulls} nulls ({nulls / len(records):.1%})"
+    ) -> tuple[bool, Any, str, Any, set[int] | None]:
+        failed = {i for i, r in enumerate(records) if r.get(col_key) is None or str(r.get(col_key)).strip() == ""}
+        success = (len(failed) / len(records)) <= (1.0 - mostly)
+        observed = f"{len(failed)} nulls ({len(failed) / len(records):.1%})"
         details = f"mostly={mostly}: null/blank fraction must be <= {1.0 - mostly:.2f} (nulls counted over all rows)"
-        return success, observed, details, col
+        return success, observed, details, col, failed
 
     def _eval_unique(
         self,
@@ -215,13 +251,20 @@ class ExpectationEngineAdapter(QualityEnginePort):
         mostly: float,
         col: Any,
         col_key: str,
-    ) -> tuple[bool, Any, str, Any]:
-        vals = [r.get(col_key) for r in records if r.get(col_key) is not None]
-        dups = len(vals) - len(set(vals))
+    ) -> tuple[bool, Any, str, Any, set[int] | None]:
+        counts: dict[Any, int] = {}
+        for r in records:
+            val = r.get(col_key)
+            if val is None:
+                continue
+            counts[val] = counts.get(val, 0) + 1
+        duplicated_values = {val for val, n in counts.items() if n > 1}
+        failed = {i for i, r in enumerate(records) if r.get(col_key) in duplicated_values}
+        dups = len([r for r in records if r.get(col_key) is not None]) - len(counts)
         success = dups == 0
         observed = f"{dups} duplicates"
         details = "nulls are ignored for uniqueness; duplicate non-null values fail"
-        return success, observed, details, col
+        return success, observed, details, col, failed
 
     def _eval_in_set(
         self,
@@ -230,16 +273,16 @@ class ExpectationEngineAdapter(QualityEnginePort):
         mostly: float,
         col: Any,
         col_key: str,
-    ) -> tuple[bool, Any, str, Any]:
+    ) -> tuple[bool, Any, str, Any, set[int] | None]:
         val_set = set(kwargs.get("value_set") or [])
-        invalids = sum(1 for r in records if r.get(col_key) not in val_set)
-        success = (invalids / len(records)) <= (1.0 - mostly)
-        observed = f"{invalids} outside allowed set"
+        failed = {i for i, r in enumerate(records) if r.get(col_key) not in val_set}
+        success = (len(failed) / len(records)) <= (1.0 - mostly)
+        observed = f"{len(failed)} outside allowed set"
         details = (
             f"mostly={mostly}: values outside value_set must be <= {1.0 - mostly:.2f}; "
             "nulls count as invalid unless None is explicitly in value_set"
         )
-        return success, observed, details, col
+        return success, observed, details, col, failed
 
     def _eval_between(
         self,
@@ -248,30 +291,30 @@ class ExpectationEngineAdapter(QualityEnginePort):
         mostly: float,
         col: Any,
         col_key: str,
-    ) -> tuple[bool, Any, str, Any]:
+    ) -> tuple[bool, Any, str, Any, set[int] | None]:
         min_v = kwargs.get("min_value")
         max_v = kwargs.get("max_value")
-        out_of_bounds = 0
-        for r in records:
+        failed: set[int] = set()
+        for i, r in enumerate(records):
             val = r.get(col_key)
             if val is None:
                 continue
             try:
                 fval = float(val)
                 if min_v is not None and fval < min_v:
-                    out_of_bounds += 1
+                    failed.add(i)
                 elif max_v is not None and fval > max_v:
-                    out_of_bounds += 1
+                    failed.add(i)
             except (ValueError, TypeError):
-                out_of_bounds += 1
-        success = (out_of_bounds / len(records)) <= (1.0 - mostly)
-        observed = f"{out_of_bounds} values out of bounds [{min_v}, {max_v}]"
+                failed.add(i)
+        success = (len(failed) / len(records)) <= (1.0 - mostly)
+        observed = f"{len(failed)} values out of bounds [{min_v}, {max_v}]"
         details = (
             f"mostly={mostly}: non-null values outside [{min_v}, {max_v}] must be "
             f"<= {1.0 - mostly:.2f}; nulls are skipped (not bounds-checked); "
             "non-numeric values count as out of bounds"
         )
-        return success, observed, details, col
+        return success, observed, details, col, failed
 
     def _eval_regex(
         self,
@@ -280,16 +323,16 @@ class ExpectationEngineAdapter(QualityEnginePort):
         mostly: float,
         col: Any,
         col_key: str,
-    ) -> tuple[bool, Any, str, Any]:
+    ) -> tuple[bool, Any, str, Any, set[int] | None]:
         regex_pat = re.compile(kwargs.get("regex") or ".*")
-        non_matches = sum(1 for r in records if not regex_pat.match(str(r.get(col_key, ""))))
-        success = (non_matches / len(records)) <= (1.0 - mostly)
-        observed = f"{non_matches} regex non-matches"
+        failed = {i for i, r in enumerate(records) if not regex_pat.match(str(r.get(col_key, "")))}
+        success = (len(failed) / len(records)) <= (1.0 - mostly)
+        observed = f"{len(failed)} regex non-matches"
         details = (
             f"mostly={mostly}: regex non-match fraction must be <= {1.0 - mostly:.2f} "
             "(match anchored at start of value)"
         )
-        return success, observed, details, col
+        return success, observed, details, col, failed
 
     def _eval_row_count(
         self,
@@ -298,11 +341,11 @@ class ExpectationEngineAdapter(QualityEnginePort):
         mostly: float,
         col: Any,
         col_key: str,
-    ) -> tuple[bool, Any, str, Any]:
+    ) -> tuple[bool, Any, str, Any, set[int] | None]:
         min_rows = kwargs.get("min_value")
         max_rows = kwargs.get("max_value")
         count = len(records)
         success = (min_rows is None or count >= min_rows) and (max_rows is None or count <= max_rows)
         observed = f"{count} rows (expected between {min_rows} and {max_rows})"
         details = "row count bounds are inclusive; None means unbounded"
-        return success, observed, details, None
+        return success, observed, details, None, None

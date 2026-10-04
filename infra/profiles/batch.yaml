@@ -1,9 +1,11 @@
 # ==============================================================================
 # Modern Data Architecture POC - Startup Profile: Batch
 # File: infra/profiles/batch.yaml
-# Description: Batch processing profile activating foundational platform
-#              services, Spark on K8s operator, Trino distributed SQL query
-#              engine, Dagster pipeline orchestrator, and Great Expectations gates.
+# CONTRACT (K-B): each `subsystems.<chart>` is a verbatim Helm values fragment
+# for infra/helm/<chart> (keys verified 1:1 against each chart's values.yaml).
+# Only charts this profile deploys have a section (s1, s2, s3, s5).
+# NOTE: s8 is NOT deployed by the batch path of profile-up.sh; the old
+# dagster-only s8 section is dropped (dagster has no templates/values).
 # Target RAM Footprint: ~6.5 GB RAM
 # ==============================================================================
 profile:
@@ -13,20 +15,19 @@ profile:
   targetCpuCores: 4.5
 
 subsystems:
-  # S1: OLTP Demo Ingestion Source
   s1-ingestion:
-    enabled: true
-    replicas: 1
-    resources:
-      postgresql:
+    postgresql:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "256Mi"
         limits:
           cpu: "500m"
           memory: "384Mi"
-      ingestionRunner:
-        enabled: true
+    ingestionRunner:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "128Mi"
@@ -34,19 +35,19 @@ subsystems:
           cpu: "300m"
           memory: "256Mi"
 
-  # S2: Lakehouse Storage and Iceberg Catalog
   s2-lakehouse:
-    enabled: true
-    replicas: 1
-    resources:
-      minio:
+    minio:
+      enabled: true
+      resources:
         requests:
           cpu: "150m"
           memory: "256Mi"
         limits:
           cpu: "500m"
           memory: "384Mi"
-      polaris:
+    polaris:
+      enabled: true
+      resources:
         requests:
           cpu: "150m"
           memory: "384Mi"
@@ -54,114 +55,36 @@ subsystems:
           cpu: "600m"
           memory: "512Mi"
 
-  # S3: Batch Processing Engine (Spark Operator on K8s)
   s3-batch:
-    enabled: true
-    replicas: 1
-    resources:
-      sparkOperator:
+    sparkOperator:
+      enabled: true
+      resources:
         requests:
           cpu: "100m"
           memory: "256Mi"
         limits:
           cpu: "400m"
           memory: "384Mi"
-      sparkDriver:
+    sparkDefaults:
+      driver:
+        cores: 1
+        coreLimit: "1000m"
         memory: "1024m"
-        cpu: 1.0
-      sparkExecutor:
-        memory: "1280m"
-        cpu: 1.0
+      executor:
+        cores: 1
+        coreLimit: "1000m"
         instances: 1
+        memory: "1280m"
 
-  # S4: Stream Processing Engine (Disabled in Batch Profile)
-  s4-stream:
-    enabled: false
-    replicas: 0
-    resources:
-      kafka:
-        requests:
-          cpu: "0m"
-          memory: "0Mi"
-        limits:
-          cpu: "0m"
-          memory: "0Mi"
-      kafkaUi:
-        enabled: false
-      flinkOperator:
-        enabled: false
-
-  # S5: Serving Layer (Trino Coordinator + Worker in single node)
   s5-serving:
-    enabled: true
-    replicas: 1
-    resources:
-      trino:
+    trino:
+      enabled: true
+      resources:
         requests:
           cpu: "500m"
           memory: "1536Mi"
         limits:
           cpu: "1500m"
           memory: "2048Mi"
-        jvmHeap: "1536M"
-
-  # S6: Data Mesh Governance and Contracts
-  s6-mesh:
-    enabled: true
-    replicas: 1
-    resources:
-      kyverno:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "300m"
-          memory: "256Mi"
-
-  # S7: Data Fabric & Lineage
-  s7-fabric:
-    enabled: true
-    replicas: 1
-    resources:
-      marquez:
-        requests:
-          cpu: "100m"
-          memory: "256Mi"
-        limits:
-          cpu: "500m"
-          memory: "384Mi"
-      marquezDb:
-        requests:
-          cpu: "50m"
-          memory: "128Mi"
-        limits:
-          cpu: "300m"
-          memory: "256Mi"
-
-  # S8: Operations, Orchestration & Observability (Dagster Orchestrator)
-  s8-ops:
-    enabled: true
-    replicas: 1
-    resources:
-      dagster:
-        enabled: true
-        webserver:
-          requests:
-            cpu: "100m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "384Mi"
-        daemon:
-          requests:
-            cpu: "100m"
-            memory: "128Mi"
-          limits:
-            cpu: "300m"
-            memory: "256Mi"
-      prometheus:
-        enabled: false
-      grafana:
-        enabled: false
-      metabase:
-        enabled: false
+      jvm:
+        maxHeapSize: "1536M"

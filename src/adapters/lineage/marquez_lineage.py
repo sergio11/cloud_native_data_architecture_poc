@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -48,11 +49,15 @@ class MarquezLineageAdapter(LineagePublisherPort):
         when the local audit trail could not be written either.
         """
         now_iso = datetime.now(UTC).isoformat()
+        run_id = uuid.uuid4().hex
         payload: dict[str, Any] = {
             "eventType": status,
             "eventTime": now_iso,
             "producer": "poc_hexagonal_pipeline",
             "schemaURL": "https://openlineage.io/spec/1-0-5/OpenLineage.json",
+            "run": {
+                "runId": run_id,
+            },
             "job": {
                 "namespace": "modern_lakehouse",
                 "name": job_name,

@@ -22,8 +22,11 @@ alertService:
   enabled: true
   replicaCount: 1
   image:
-    repository: python
-    tag: 3.11-slim
+    # Built from lineage/config (that dir is the build context):
+    #   docker build -f lineage/config/Dockerfile -t poc/lineage-webhook:0.1.0 lineage/config/
+    repository: poc/lineage-webhook
+    tag: 0.1.0
+    pullPolicy: IfNotPresent
   service:
     type: ClusterIP
     port: 8000
@@ -34,3 +37,8 @@ alertService:
     requests:
       cpu: "50m"
       memory: "64Mi"
+  # SQLite backing store for LINEAGE_DB_PATH (/data/lineage_events.db).
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: "standard"

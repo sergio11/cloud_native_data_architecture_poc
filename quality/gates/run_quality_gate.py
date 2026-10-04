@@ -42,7 +42,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from src.container import container
 from src.domain.entities import QualityGateEvaluation
 from src.domain.exceptions import QualityGateBreachError, SuiteNotFoundError
-from src.domain.quality_gate import FAIL_CLOSED_RULE
+from src.domain.naming import contract_entity_for_table
+from src.domain.quality_gate import FAIL_CLOSED_RULE, assess_gate
+from src.use_cases.gate_support import find_contract_thresholds
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,7 +80,12 @@ def _print_results_table(evaluation: QualityGateEvaluation) -> None:
     console.print(tbl)
 
 
-def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float, reason: str | None = None) -> None:
+def _print_summary_panel(
+    evaluation: QualityGateEvaluation,
+    threshold: float,
+    reason: str | None = None,
+    thresholds: dict[str, float] | None = None,
+) -> None:
     status_text = "[bold green]PASSED[/bold green]" if evaluation.passed else "[bold red]FAILED[/bold red]"
     pct = evaluation.pass_rate * 100.0
     thresh_pct = threshold * 100.0
@@ -90,6 +97,10 @@ def _print_summary_panel(evaluation: QualityGateEvaluation, threshold: float, re
         f"Pass Rate: [bold]{pct:.1f}%[/bold] (Threshold: {thresh_pct:.1f}%)",
         f"Gate Verdict: {status_text}",
     ]
+    effective = thresholds or {}
+    if effective:
+        rendered = ", ".join(f"{dim}={required:.2f}" for dim, required in sorted(effective.items()))
+        lines.append(f"Effective Thresholds: {rendered}")
     if reason:
         lines.append(f"Reason: {reason}")
     border_color = "green" if evaluation.passed else "red"
@@ -127,6 +138,14 @@ def main(
     console.rule(f"[bold cyan]Quality Gate Run — {run_id}[/bold cyan]")
     logger.info("Starting quality gate run for table '%s' using suite '%s'", table, suite)
 
+    # Flag > env > default: point the lazily-built lineage adapter at the
+    # requested Marquez before it is first constructed, and drop any adapter
+    # cached by a previous invocation in this process so the POST lands on
+    # this run's URL instead of a stale one.
+    if marquez_url:
+        os.environ["MARQUEZ_URL"] = marquez_url
+        container.__dict__.pop("lineage", None)
+
     try:
         # 1. Resolve records: --input-file is passed through via records=;
         #    otherwise the use case loads the table from storage itself.
@@ -160,7 +179,14 @@ def main(
             breach_reason = str(breach)
 
         _print_results_table(evaluation)
-        _print_summary_panel(evaluation, threshold, reason=breach_reason)
+        # Display-only verdict: recompute the shared policy verdict so the
+        # panel shows the effective per-dimension thresholds that governed
+        # (contract thresholds when they apply, else the fallback). The
+        # pass/fail decision itself already came from the use case above.
+        entity = contract_entity_for_table(table)
+        contract_thresholds = find_contract_thresholds(container.domain_catalog, entity)
+        verdict = assess_gate(evaluation, contract_thresholds, threshold)
+        _print_summary_panel(evaluation, threshold, reason=breach_reason, thresholds=verdict.thresholds)
 
         if not evaluation.passed and any(f.rule_name == FAIL_CLOSED_RULE for f in evaluation.failures):
             console.print(

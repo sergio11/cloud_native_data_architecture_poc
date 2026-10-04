@@ -131,6 +131,12 @@ class EventBrokerPort(Protocol):
         consumer group cursor, and ``max_messages`` (if given) caps the batch for
         pagination.
 
+        Kafka replay drains the log up to the high-watermark end-offsets
+        observed at subscribe/assignment time, so events appended concurrently
+        after the replay started may be excluded; when the consumer exposes
+        no watermark API the replay falls back to draining until a short
+        streak of empty polls, still with no time budget.
+
         The adapter must NEVER fabricate events when the log is empty.
         """
         ...

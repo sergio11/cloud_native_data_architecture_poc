@@ -9,7 +9,8 @@ the verdict with the same domain policy (``assess_gate``).
 
 Scenario pinned here: 50 completeness assertions, 48 of which pass, so the
 overall pass rate is 0.96 (>= a 0.95 fallback threshold) while the measured
-completeness dimension is also 0.96 (< the contract's 0.98).
+per-record completeness dimension is 0.97 (3 distinct rows with nulls out of
+100, < the contract's 0.98).
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ from src.domain.exceptions import QualityGateBreachError
 from src.use_cases.run_quality_gate import RunQualityGateUseCase
 
 _TOTAL_COLUMNS = 50
-_NULL_COLUMNS = 2  # col48/col49 hold a single null -> those assertions fail
+_NULL_COLUMNS = 2  # col48/col49 hold nulls -> those assertions fail
+_NULL_ROWS = 3  # rows 0-2 hold the nulls -> 3 distinct failing rows
 _RECORDS = 100
 _ORDERS_CONTRACT_PATH = "domains/sales/data-products/orders/contract.yaml"
 
@@ -47,12 +49,16 @@ class _StubCatalog:
 
 
 def _records() -> list[dict[str, Any]]:
-    """100 rows x 50 columns; the last two columns hold one null each."""
+    """100 rows x 50 columns; the last two columns hold nulls on 3 rows.
+
+    Per-record completeness is 1 - 3/100 = 0.97 while the assertion pass rate
+    stays 48/50 = 0.96 (the 2 assertions on the nulled columns fail).
+    """
     rows: list[dict[str, Any]] = []
     for i in range(_RECORDS):
         row: dict[str, Any] = {}
         for c in range(_TOTAL_COLUMNS):
-            nulls_here = c >= _TOTAL_COLUMNS - _NULL_COLUMNS and i == 0
+            nulls_here = c >= _TOTAL_COLUMNS - _NULL_COLUMNS and i < _NULL_ROWS
             row[f"col{c}"] = None if nulls_here else f"v{i}-{c}"
         rows.append(row)
     return rows
@@ -72,7 +78,7 @@ def _suite(tmp_path, name: str) -> str:
 
 
 def test_contract_thresholds_override_the_fallback_threshold(tmp_path) -> None:
-    """Contract completeness 0.98 vs measured 0.96 -> FAIL despite pass rate 0.96."""
+    """Contract completeness 0.98 vs measured 0.97 -> FAIL despite pass rate 0.96."""
     suite_path = _suite(tmp_path, "w1_completeness_suite")
     catalog = _StubCatalog(
         [
@@ -106,7 +112,7 @@ def test_contract_thresholds_override_the_fallback_threshold(tmp_path) -> None:
     # PASSED while the contract blocked the gate).
     assert breach.evaluation.passed is False
     assert breach.evaluation.pass_rate == 0.96
-    assert breach.evaluation.dimension_rates["completeness"] == 0.96
+    assert breach.evaluation.dimension_rates["completeness"] == 0.97
     assert breach.threshold == 0.98
     assert "completeness" in str(breach)
 

@@ -7,6 +7,7 @@ Every test runs against isolated event-log and lakehouse databases under tmp_pat
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +16,11 @@ import pytest
 from src.adapters._sqlite import sqlite_connection
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
+from src.adapters.streaming import event_stream as event_stream_module
 from src.adapters.streaming.event_stream import EventStreamAdapter
 from src.domain.aggregations import BusinessAggregator
 from src.use_cases.process_stream import ProcessStreamUseCase
+from tests.unit.test_event_stream_kafka import FakeConsumer, FakeMessage, _make_factory
 
 TARGET_TABLE = "stream.sales.orders_windowed"
 
@@ -382,3 +385,56 @@ def test_write_failure_does_not_advance_cursor(tmp_path: Path):
     assert len(rows) == 1
     assert int(rows[0]["window_orders"]) == 2
     assert float(rows[0]["window_revenue"]) == 120.0
+
+
+def test_process_stream_kafka_replay_recovers_full_backlog_despite_zero_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end (A4): a Kafka replay with zero poll budget still rebuilds every window.
+
+    Guards the silent-loss defect where ``_consume_from_kafka`` truncated the
+    replay and ``process_stream`` overwrote the Speed table with that partial
+    result: all 30 events must be consumed and both tumbling windows rebuilt.
+    """
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    monkeypatch.setattr(event_stream_module, "_POLL_BUDGET_SECONDS", 0.0)
+    topic = "unit.kafka_replay_full"
+    total = 30
+    frames: list[Any] = []
+    for i in range(total):
+        minute = 1 + (i % 8)  # spread over the 12:00-12:05 and 12:05-12:10 windows
+        frames.append(
+            FakeMessage(
+                topic,
+                i,
+                json.dumps(
+                    {
+                        "timestamp": f"2026-01-15T12:{minute:02d}:00+00:00",
+                        "status": "confirmed",
+                        "total_amount": 10.0,
+                        "order_date": "2026-01-15",
+                    }
+                ).encode("utf-8"),
+            )
+        )
+    instances: list[FakeConsumer] = []
+    broker = EventStreamAdapter(
+        db_path=str(tmp_path / "event_log.db"),
+        consumer_factory=_make_factory(frames, instances, watermarks={0: (0, total)}),
+    )
+    storage = LakehouseStorageAdapter(db_path=str(tmp_path / "lakehouse.db"))
+    lineage = MarquezLineageAdapter(
+        marquez_url="http://127.0.0.1:1",
+        audit_file_path=str(tmp_path / "lineage.jsonl"),
+    )
+    use_case = ProcessStreamUseCase(broker=broker, storage=storage, lineage=lineage)
+
+    result = use_case.execute(topic=topic, target_table=TARGET_TABLE, replay=True)
+
+    assert result["status"] == "SUCCESS"
+    assert result["mode"] == "replay_full"
+    assert result["events_consumed"] == total
+    assert result["windows_generated"] == 2
+    rows = storage.read_table(TARGET_TABLE)
+    assert len(rows) == 2
+    assert sum(int(r["window_orders"]) for r in rows) == total

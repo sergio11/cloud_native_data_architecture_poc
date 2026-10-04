@@ -82,8 +82,8 @@ def _stream_event(order_id: int, timestamp: str, amount: float, date: str) -> di
 
 
 def _stored(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Expected on-disk representation (scalar values are persisted as TEXT)."""
-    return [{key: str(value) for key, value in row.items()} for row in rows]
+    """Expected on-disk representation (native RF-04 types: int/float preserved)."""
+    return [dict(row) for row in rows]
 
 
 def _window_sort_key(row: dict[str, Any]) -> Any:
@@ -319,7 +319,7 @@ def test_rf10_replay_is_deterministic_and_ignores_consumer_cursor(world) -> None
 
 def test_rf11_batch_wins_and_stream_fills_gaps_in_single_query(world) -> None:
     """Given batch gold rows for D1 (confirmed) and stream rows for D1 (same key,
-    different numbers) plus D2, When execute_unified_revenue_query() runs once,
+    different numbers) plus D2, When execute() runs once,
     Then D1/confirmed appears EXACTLY ONCE with the batch values and
     source_tier=batch_historical, D2 comes from stream_speed, all in a single
     coherent list."""
@@ -351,7 +351,7 @@ def test_rf11_batch_wins_and_stream_fills_gaps_in_single_query(world) -> None:
     assert world.storage.write_table(GOLD_METRICS, gold_rows, mode="append") == 1
     assert world.storage.write_table(STREAM_TARGET, stream_rows, mode="append") == 2
 
-    rows = world.query_serving.execute_unified_revenue_query()
+    rows = world.query_serving.execute()
 
     assert isinstance(rows, list) and rows == sorted(rows, key=lambda r: (r["order_date"], r["status"]), reverse=True)
 

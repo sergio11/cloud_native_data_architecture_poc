@@ -1,0 +1,90 @@
+# Self-contained Prometheus (no upstream subchart; offline env).
+# Rules come from the chart asset prometheus/alerts.yaml via .Files.Get, which
+# returns raw content WITHOUT templating, so the alert expressions containing
+# '{{ $labels... }}' pass through untouched.
+{{- if .Values.prometheus.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "s8-ops.fullname" . }}-prometheus
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "s8-ops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.prometheus.scrapeInterval | quote }}
+    rule_files:
+      - /etc/prometheus/rules/alerts.yaml
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets:
+              - "localhost:9090"
+  alerts.yaml: |
+    {{- .Files.Get "prometheus/alerts.yaml" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "s8-ops.fullname" . }}-prometheus
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "s8-ops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  replicas: {{ .Values.prometheus.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "s8-ops.name" . }}
+      app.kubernetes.io/component: prometheus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "s8-ops.name" . }}
+        app.kubernetes.io/component: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: "{{ .Values.prometheus.image.repository }}:{{ .Values.prometheus.image.tag }}"
+          imagePullPolicy: {{ .Values.prometheus.image.pullPolicy }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ .Values.prometheus.retention }}
+          ports:
+            - containerPort: 9090
+              name: web
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+            - name: config
+              mountPath: /etc/prometheus/rules/alerts.yaml
+              subPath: alerts.yaml
+          resources:
+            {{- toYaml .Values.prometheus.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "s8-ops.fullname" . }}-prometheus
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "s8-ops.fullname" . }}-prometheus
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "s8-ops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  type: {{ .Values.prometheus.service.type }}
+  ports:
+    - port: {{ .Values.prometheus.service.port }}
+      targetPort: 9090
+      name: web
+  selector:
+    app.kubernetes.io/name: {{ include "s8-ops.name" . }}
+    app.kubernetes.io/component: prometheus
+{{- end }}

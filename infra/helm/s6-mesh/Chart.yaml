@@ -14,6 +14,10 @@ maintainers:
   - name: Data Engineering Platform Team
     email: data-platform@poc.local
 
+# PREREQUISITE (K-B, offline env): install Kyverno itself from its official
+# chart/OCI before setting kyverno.policiesEnabled=true — no dependency build
+# is attempted here. The chart only APPLIES ClusterPolicies (see
+# templates/kyverno-policies.yaml); it never installs the Kyverno controller.
 # DEFERRED (RF-17): enable when the K8s profile wires admission — no Kyverno template exists yet.
 # dependencies:
 #   - name: kyverno

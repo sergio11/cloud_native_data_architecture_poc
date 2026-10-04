@@ -20,7 +20,7 @@ domain API; per-dimension pass ratios come from the evaluation's
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from src.domain.entities import QualityGateEvaluation
@@ -52,6 +52,12 @@ class GateVerdict:
     dimension: str | None = None
     rate: float | None = None
     required: float | None = None
+    # Effective threshold applied per measured dimension: the governing
+    # contract thresholds when they apply, otherwise the fallback ``threshold``
+    # repeated for every measured dimension. Lets drivers (e.g. the quality-gate
+    # CLI summary panel) display the thresholds that actually governed instead
+    # of always rendering the fallback.
+    thresholds: dict[str, float] = field(default_factory=dict)
 
 
 def assess_gate(
@@ -80,6 +86,7 @@ def assess_gate(
     if contract_thresholds:
         measurable = {dim: required for dim, required in contract_thresholds.items() if dim in rates}
         if measurable:
+            effective: dict[str, float] = dict(measurable)
             for dimension, required in measurable.items():
                 rate = rates[dimension]
                 if rate < required:
@@ -89,6 +96,7 @@ def assess_gate(
                         dimension=dimension,
                         rate=rate,
                         required=required,
+                        thresholds=effective,
                     )
             # Contract dimensions govern: the global arithmetic is ignored once
             # they all pass - unless the engine vetoed fail-closed (unsupported
@@ -106,10 +114,12 @@ def assess_gate(
                     ),
                     rate=evaluation.pass_rate,
                     required=threshold,
+                    thresholds=effective,
                 )
             return GateVerdict(
                 approved=True,
                 reason=(f"contract dimensions {sorted(measurable)} govern (global threshold ignored)"),
+                thresholds=effective,
             )
         logger.warning(
             "Contract thresholds %s declared for '%s' but the suite measures none of those "
@@ -119,14 +129,17 @@ def assess_gate(
             threshold,
         )
 
+    fallback: dict[str, float] = {dimension: threshold for dimension in rates}
     if not evaluation.passed:
         return GateVerdict(
             approved=False,
             reason=f"pass rate {evaluation.pass_rate:.2f} < threshold {threshold:.2f}",
             rate=evaluation.pass_rate,
             required=threshold,
+            thresholds=fallback,
         )
     return GateVerdict(
         approved=True,
         reason=f"pass rate {evaluation.pass_rate:.2f} >= threshold {threshold:.2f}",
+        thresholds=fallback,
     )

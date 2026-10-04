@@ -41,7 +41,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    results = container.query_serving.execute_unified_revenue_query(
+    results = container.query_serving.execute(
         order_date_gte=args.date_gte,
         limit=args.limit,
     )

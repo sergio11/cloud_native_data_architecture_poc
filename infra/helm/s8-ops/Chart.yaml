@@ -1,6 +1,6 @@
 apiVersion: v2
 name: s8-ops
-description: Helm chart for Subsystem S8 - Orchestration and Observability (Dagster, Prometheus, Grafana, Metabase)
+description: Helm chart for Subsystem S8 - Observability (self-contained Prometheus + Grafana; Metabase/Dagster NOT rendered, see values.yaml)
 type: application
 version: 1.0.0
 appVersion: "1.0.0"

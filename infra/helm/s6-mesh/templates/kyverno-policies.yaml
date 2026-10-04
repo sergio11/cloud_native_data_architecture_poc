@@ -1,0 +1,112 @@
+# ==============================================================================
+# Kyverno ClusterPolicies for the Data Mesh (Subsystem S6).
+# Gate: .Values.kyverno.policiesEnabled (default true). Kyverno itself is a
+# PREREQUISITE installed out-of-band (see values.yaml/Chart.yaml comments);
+# this file only APPLIES policies translated faithfully from
+# governance/policies/*.yaml. Existing templates (domain-quotas,
+# domain-network-policies, CRDs) are untouched.
+# ==============================================================================
+{{- if .Values.kyverno.policiesEnabled }}
+# --- Source: governance/policies/require-owner.yaml (validate; verbatim) ---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-data-product-owner
+  annotations:
+    policies.kyverno.io/title: Require Data Product Owner
+    policies.kyverno.io/category: Data Governance / Data Mesh
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Ensures that every DataProduct resource deployed within the cluster specifies
+      an accountable owner in metadata.annotations or metadata.owner with a valid email.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-owner-email
+      match:
+        any:
+          - resources:
+              kinds:
+                - DataProduct
+      validate:
+        message: "DataProduct must specify a valid owner email address in metadata.owner or metadata.annotations['dataplatform.io/owner']."
+        anyPattern:
+          - metadata:
+              owner: "?*@?*.?*"
+          - metadata:
+              annotations:
+                =(dataplatform.io/owner): "?*@?*.?*"
+---
+# --- Source: governance/policies/require-pii-classification.yaml (validate; verbatim) ---
+# NOTE (K-B, not invented): the source description also says "mandate masking
+# policies when classified as PII or confidential", but the source file contains
+# NO rule implementing it and the DataProduct CRD
+# (templates/crds/dataproduct-crd.yaml) has NO masking field to key such a rule
+# on. Only the classification-enum rule below is expressible from the source, so
+# only it is rendered; the masking mandate stays unimplemented until the CRD and
+# governance agree on a field (e.g. spec.maskingPolicy).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pii-classification
+  annotations:
+    policies.kyverno.io/title: Enforce Data Classification and PII Safeguards
+    policies.kyverno.io/category: Data Privacy & Security
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Enforces that all DataProduct definitions declare their sensitivity classification
+      and mandate masking policies when classified as PII or confidential.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: validate-classification-enum
+      match:
+        any:
+          - resources:
+              kinds:
+                - DataProduct
+      validate:
+        message: "spec.classification must be one of: public, internal, confidential, restricted, pii."
+        pattern:
+          spec:
+            classification: "public | internal | confidential | restricted | pii"
+---
+# --- Source: governance/policies/naming-convention.yaml (validate; verbatim
+# except Helm escaping) ---
+# NOTE (K-B): Kyverno's '{{ regex_match(...) }}' uses Go-template delimiters,
+# which collide with Helm's. It is emitted via '{{ "{{" }} ... {{ "}}" }}' so
+# Helm renders the literal Kyverno expression instead of evaluating it.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: enforce-mesh-naming-conventions
+  annotations:
+    policies.kyverno.io/title: Enforce Data Mesh Naming Conventions
+    policies.kyverno.io/category: Architecture Standards
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: validate-product-naming
+      match:
+        any:
+          - resources:
+              kinds:
+                - DataProduct
+      validate:
+        message: >-
+          DataProduct name must start with a lowercase alphanumeric character and may
+          then contain only lowercase alphanumeric characters, hyphens or underscores
+          (regex ^[a-z0-9][a-z0-9_-]*$), e.g. orders, customers, financial_closings.
+        deny:
+          conditions:
+            all:
+              - key: '{{ "{{" }} regex_match(''^[a-z0-9][a-z0-9_-]*$'', request.object.metadata.name || '''') {{ "}}" }}'
+                operator: Equals
+                value: false
+                message: >-
+                  DataProduct metadata.name does not match ^[a-z0-9][a-z0-9_-]*$
+                  (lowercase alphanumeric start; hyphens and underscores allowed afterwards).
+{{- end }}

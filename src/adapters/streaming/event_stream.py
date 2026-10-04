@@ -26,6 +26,10 @@ KAFKA_ENV_VAR = "KAFKA_BOOTSTRAP_SERVERS"
 _POLL_TIMEOUT_SECONDS = 1.0
 _MAX_EMPTY_POLLS = 2
 _POLL_BUDGET_SECONDS = 30.0
+#: Poll rounds spent waiting for the broker to assign partitions on replay
+#: before falling back to the no-watermark drain. Fake consumers answer
+#: immediately; each round blocks at most ``_POLL_TIMEOUT_SECONDS``.
+_ASSIGNMENT_WAIT_POLLS = 10
 
 
 class EventStreamAdapter(EventBrokerPort):
@@ -230,6 +234,17 @@ class EventStreamAdapter(EventBrokerPort):
         subsequent runs are incremental on both backends. Replay runs use an
         ephemeral group id with ``auto.offset.reset=earliest`` and never
         commit, so consumer cursors are left untouched.
+
+        Replay termination: after ``subscribe`` the adapter waits for the
+        partition assignment and snapshots the high-watermark end-offsets
+        with ``consumer.get_watermark_offsets``; the drain ends when the
+        consumed offsets reach those end-offsets on every assigned partition
+        (frozen log-end at replay start, so events appended concurrently
+        afterwards may be excluded). Neither the poll time budget nor an
+        empty-poll streak truncates a watermark-driven replay. When the
+        injected consumer exposes no watermark API, replay falls back to
+        draining until ``_MAX_EMPTY_POLLS`` consecutive empty polls, still
+        ignoring the time budget.
         """
         if replay:
             group_id = f"{consumer_group}-replay-{uuid.uuid4().hex}"
@@ -266,63 +281,309 @@ class EventStreamAdapter(EventBrokerPort):
                 ) from exc
             consumer.subscribe([topic])
 
-            collected: list[tuple[int, dict[str, Any]]] = []
-            consumed: list[Any] = []
-            empty_streak = 0
             limit = int(max_messages) if max_messages is not None else None
-            started = time.monotonic()
-            while True:
-                if limit is not None and len(collected) >= limit:
-                    break
-                if empty_streak >= _MAX_EMPTY_POLLS:
-                    break
-                if time.monotonic() - started >= _POLL_BUDGET_SECONDS:
-                    logger.warning(
-                        "Kafka poll budget exhausted on topic '%s'; returning %d events", topic, len(collected)
-                    )
-                    break
-                message = consumer.poll(_POLL_TIMEOUT_SECONDS)
-                if message is None:
-                    empty_streak += 1
-                    continue
-                if message.error():
-                    logger.warning("Skipping Kafka error on topic '%s': %s", topic, message.error())
-                    empty_streak += 1
-                    continue
-                empty_streak = 0
-                consumed.append(message)
-                raw = message.value()
-                if raw is None:
-                    logger.warning("Skipping Kafka tombstone at offset %s on topic '%s'", message.offset(), topic)
-                    continue
-                try:
-                    text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
-                    payload = json.loads(text)
-                except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    logger.warning(
-                        "Skipping corrupt event payload at offset %s on topic '%s': %s",
-                        message.offset(),
-                        topic,
-                        exc,
-                    )
-                    continue
-                collected.append((int(message.offset()), payload))
-
-            collected.sort(key=lambda item: item[0])
-            if not replay:
-                # Explicitly commit every consumed offset (including skipped
-                # corrupt frames, mirroring the SQLite cursor which advances
-                # past them) in ascending order — the order of the returned
-                # events — so poison pills are never redelivered forever.
-                consumed.sort(key=lambda message: int(message.offset()))
-                for message in consumed:
-                    try:
-                        consumer.commit(message=message)
-                    except Exception as exc:
-                        logger.warning("Kafka commit failed on topic '%s': %s", topic, exc)
-            return [payload for _, payload in collected]
+            if replay:
+                return self._consume_replay_from_kafka(consumer, topic, limit)
+            return self._consume_incremental_from_kafka(consumer, topic, limit)
         finally:
             try:
                 consumer.close()
             except Exception as exc:
                 logger.warning("Error closing Kafka consumer for topic '%s': %s", topic, exc)
+
+    def _consume_incremental_from_kafka(
+        self,
+        consumer: Any,
+        topic: str,
+        limit: int | None,
+    ) -> list[dict[str, Any]]:
+        """Drains new events for a consumer group (budget + empty streak apply).
+
+        Unchanged incremental semantics: stops at ``max_messages``, after
+        ``_MAX_EMPTY_POLLS`` consecutive empty polls, or when the
+        ``_POLL_BUDGET_SECONDS`` budget is exhausted, then explicitly commits
+        every consumed offset (including skipped corrupt frames, mirroring
+        the SQLite cursor which advances past them) in ascending order.
+        """
+        collected: list[tuple[int, dict[str, Any]]] = []
+        consumed: list[Any] = []
+        empty_streak = 0
+        started = time.monotonic()
+        while True:
+            if limit is not None and len(collected) >= limit:
+                break
+            if empty_streak >= _MAX_EMPTY_POLLS:
+                break
+            if time.monotonic() - started >= _POLL_BUDGET_SECONDS:
+                logger.warning("Kafka poll budget exhausted on topic '%s'; returning %d events", topic, len(collected))
+                break
+            message = consumer.poll(_POLL_TIMEOUT_SECONDS)
+            if message is None:
+                empty_streak += 1
+                continue
+            if message.error():
+                logger.warning("Skipping Kafka error on topic '%s': %s", topic, message.error())
+                empty_streak += 1
+                continue
+            empty_streak = 0
+            consumed.append(message)
+            raw = message.value()
+            if raw is None:
+                logger.warning("Skipping Kafka tombstone at offset %s on topic '%s'", message.offset(), topic)
+                continue
+            try:
+                text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                payload = json.loads(text)
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "Skipping corrupt event payload at offset %s on topic '%s': %s",
+                    message.offset(),
+                    topic,
+                    exc,
+                )
+                continue
+            collected.append((int(message.offset()), payload))
+
+        collected.sort(key=lambda item: item[0])
+        # Explicitly commit every consumed offset (including skipped
+        # corrupt frames, mirroring the SQLite cursor which advances
+        # past them) in ascending order — the order of the returned
+        # events — so poison pills are never redelivered forever.
+        consumed.sort(key=lambda message: int(message.offset()))
+        for message in consumed:
+            try:
+                consumer.commit(message=message)
+            except Exception as exc:
+                logger.warning("Kafka commit failed on topic '%s': %s", topic, exc)
+        return [payload for _, payload in collected]
+
+    def _consume_replay_from_kafka(
+        self,
+        consumer: Any,
+        topic: str,
+        limit: int | None,
+    ) -> list[dict[str, Any]]:
+        """Drains the full topic log from offset 0 without committing.
+
+        Watermark path: ends when consumed offsets reach the end-offsets
+        snapshotted at assignment on every assigned partition — never via
+        the time budget or an empty-poll streak, so large backlogs and slow
+        producers with delivery gaps are returned in full. Fallback path
+        (no watermark API on the consumer): drains until
+        ``_MAX_EMPTY_POLLS`` consecutive empty polls, still ignoring the
+        time budget.
+        """
+        prefetched: list[Any] = []
+        assignment = self._wait_kafka_assignment(consumer, topic, prefetched)
+        end_offsets = self._kafka_end_offsets(consumer, assignment) if assignment else None
+        if end_offsets is None:
+            logger.info(
+                "Kafka replay on topic '%s' without watermark support; draining until %d empty polls",
+                topic,
+                _MAX_EMPTY_POLLS,
+            )
+            return self._replay_fallback_consume(consumer, topic, limit, prefetched)
+        seen: dict[tuple[str, int], int] = {}
+        collected: list[tuple[int, dict[str, Any]]] = []
+        for message in prefetched:
+            if limit is not None and len(collected) >= limit:
+                break
+            self._accumulate_replay_message(message, topic, collected, seen)
+        while not self._replay_complete(seen, end_offsets):
+            if limit is not None and len(collected) >= limit:
+                break
+            message = consumer.poll(_POLL_TIMEOUT_SECONDS)
+            if message is None:
+                continue
+            if message.error():
+                logger.warning("Skipping Kafka error on topic '%s': %s", topic, message.error())
+                continue
+            self._accumulate_replay_message(message, topic, collected, seen)
+        collected.sort(key=lambda item: item[0])
+        return [payload for _, payload in collected]
+
+    def _replay_fallback_consume(
+        self,
+        consumer: Any,
+        topic: str,
+        limit: int | None,
+        prefetched: list[Any],
+    ) -> list[dict[str, Any]]:
+        """Replay drain without watermarks: empty-poll streak only, no budget."""
+        collected: list[tuple[int, dict[str, Any]]] = []
+        pending = list(prefetched)
+        empty_streak = 0
+        while True:
+            if limit is not None and len(collected) >= limit:
+                break
+            if empty_streak >= _MAX_EMPTY_POLLS:
+                break
+            if pending:
+                message = pending.pop(0)
+            else:
+                message = consumer.poll(_POLL_TIMEOUT_SECONDS)
+            if message is None:
+                empty_streak += 1
+                continue
+            if message.error():
+                logger.warning("Skipping Kafka error on topic '%s': %s", topic, message.error())
+                empty_streak += 1
+                continue
+            empty_streak = 0
+            self._accumulate_replay_message(message, topic, collected, {})
+        collected.sort(key=lambda item: item[0])
+        return [payload for _, payload in collected]
+
+    def _accumulate_replay_message(
+        self,
+        message: Any,
+        topic: str,
+        collected: list[tuple[int, dict[str, Any]]],
+        seen: dict[tuple[str, int], int],
+    ) -> None:
+        """Tracks replay progress and appends decodable payloads (never commits)."""
+        try:
+            offset = int(message.offset())
+        except Exception as exc:
+            logger.warning("Skipping Kafka message without offset on topic '%s': %s", topic, exc)
+            return
+        position = self._message_position(message, topic)
+        if position in seen:
+            seen[position] = max(seen[position], offset)
+        else:
+            seen[position] = offset
+        raw = message.value()
+        if raw is None:
+            logger.warning("Skipping Kafka tombstone at offset %s on topic '%s'", offset, topic)
+            return
+        try:
+            text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            payload = json.loads(text)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Skipping corrupt event payload at offset %s on topic '%s': %s",
+                offset,
+                topic,
+                exc,
+            )
+            return
+        collected.append((offset, payload))
+
+    def _wait_kafka_assignment(
+        self,
+        consumer: Any,
+        topic: str,
+        prefetched: list[Any],
+    ) -> list[Any]:
+        """Polls until the broker assigns topic partitions, buffering early messages.
+
+        Messages arriving before the assignment is visible are appended to
+        ``prefetched`` so the replay never loses them; errors and empty
+        polls are skipped. Returns the topic assignment (possibly empty).
+        """
+        assignment_fn = getattr(consumer, "assignment", None)
+        if assignment_fn is None:
+            return []
+        for _ in range(_ASSIGNMENT_WAIT_POLLS):
+            try:
+                current = assignment_fn()
+            except Exception:
+                return []
+            assignment = [tp for tp in (current or []) if self._tp_topic(tp, topic) == topic]
+            if assignment:
+                return assignment
+            message = consumer.poll(_POLL_TIMEOUT_SECONDS)
+            if message is None:
+                continue
+            if message.error():
+                logger.warning("Skipping Kafka error on topic '%s': %s", topic, message.error())
+                continue
+            prefetched.append(message)
+        try:
+            current = assignment_fn()
+        except Exception:
+            return []
+        return [tp for tp in (current or []) if self._tp_topic(tp, topic) == topic]
+
+    def _kafka_end_offsets(self, consumer: Any, assignment: list[Any]) -> dict[tuple[str, int], tuple[int, int]] | None:
+        """Snapshots (low, high) watermarks per assigned partition, or None when unavailable."""
+        watermark_fn = getattr(consumer, "get_watermark_offsets", None)
+        if watermark_fn is None:
+            return None
+        ends: dict[tuple[str, int], tuple[int, int]] = {}
+        for tp in assignment:
+            key = (self._tp_topic(tp, ""), self._tp_partition(tp))
+            try:
+                try:
+                    low, high = watermark_fn(tp, timeout=5.0)
+                except TypeError:
+                    low, high = watermark_fn(tp)
+            except Exception as exc:
+                logger.warning("Kafka watermark lookup failed for %s; using replay fallback: %s", key, exc)
+                return None
+            ends[key] = (int(low), int(high))
+        return ends
+
+    @staticmethod
+    def _replay_complete(
+        seen: dict[tuple[str, int], int],
+        end_offsets: dict[tuple[str, int], tuple[int, int]],
+    ) -> bool:
+        """True once every assigned partition reached its snapshotted high watermark."""
+        for key, (low, high) in end_offsets.items():
+            if seen.get(key, int(low) - 1) + 1 < int(high):
+                return False
+        return True
+
+    @staticmethod
+    def _tp_topic(tp: Any, default: str) -> str:
+        """Reads a TopicPartition topic, supporting attribute or method shapes."""
+        name = getattr(tp, "topic", None)
+        if callable(name):
+            try:
+                return str(name())
+            except Exception:
+                return default
+        return str(name) if name is not None else default
+
+    @staticmethod
+    def _tp_partition(tp: Any) -> int:
+        """Reads a TopicPartition partition number, supporting attribute or method shapes."""
+        part = getattr(tp, "partition", None)
+        if callable(part):
+            try:
+                return int(part())
+            except Exception:
+                return 0
+        try:
+            return int(part) if part is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _message_position(message: Any, topic: str) -> tuple[str, int]:
+        """Resolves the (topic, partition) of a message across consumer shapes."""
+        name = getattr(message, "topic", None)
+        if callable(name):
+            try:
+                resolved = str(name())
+            except Exception:
+                resolved = topic
+        elif name is not None:
+            resolved = str(name)
+        else:
+            resolved = topic
+        part = getattr(message, "partition", None)
+        if callable(part):
+            try:
+                partition = int(part())
+            except Exception:
+                partition = 0
+        elif part is not None:
+            try:
+                partition = int(part)
+            except (TypeError, ValueError):
+                partition = 0
+        else:
+            partition = 0
+        return (resolved, partition)

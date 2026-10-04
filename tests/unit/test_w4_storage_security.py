@@ -196,13 +196,13 @@ def test_query_alerts_filter_escapes_like_wildcards(monkeypatch, tmp_path):
     """`_`/`%` in the dataset filter match literally, not as LIKE wildcards."""
     svc = _load_service(monkeypatch, tmp_path)
     storage = svc.StorageManager(db_path=str(tmp_path / "d4.db"))
-    storage.insert_alert(_alert(svc, "b-1", dataset_name="silver.sales_x"))
-    storage.insert_alert(_alert(svc, "b-2", dataset_name="silver.salesaxx"))
+    assert storage.insert_alert_if_new(_alert(svc, "b-1", dataset_name="silver.sales_x")) is True
+    assert storage.insert_alert_if_new(_alert(svc, "b-2", dataset_name="silver.salesaxx")) is True
 
     hit = storage.query_alerts(dataset="sales_x")
     assert [a["dataset_name"] for a in hit] == ["silver.sales_x"]
 
-    storage.insert_alert(_alert(svc, "b-3", dataset_name="discount_100%"))
+    assert storage.insert_alert_if_new(_alert(svc, "b-3", dataset_name="discount_100%")) is True
     pct = storage.query_alerts(dataset="100%")
     assert [a["dataset_name"] for a in pct] == ["discount_100%"]
 

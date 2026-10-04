@@ -191,7 +191,7 @@ class ValidateContractPort(Protocol):
 class QueryServingPort(Protocol):
     """Driving port for the Serving layer executing unified queries (RF-11)."""
 
-    def execute_unified_revenue_query(
+    def execute(
         self,
         order_date_gte: str | None = None,
         limit: int = 20,

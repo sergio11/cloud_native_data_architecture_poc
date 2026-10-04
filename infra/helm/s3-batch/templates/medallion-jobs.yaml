@@ -57,3 +57,109 @@ spec:
         version: "3.5.1"
         role: executor
 {{- end }}
+{{- if .Values.jobs.silverTransform.enabled }}
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: ScheduledSparkApplication
+metadata:
+  name: spark-silver-transform
+  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  labels:
+    app: spark-silver-transform
+    medallion: silver
+    {{- include "s3-batch.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.jobs.silverTransform.schedule | quote }}
+  concurrencyPolicy: Forbid
+  template:
+    type: Python
+    pythonVersion: "3"
+    mode: cluster
+    image: "{{ .Values.sparkDefaults.image.repository }}:{{ .Values.sparkDefaults.image.tag }}"
+    imagePullPolicy: {{ .Values.sparkDefaults.image.pullPolicy }}
+    mainApplicationFile: "local:///opt/spark/work-dir/pipelines/medallion/silver_transform.py"
+    sparkVersion: "3.5.1"
+    restartPolicy:
+      type: OnFailure
+      onFailureRetries: 2
+      onFailureRetryInterval: 10
+      onSubmissionFailureRetries: 3
+    driver:
+      cores: {{ .Values.sparkDefaults.driver.cores }}
+      coreLimit: {{ .Values.sparkDefaults.driver.coreLimit | quote }}
+      memory: {{ .Values.sparkDefaults.driver.memory | quote }}
+      labels:
+        version: "3.5.1"
+        role: driver
+      serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
+      env:
+        - name: ICEBERG_CATALOG_URL
+          value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
+        - name: MINIO_ENDPOINT
+          value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
+        - name: MINIO_ACCESS_KEY
+          value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
+        - name: MINIO_SECRET_KEY
+          value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
+        - name: OPENLINEAGE_URL
+          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
+    executor:
+      cores: {{ .Values.sparkDefaults.executor.cores }}
+      instances: {{ .Values.sparkDefaults.executor.instances }}
+      memory: {{ .Values.sparkDefaults.executor.memory | quote }}
+      labels:
+        version: "3.5.1"
+        role: executor
+{{- end }}
+{{- if .Values.jobs.goldAggregation.enabled }}
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: ScheduledSparkApplication
+metadata:
+  name: spark-gold-aggregation
+  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  labels:
+    app: spark-gold-aggregation
+    medallion: gold
+    {{- include "s3-batch.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.jobs.goldAggregation.schedule | quote }}
+  concurrencyPolicy: Forbid
+  template:
+    type: Python
+    pythonVersion: "3"
+    mode: cluster
+    image: "{{ .Values.sparkDefaults.image.repository }}:{{ .Values.sparkDefaults.image.tag }}"
+    imagePullPolicy: {{ .Values.sparkDefaults.image.pullPolicy }}
+    mainApplicationFile: "local:///opt/spark/work-dir/pipelines/medallion/gold_aggregation.py"
+    sparkVersion: "3.5.1"
+    restartPolicy:
+      type: OnFailure
+      onFailureRetries: 2
+      onFailureRetryInterval: 10
+      onSubmissionFailureRetries: 3
+    driver:
+      cores: {{ .Values.sparkDefaults.driver.cores }}
+      coreLimit: {{ .Values.sparkDefaults.driver.coreLimit | quote }}
+      memory: {{ .Values.sparkDefaults.driver.memory | quote }}
+      labels:
+        version: "3.5.1"
+        role: driver
+      serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
+      env:
+        - name: ICEBERG_CATALOG_URL
+          value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
+        - name: MINIO_ENDPOINT
+          value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
+        - name: MINIO_ACCESS_KEY
+          value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
+        - name: MINIO_SECRET_KEY
+          value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
+        - name: OPENLINEAGE_URL
+          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
+    executor:
+      cores: {{ .Values.sparkDefaults.executor.cores }}
+      instances: {{ .Values.sparkDefaults.executor.instances }}
+      memory: {{ .Values.sparkDefaults.executor.memory | quote }}
+      labels:
+        version: "3.5.1"
+        role: executor
+{{- end }}

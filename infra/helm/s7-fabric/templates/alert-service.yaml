@@ -1,3 +1,9 @@
+# Real lineage webhook + active-metadata service (RF-20).
+# Image poc/lineage-webhook is built from lineage/config/:
+#   docker build -f lineage/config/Dockerfile -t poc/lineage-webhook:0.1.0 lineage/config/
+# The image already runs `uvicorn lineage_webhook_service:app --host 0.0.0.0
+# --port 8000` via its ENTRYPOINT/CMD, so no command override here: the
+# previous `python -c "import http.server..."` stub never served the API.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,12 +25,57 @@ spec:
       containers:
         - name: alert-service
           image: "{{ .Values.alertService.image.repository }}:{{ .Values.alertService.image.tag }}"
-          command: ["python", "-c", "import http.server, socketserver; handler = http.server.SimpleHTTPRequestHandler; socketserver.TCPServer(('', 8000), handler).serve_forever()"]
+          imagePullPolicy: {{ .Values.alertService.image.pullPolicy | default "IfNotPresent" }}
           ports:
             - containerPort: 8000
               name: http
+          # Coherent with the ENV defaults in lineage/config/Dockerfile.
+          env:
+            - name: PORT
+              value: "8000"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: LINEAGE_DB_PATH
+              value: "/data/lineage_events.db"
+            - name: ALERT_RULES_PATH
+              value: "/app/alert-rules.yaml"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: lineage-data
+              mountPath: /data
           resources:
             {{- toYaml .Values.alertService.resources | nindent 12 }}
+      volumes:
+        - name: lineage-data
+          persistentVolumeClaim:
+            claimName: lineage-alert-service-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lineage-alert-service-data
+  namespace: platform
+  labels:
+    app: lineage-alert-service
+    subsystem: s7-fabric
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.alertService.persistence.storageClass | default "standard" | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.alertService.persistence.size | default "1Gi" | quote }}
 ---
 apiVersion: v1
 kind: Service

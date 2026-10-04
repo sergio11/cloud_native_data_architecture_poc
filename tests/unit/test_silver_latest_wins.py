@@ -53,7 +53,9 @@ def test_silver_keeps_latest_snapshot(tmp_path: Path) -> None:
     silver = storage.read_table("silver.sales.orders")
     by_id = {str(r["id"]): r for r in silver}
     assert len(silver) == 10
-    assert by_id["1"]["total_amount"] == "200.0"
+    # RF-04 explicit typing: Silver holds native numerics (INTEGER/REAL affinity),
+    # not the TEXT coercion of earlier revisions.
+    assert by_id["1"]["total_amount"] == 200.0
     assert "_batch_id" not in by_id["1"] and "_ingested_at" not in by_id["1"]
 
 
@@ -91,4 +93,5 @@ def test_rerun_is_idempotent_and_reflects_same_values(tmp_path: Path) -> None:
     assert rerun == 0
     rows = storage.read_table("gold.sales.daily_metrics")
     assert len(rows) == 1
-    assert rows[0]["gross_revenue"] == "100.0"
+    # Numerics survive the round-trip as REAL (no TEXT coercion).
+    assert rows[0]["gross_revenue"] == 100.0

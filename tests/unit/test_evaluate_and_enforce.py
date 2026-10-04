@@ -153,6 +153,30 @@ def test_assess_global_fallback() -> None:
     assert assess_gate(_evaluation(passed=True, pass_rate=1.0), None, 0.95).approved is True
 
 
+def test_assess_carries_effective_thresholds() -> None:
+    """GateVerdict.thresholds exposes what governed: contract dims or fallback."""
+    governed = assess_gate(
+        _evaluation(passed=False, pass_rate=0.90, unsupported=False, dimension_rates={"completeness": 1.0}),
+        {"completeness": 0.99},
+        0.95,
+    )
+    assert governed.thresholds == {"completeness": 0.99}
+
+    breached = assess_gate(
+        _evaluation(passed=True, pass_rate=1.0, unsupported=False, dimension_rates={"completeness": 0.50}),
+        {"completeness": 0.99},
+        0.95,
+    )
+    assert breached.thresholds == {"completeness": 0.99}
+
+    fallback = assess_gate(
+        _evaluation(passed=False, pass_rate=0.80, dimension_rates={"validity": 0.50}),
+        None,
+        0.95,
+    )
+    assert fallback.thresholds == {"validity": 0.95}
+
+
 # ---------------------------------------------------------------------------
 # Application collaborator: enforce_quality_gate (engine + lineage + raise)
 # ---------------------------------------------------------------------------

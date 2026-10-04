@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.request
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 try:
     import yaml
 except ImportError:
-    yaml = None  # type: ignore
+    yaml = None
 
 # -----------------------------------------------------------------------------
 # Logging Configuration
@@ -294,15 +294,6 @@ class StorageManager:
                     ),
                 )
 
-    def get_dataset(self, dataset_key: str) -> dict[str, Any] | None:
-        with self._connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM datasets WHERE dataset_key = ?",
-                (dataset_key,),
-            )
-            row = cursor.fetchone()
-            return dict(row) if row else None
-
     def upsert_dataset_schema(
         self,
         namespace: str,
@@ -311,7 +302,7 @@ class StorageManager:
         run_id: str,
         job_name: str,
         event_time: str,
-    ) -> tuple[bool, str | None, dict[str, Any] | None]:
+    ) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
         """Upsert dataset and detect schema changes.
 
         Returns (is_new_or_changed, previous_schema, new_schema).
@@ -428,11 +419,6 @@ class StorageManager:
             alert.status,
         )
 
-    def insert_alert(self, alert: AlertItem) -> None:
-        with self._lock:
-            with self._connection() as conn:
-                conn.execute(self._ALERT_INSERT_SQL, self._alert_row(alert))
-
     @staticmethod
     def _within_dedup_window(created_at: Any, window_seconds: int) -> bool:
         """True when ``created_at`` is inside the throttle window.
@@ -460,39 +446,35 @@ class StorageManager:
         transaction, so concurrent evaluators (threads or processes) cannot
         both pass the check before either one writes (no check-then-insert
         TOCTOU). Returns True only when the row was actually persisted.
+
+        Identity is the tuple (rule_id, dataset_name, job_name) compared per
+        column against the event's own fields: a job_name never matches
+        another alert's dataset_name. ``COALESCE(..., 'unknown')`` maps NULL
+        to the "unknown" sentinel per column because in SQLite NULL never
+        equals NULL, so without the mapping two alerts with NULL fields
+        would never deduplicate. Accepted limitation: two alerts with
+        neither dataset nor job share the "unknown/unknown" identity and
+        deduplicate against each other.
         """
-        identifier = alert.dataset_name or alert.job_name or "unknown"
+        dataset = alert.dataset_name or "unknown"
+        job = alert.job_name or "unknown"
         with self._lock:
             with self._connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     """
                     SELECT created_at FROM alerts
-                    WHERE rule_id = ? AND (dataset_name = ? OR job_name = ?)
+                    WHERE rule_id = ?
+                      AND COALESCE(dataset_name, 'unknown') = ?
+                      AND COALESCE(job_name, 'unknown') = ?
                     ORDER BY created_at DESC LIMIT 1
                     """,
-                    (alert.rule_id, identifier, identifier),
+                    (alert.rule_id, dataset, job),
                 ).fetchone()
                 if row is not None and self._within_dedup_window(row["created_at"], window_seconds):
                     return False
                 conn.execute(self._ALERT_INSERT_SQL, self._alert_row(alert))
                 return True
-
-    def is_recent_alert_duplicate(self, rule_id: str, identifier: str, window_seconds: int = 300) -> bool:
-        """Check if an identical alert was fired recently to avoid spam."""
-        with self._connection() as conn:
-            cursor = conn.execute(
-                """
-                SELECT created_at FROM alerts
-                WHERE rule_id = ? AND (dataset_name = ? OR job_name = ?)
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (rule_id, identifier, identifier),
-            )
-            row = cursor.fetchone()
-            if not row:
-                return False
-            return self._within_dedup_window(row["created_at"], window_seconds)
 
     def query_alerts(
         self,
@@ -950,10 +932,12 @@ class RuleEngine:
 
             if is_changed and old_schema:
                 # Compare fields
-                old_fields = {f.get("name"): f.get("type") for f in old_schema.get("fields", [])}
-                new_fields = {f.get("name"): f.get("type") for f in fields}
-                old_meta = {f.get("name"): f for f in old_schema.get("fields", []) if isinstance(f, dict)}
-                new_meta = {f.get("name"): f for f in fields if isinstance(f, dict)}
+                old_field_entries: Any = old_schema.get("fields", [])
+                new_field_entries: Any = fields
+                old_fields = {f.get("name"): f.get("type") for f in old_field_entries}
+                new_fields = {f.get("name"): f.get("type") for f in new_field_entries}
+                old_meta = {f.get("name"): f for f in old_field_entries if isinstance(f, dict)}
+                new_meta = {f.get("name"): f for f in new_field_entries if isinstance(f, dict)}
 
                 added = set(new_fields.keys()) - set(old_fields.keys())
                 removed = set(old_fields.keys()) - set(new_fields.keys())
@@ -1283,12 +1267,11 @@ class RuleEngine:
             max_staleness, sla_tier = self._sla_lookup(ds.name)
             is_stream = sla_tier == "real_time" or ds.name.startswith("stream.")
 
-            lag_known = lag_seconds is not None
-            if not (event_time_error is not None or (lag_known and lag_seconds > max_staleness)):
+            if not (event_time_error is not None or (lag_seconds is not None and lag_seconds > max_staleness)):
                 continue
 
             severity = self._sla_severity(sla_tier, max_staleness, is_stream)
-            if lag_known:
+            if lag_seconds is not None:
                 summary = f"SLA Freshness breach on {ds.name} (lag: {lag_seconds:.1f}s)"
                 description = (
                     f"Dataset {ds.name} produced with lag of {lag_seconds:.1f}s, "
@@ -1334,7 +1317,7 @@ rule_engine = RuleEngine(storage)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Lineage Webhook Service started. Connected to DB at %s", storage.db_path)
     yield
     logger.info("Lineage Webhook Service shutting down.")
@@ -1419,7 +1402,7 @@ async def get_alerts(
     dataset: str | None = Query(None, description="Filter by dataset substring"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-):
+) -> dict[str, Any]:
     """Retrieve active metadata alerts with optional filtering."""
     alerts = storage.query_alerts(
         severity=severity,
@@ -1438,7 +1421,7 @@ async def get_alerts(
 
 
 @app.get("/api/v1/alerts/{alert_id}", summary="Get alert by ID")
-async def get_alert(alert_id: str):
+async def get_alert(alert_id: str) -> dict[str, Any]:
     """Retrieve details for a single alert."""
     alert = storage.get_alert_by_id(alert_id)
     if not alert:
@@ -1447,7 +1430,7 @@ async def get_alert(alert_id: str):
 
 
 @app.post("/api/v1/alerts/{alert_id}/acknowledge", summary="Acknowledge alert")
-async def acknowledge_alert(alert_id: str):
+async def acknowledge_alert(alert_id: str) -> dict[str, Any]:
     """Mark an active alert as ACKNOWLEDGED."""
     updated = storage.set_alert_status(alert_id, "ACKNOWLEDGED")
     if not updated:
@@ -1456,26 +1439,26 @@ async def acknowledge_alert(alert_id: str):
 
 
 @app.get("/api/v1/lineage/{dataset:path}", summary="Get lineage for dataset")
-async def get_dataset_lineage(dataset: str):
+async def get_dataset_lineage(dataset: str) -> dict[str, Any]:
     """Get lineage graph and producers/consumers for a dataset."""
     lineage_data = storage.get_dataset_lineage(dataset)
     return lineage_data
 
 
 @app.get("/api/v1/datasets", summary="List known datasets")
-async def list_datasets():
+async def list_datasets() -> dict[str, Any]:
     """List all registered datasets and their latest schemas."""
     return {"datasets": storage.list_datasets()}
 
 
 @app.get("/api/v1/stats", summary="Platform metadata statistics")
-async def get_stats():
+async def get_stats() -> dict[str, Any]:
     """Get summary counts of lineage events and alert states."""
     return storage.get_stats()
 
 
 @app.get("/health", summary="Healthcheck")
-async def health():
+async def health() -> dict[str, Any]:
     return {
         "status": "healthy",
         "service": "lineage_webhook_service",
@@ -1484,7 +1467,7 @@ async def health():
 
 
 @app.get("/metrics", summary="Prometheus metrics")
-async def prometheus_metrics():
+async def prometheus_metrics() -> Response:
     """Prometheus exposition format metrics for scrapers."""
     stats = storage.get_stats()
     lines = [

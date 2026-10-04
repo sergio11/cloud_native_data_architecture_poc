@@ -124,7 +124,7 @@ def test_full_demo_flow(world) -> None:
     assert len(stream_rows) > 0
 
     # --- F6: unified serving query (RF-11) - both tiers in one call -------
-    unified = world.query_serving.execute_unified_revenue_query()
+    unified = world.query_serving.execute()
     assert unified, "unified serving query returned no rows"
     assert {row["source_tier"] for row in unified} == {"batch_historical", "stream_speed"}
     assert any(row["order_date"] == "2026-09-27" and row["source_tier"] == "stream_speed" for row in unified)
@@ -159,4 +159,4 @@ def test_full_demo_flow(world) -> None:
     assert counts_after == counts_before
 
     # Serving still answers identically after the second pass.
-    assert world.query_serving.execute_unified_revenue_query() == unified
+    assert world.query_serving.execute() == unified

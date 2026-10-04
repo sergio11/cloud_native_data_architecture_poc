@@ -3,6 +3,14 @@
 # Modern Data Architecture POC - Profile Activation Script
 # Activates one of: platform | stream | batch | demo
 # Tuned for 8 GB RAM local constraint (RC-02)
+#
+# CONTRACT (K-B): infra/profiles/<profile>.yaml holds ONE section per chart
+# under `subsystems:` whose keys are verbatim Helm values for that chart
+# (verified 1:1 against infra/helm/<chart>/values.yaml). This script extracts
+# each chart's section with python3/PyYAML into a temp file and passes it as
+# `helm upgrade --install <release> <chartdir> -n platform -f <tmp>`.
+# A chart with no section installs with chart defaults. No template reads
+# `.Values.subsystems` anymore.
 # ==============================================================================
 set -euo pipefail
 
@@ -18,6 +26,34 @@ NC='\033[0m'
 failures=0
 deployed=0
 
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+# Extracts subsystems.<chart> from the profile YAML into $TMPDIR/<chart>.values.yaml.
+# Prints the tmp path on stdout. Return codes: 0 = section written,
+# 3 = chart has no section (caller installs with defaults), else hard error.
+extract_chart_values() {
+    local chart="$1"
+    python3 -c "
+import sys, yaml
+chart, profile_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(profile_path) as f:
+        doc = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    print(f'profile file not found: {profile_path}', file=sys.stderr)
+    sys.exit(2)
+except yaml.YAMLError as e:
+    print(f'invalid YAML in {profile_path}: {e}', file=sys.stderr)
+    sys.exit(2)
+sec = (doc.get('subsystems') or {}).get(chart)
+if sec is None:
+    sys.exit(3)
+with open(out_path, 'w') as out:
+    yaml.safe_dump(sec, out, default_flow_style=False)
+" "$chart" "$VALUES_FILE" "$TMPDIR/${chart}.values.yaml"
+}
+
 deploy_chart() {
     local chart="$1"
     if [ ! -d "infra/helm/$chart" ]; then
@@ -26,7 +62,20 @@ deploy_chart() {
         return 0
     fi
     echo -e "Deploying Helm chart: ${GREEN}${chart}${NC}"
-    if helm upgrade --install "$chart" "infra/helm/$chart" -n platform -f "$VALUES_FILE"; then
+    extra_args=()
+    extract_rc=0
+    extract_chart_values "$chart" >"$TMPDIR/${chart}.path" || extract_rc=$?
+    if [ "$extract_rc" -eq 0 ]; then
+        echo -e "  profile section -> -f $TMPDIR/${chart}.values.yaml"
+        extra_args=(-f "$TMPDIR/${chart}.values.yaml")
+    elif [ "$extract_rc" -eq 3 ]; then
+        echo -e "  ${YELLOW}no '${chart}' section in profile; installing with chart defaults${NC}"
+    else
+        echo -e "  ${RED}FAILED${NC}: could not extract '${chart}' section from $VALUES_FILE"
+        failures=$((failures + 1))
+        return 0
+    fi
+    if helm upgrade --install "$chart" "infra/helm/$chart" -n platform "${extra_args[@]}"; then
         echo -e "  ${GREEN}OK${NC}: ${chart}"
         deployed=$((deployed + 1))
     else
@@ -49,6 +98,11 @@ fi
 
 if ! command -v helm >/dev/null 2>&1; then
     echo -e "${RED}Error: helm is not installed or not on PATH.${NC}"
+    exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo -e "${RED}Error: python3 is not installed or not on PATH (needed for section extraction).${NC}"
     exit 1
 fi
 

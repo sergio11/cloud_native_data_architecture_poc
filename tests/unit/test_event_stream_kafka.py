@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from src.adapters.streaming import event_stream
 from src.adapters.streaming.event_stream import EventStreamAdapter
 
 TOPIC = "unit.kafka"
@@ -58,13 +59,44 @@ class FakeMessage:
         return self._error
 
 
-class FakeConsumer:
-    """confluent_kafka.Consumer stub backed by a scripted frame list."""
+class FakeTopicPartition:
+    """Minimal confluent_kafka.TopicPartition stub (attribute shape)."""
 
-    def __init__(self, config: dict[str, Any], frames: list[Any], fail_list_topics: bool = False) -> None:
+    def __init__(self, topic: str, partition: int) -> None:
+        self.topic = topic
+        self.partition = partition
+
+
+class FakeConsumer:
+    """confluent_kafka.Consumer stub backed by a scripted frame list.
+
+    ``frames`` may interleave ``None`` entries to simulate slow-producer
+    delivery gaps (each ``None`` is one empty poll). ``watermarks`` maps a
+    partition number to its ``(low, high)`` offsets and enables the
+    ``assignment`` / ``get_watermark_offsets`` API the replay path uses to
+    terminate on log-end; when ``watermarks`` is None the consumer exposes
+    no usable watermark API (``assignment`` is empty and the lookup raises),
+    so the adapter exercises the documented empty-streak fallback.
+    """
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        frames: list[Any],
+        fail_list_topics: bool = False,
+        watermarks: dict[int, tuple[int, int]] | None = None,
+        partitions: list[int] | None = None,
+    ) -> None:
         self.config = dict(config)
         self._frames = list(frames)
         self._fail_list_topics = fail_list_topics
+        self._watermarks = dict(watermarks) if watermarks is not None else None
+        if partitions is not None:
+            self._partitions = list(partitions)
+        elif watermarks is not None:
+            self._partitions = sorted(watermarks)
+        else:
+            self._partitions = []
         self.subscribed: list[str] = []
         self.committed_offsets: list[int] = []
         self.closed = False
@@ -76,6 +108,14 @@ class FakeConsumer:
 
     def subscribe(self, topics: list[str], **kwargs: Any) -> None:
         self.subscribed = list(topics)
+
+    def assignment(self) -> list[FakeTopicPartition]:
+        return [FakeTopicPartition(topic, part) for topic in self.subscribed for part in self._partitions]
+
+    def get_watermark_offsets(self, partition: Any, timeout: float | None = None) -> tuple[int, int]:
+        if self._watermarks is None:
+            raise RuntimeError("get_watermark_offsets not supported by this consumer")
+        return self._watermarks[int(partition.partition)]
 
     def poll(self, timeout: float | None = None) -> Any | None:
         if not self._frames:
@@ -94,13 +134,26 @@ def _valid_frame(topic: str, offset: int, seq: int) -> FakeMessage:
     return FakeMessage(topic, offset, json.dumps({"seq": seq}).encode("utf-8"))
 
 
-def _make_factory(frames: list[Any], instances: list[FakeConsumer], fail: bool = False, fail_list: bool = False):
+def _make_factory(
+    frames: list[Any],
+    instances: list[FakeConsumer],
+    fail: bool = False,
+    fail_list: bool = False,
+    watermarks: dict[int, tuple[int, int]] | None = None,
+    partitions: list[int] | None = None,
+):
     """Builds a consumer_factory returning scripted FakeConsumers (or raising to simulate outage)."""
 
     def _create(config: dict[str, Any]) -> FakeConsumer:
         if fail:
             raise Exception("Failed to connect to bootstrap: connection refused")
-        consumer = FakeConsumer(config, frames, fail_list_topics=fail_list)
+        consumer = FakeConsumer(
+            config,
+            frames,
+            fail_list_topics=fail_list,
+            watermarks=watermarks,
+            partitions=partitions,
+        )
         instances.append(consumer)
         return consumer
 
@@ -242,3 +295,70 @@ def test_sqlite_publish_never_imports_kafka(tmp_path: Path, monkeypatch: pytest.
     broker = EventStreamAdapter(db_path=str(tmp_path / "event_log.db"))
     assert broker.publish_event(TOPIC, "k1", {"seq": 3}) is True
     assert broker.consume_events(TOPIC, consumer_group="g") == [{"seq": 3}]
+
+
+def test_kafka_replay_ignores_poll_budget_with_watermarks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay with watermark support returns the whole backlog despite a zero time budget."""
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    monkeypatch.setattr(event_stream, "_POLL_BUDGET_SECONDS", 0.0)
+    total = 60
+    frames = [_valid_frame(TOPIC, i, i) for i in range(total)]
+    instances: list[FakeConsumer] = []
+    broker = EventStreamAdapter(
+        db_path=str(tmp_path / "e.db"),
+        consumer_factory=_make_factory(frames, instances, watermarks={0: (0, total)}),
+    )
+
+    events = broker.consume_events(TOPIC, replay=True, consumer_group="speed_layer")
+
+    assert [e["seq"] for e in events] == list(range(total))
+    assert instances[0].committed_offsets == []
+    assert instances[0].closed is True
+
+
+def test_kafka_replay_fallback_ignores_poll_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay without watermark support still ignores the time budget (empty-streak drain)."""
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    monkeypatch.setattr(event_stream, "_POLL_BUDGET_SECONDS", 0.0)
+    total = 25
+    frames = [_valid_frame(TOPIC, i, i) for i in range(total)]
+    instances: list[FakeConsumer] = []
+    broker = EventStreamAdapter(
+        db_path=str(tmp_path / "e.db"),
+        consumer_factory=_make_factory(frames, instances),
+    )
+
+    events = broker.consume_events(TOPIC, replay=True, consumer_group="speed_layer")
+
+    assert [e["seq"] for e in events] == list(range(total))
+    assert instances[0].committed_offsets == []
+
+
+def test_kafka_replay_slow_producer_with_gaps_not_truncated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay survives empty-poll gaps longer than _MAX_EMPTY_POLLS when watermarks are known."""
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    frames: list[Any] = [
+        _valid_frame(TOPIC, 0, 0),
+        None,
+        None,
+        None,
+        _valid_frame(TOPIC, 1, 1),
+        None,
+        None,
+        None,
+        None,
+        None,
+        _valid_frame(TOPIC, 2, 2),
+        None,
+        _valid_frame(TOPIC, 3, 3),
+    ]
+    instances: list[FakeConsumer] = []
+    broker = EventStreamAdapter(
+        db_path=str(tmp_path / "e.db"),
+        consumer_factory=_make_factory(frames, instances, watermarks={0: (0, 4)}),
+    )
+
+    events = broker.consume_events(TOPIC, replay=True, consumer_group="speed_layer")
+
+    assert [e["seq"] for e in events] == [0, 1, 2, 3]
+    assert instances[0].committed_offsets == []

@@ -142,10 +142,21 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
     @staticmethod
     def _stored_value(value: Any) -> Any:
-        if isinstance(value, (dict, list)):
-            return json.dumps(value)
+        """Maps a Python value to its SQLite storage value, preserving numerics.
+
+        ``None`` stays NULL; ``bool`` is stored as INTEGER 0/1 (SQLite has no
+        native boolean); ``int``/``float`` keep their type so INTEGER/REAL
+        column affinities hold them without TEXT coercion; ``dict``/``list``
+        are JSON-encoded; anything else is stored as TEXT via ``str()``.
+        """
         if value is None:
             return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value)
         return str(value)
 
     @staticmethod
@@ -158,6 +169,44 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
                     seen.add(key)
                     columns.append(key)
         return columns
+
+    @staticmethod
+    def _infer_column_affinities(records: list[dict[str, Any]], columns: list[str]) -> dict[str, str]:
+        """Infers SQLite column affinities from the Python types of ``records``.
+
+        A column holding any string/complex value is TEXT; else any float makes
+        it REAL; else any int/bool makes it INTEGER; all-NULL columns default
+        to TEXT. This keeps ``typeof(col)`` INTEGER/REAL for typed Silver data
+        instead of coercing everything to TEXT (a TEXT-affinity column converts
+        incoming numerics to TEXT on write).
+        """
+        affinities: dict[str, str] = {}
+        for column in columns:
+            has_text = False
+            has_real = False
+            has_integer = False
+            for record in records:
+                value = record.get(column)
+                if value is None:
+                    continue
+                if isinstance(value, bool):
+                    has_integer = True
+                elif isinstance(value, int):
+                    has_integer = True
+                elif isinstance(value, float):
+                    has_real = True
+                else:
+                    has_text = True
+                    break
+            if has_text:
+                affinities[column] = "TEXT"
+            elif has_real:
+                affinities[column] = "REAL"
+            elif has_integer:
+                affinities[column] = "INTEGER"
+            else:
+                affinities[column] = "TEXT"
+        return affinities
 
     @staticmethod
     def _table_columns(conn: sqlite3.Connection, clean_name: str) -> set[str]:
@@ -184,9 +233,23 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         ).fetchone()
         return row is not None
 
-    def _ensure_table(self, conn: sqlite3.Connection, clean_name: str, columns: list[str]) -> None:
+    def _ensure_table(
+        self,
+        conn: sqlite3.Connection,
+        clean_name: str,
+        columns: list[str],
+        affinities: dict[str, str] | None = None,
+    ) -> None:
+        """Creates ``clean_name`` (or adds missing columns) honouring type affinities.
+
+        Business columns use the inferred ``affinities`` (INTEGER/REAL/TEXT from
+        the Python value types); a missing entry defaults to TEXT. Pre-existing
+        columns keep their declared affinity (SQLite cannot change it in place):
+        tables created before typed writes stay TEXT-affined for those columns.
+        """
+        resolved = affinities or {}
         if not self._table_exists(conn, clean_name):
-            definitions = [f'"{column}" TEXT' for column in columns]
+            definitions = [f'"{column}" {resolved.get(column, "TEXT")}' for column in columns]
             definitions.extend(f'"{column}" {column_type}' for column, column_type in INTERNAL_COLUMN_TYPES.items())
             conn.execute(f'CREATE TABLE "{clean_name}" ({", ".join(definitions)});')
             return
@@ -194,7 +257,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         existing = self._table_columns(conn, clean_name)
         for column in columns:
             if column not in existing:
-                conn.execute(f'ALTER TABLE "{clean_name}" ADD COLUMN "{column}" TEXT;')
+                conn.execute(f'ALTER TABLE "{clean_name}" ADD COLUMN "{column}" {resolved.get(column, "TEXT")};')
 
     @staticmethod
     def _next_version(conn: sqlite3.Connection, table_name: str) -> int:
@@ -264,7 +327,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
             columns = self._ordered_columns(records)
             hashes = [self._content_hash(record) for record in records]
-            self._ensure_table(conn, clean_name, columns)
+            self._ensure_table(conn, clean_name, columns, self._infer_column_affinities(records, columns))
 
             if mode == "append":
                 known_hashes = {

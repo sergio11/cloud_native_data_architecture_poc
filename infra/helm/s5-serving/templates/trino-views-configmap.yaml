@@ -1,0 +1,67 @@
+{{- if and .Values.trino.enabled .Values.viewsInit.enabled }}
+# Mirror of pipelines/serving/unified_view.sql (serving live views + VIEW 1 / RF-11).
+# KEEP IN SYNC with that file: a Helm chart cannot read outside its own
+# directory, so the SQL is duplicated here verbatim. The init job applies it
+# with `trino --file /sql/unified_view.sql` after bootstrapping schemas.
+# Marketing/finance VIEWS 2-3 are intentionally ABSENT (removed K5/K8: their
+# source tables are produced by no pipeline - see the note at the end of the
+# SQL file). Do not re-add views without their producing pipelines.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-views-sql
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: trino-views-bootstrap
+    {{- include "s5-serving.labels" . | nindent 4 }}
+data:
+  unified_view.sql: |
+    CREATE SCHEMA IF NOT EXISTS iceberg.serving;
+    CREATE SCHEMA IF NOT EXISTS iceberg.sales;
+    CREATE SCHEMA IF NOT EXISTS iceberg.marketing;
+    CREATE SCHEMA IF NOT EXISTS iceberg.finance;
+
+    CREATE OR REPLACE VIEW iceberg.serving.gold_sales_daily_metrics_live AS
+    SELECT * FROM gold.sales.daily_metrics;
+
+    CREATE OR REPLACE VIEW iceberg.serving.stream_sales_orders_windowed_live AS
+    SELECT * FROM stream.sales.orders_windowed;
+
+    CREATE OR REPLACE VIEW iceberg.serving.sales_unified_revenue AS
+    SELECT
+        order_date,
+        status,
+        total_orders,
+        total_revenue,
+        avg_order_value,
+        source_tier
+    FROM (
+        SELECT
+            order_date                                   AS order_date,
+            status                                       AS status,
+            total_orders                                 AS total_orders,
+            gross_revenue                                AS total_revenue,
+            average_order_value                          AS avg_order_value,
+            'batch_historical'                           AS source_tier
+        FROM gold.sales.daily_metrics
+        UNION ALL
+        SELECT
+            s.order_date                                 AS order_date,
+            s.status                                     AS status,
+            SUM(CAST(s.window_orders AS BIGINT))         AS total_orders,
+            SUM(CAST(s.window_revenue AS DECIMAL(14,2))) AS total_revenue,
+            SUM(CAST(s.window_revenue AS DECIMAL(14,2)))
+                / NULLIF(SUM(CAST(s.window_orders AS BIGINT)), 0)
+                                                         AS avg_order_value,
+            'stream_speed'                               AS source_tier
+        FROM stream.sales.orders_windowed s
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM gold.sales.daily_metrics b
+            WHERE b.order_date = s.order_date
+              AND b.status = s.status
+        )
+        GROUP BY s.order_date, s.status
+    ) unified
+    ORDER BY order_date DESC, status DESC;
+{{- end }}

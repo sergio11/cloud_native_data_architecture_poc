@@ -83,3 +83,22 @@ def contract_entity_for_table(table_name: str) -> str:
 def physical_sql_name(logical: str) -> str:
     """Maps a logical dotted table name to its physical SQL name (dots become underscores)."""
     return logical.replace(".", "_")
+
+
+def serving_view_name(logical: str) -> str:
+    """Maps a logical dotted table name to its serving live-view name (``<physical>_live``).
+
+    Live-view contract (serving without rewriting): serving SQL references
+    these deterministic view names instead of dotted logical names, so the
+    statement runs VERBATIM on every backend with no textual rewriting.
+    Example: logical ``gold.sales.daily_metrics`` -> physical
+    ``gold_sales_daily_metrics`` -> view ``gold_sales_daily_metrics_live``.
+
+    Provisioning (idempotent ``CREATE VIEW IF NOT EXISTS``):
+    - SQLite (serving adapter, lazily on first query): ``SELECT * FROM
+      <physical> WHERE _row_superseded IS NULL`` when that versioning column
+      exists, plain pass-through ``SELECT * FROM <physical>`` otherwise;
+    - Trino (``pipelines/serving/unified_view.sql`` twins): pure pass-through
+      over Iceberg (``_row_superseded`` is a SQLite-only versioning concept).
+    """
+    return f"{physical_sql_name(logical)}_live"

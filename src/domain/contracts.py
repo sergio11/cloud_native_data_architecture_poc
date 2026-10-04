@@ -201,6 +201,23 @@ def extract_contract_fields(contract_data: dict[str, Any]) -> list[dict[str, Any
     return _nested_fields(contract_data)
 
 
+def resolve_contract_field_types(contract_data: dict[str, Any]) -> dict[str, str]:
+    """Returns field name -> canonical type family for a contract.yaml document.
+
+    Pure domain (no I/O): extracts schema fields via :func:`extract_contract_fields`,
+    normalises warehouse/JSON-Schema spellings via :func:`_normalise_fields`, and keeps
+    only the family prefix (``integer``, ``number``, ``boolean``, ``string``, ...),
+    dropping temporal subtypes (``string:date`` -> ``string``) so Silver typing treats
+    dates as TEXT (SQLite standard). Unknown/empty types map to ``""`` (callers must
+    leave such values untouched).
+    """
+    families: dict[str, str] = {}
+    for field_def in _normalise_fields(extract_contract_fields(contract_data)):
+        family = str(field_def.get("type", "")).split(":")[0]
+        families[str(field_def["name"])] = family
+    return families
+
+
 def extract_schema_fields(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
     """Extracts raw field dicts from a schema.json document (pure navigation).
 

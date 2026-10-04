@@ -160,7 +160,7 @@ def test_kappa_streaming_and_serving(temp_lakehouse):
 
     # 3. Unified Serving Layer Query (RF-11) via the outbound QueryExecutorPort
     serving_uc = QueryServingUseCase(query_executor=SqlServingAdapter(db_path=temp_lakehouse["db_path"]))
-    unified = serving_uc.execute_unified_revenue_query()
+    unified = serving_uc.execute()
     assert len(unified) > 0
     tiers = {r["source_tier"] for r in unified}
     assert "batch_historical" in tiers

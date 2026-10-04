@@ -15,6 +15,7 @@ from src.adapters.serving.sql_serving import SqlServingAdapter
 from src.adapters.source.oltp_source import OltpSourceAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
 from src.adapters.streaming.event_stream import EventStreamAdapter
+from src.domain.privacy import DEFAULT_PII_HASH_SALT
 from src.ports.inbound import (
     AggregateGoldPort,
     CleanseSilverPort,
@@ -131,6 +132,7 @@ class Container:
             lineage=self.lineage,
             quality_engine=self.quality_engine,
             catalog=self.domain_catalog,
+            privacy_salt=os.environ.get("PII_HASH_SALT", DEFAULT_PII_HASH_SALT),
         )
 
     @functools.cached_property

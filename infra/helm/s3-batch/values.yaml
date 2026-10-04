@@ -31,8 +31,9 @@ sparkOperator:
 
 sparkDefaults:
   image:
-    repository: apache/spark-py
-    tag: "v3.5.1"
+    # Built from repo root: docker build -f infra/docker/spark.Dockerfile -t poc/spark-medallion:0.1.0 .
+    repository: poc/spark-medallion
+    tag: "0.1.0"
     pullPolicy: IfNotPresent
 
   driver:

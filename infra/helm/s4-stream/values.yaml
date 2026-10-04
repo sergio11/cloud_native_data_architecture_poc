@@ -87,7 +87,8 @@ flinkOperator:
 flinkJobs:
   ordersStream:
     enabled: true
-    image: flink:1.18-scala_2.12
+    # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
+    image: poc/flink-stream:0.1.0
     jobManager:
       memory: "256m"
       cpu: 0.3
@@ -97,7 +98,8 @@ flinkJobs:
       replicas: 1
   clickstreamStream:
     enabled: true
-    image: flink:1.18-scala_2.12
+    # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
+    image: poc/flink-stream:0.1.0
     jobManager:
       memory: "256m"
       cpu: 0.3

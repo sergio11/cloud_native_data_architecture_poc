@@ -131,8 +131,9 @@ LIMIT 5;
 ```
 *Expected Result*:
 - `name_masked` displays only first name + initial: `"Alice S."`, `"John M."`.
-- `email_hash` contains a 64-character SHA-256 hexadecimal string of the
-  normalised email.
+- `email_hash` contains a 64-character salted SHA-256 hexadecimal string of the
+  normalised email (salt from `PII_HASH_SALT`, default `poc-demo-salt-v1`;
+  see `src/domain/privacy.py`).
 - Plaintext `name` and `email` columns are absent from the Gold table.
 
 #### Query 1.3: Pseudonymised Customer × Orders Join (RNF-07)

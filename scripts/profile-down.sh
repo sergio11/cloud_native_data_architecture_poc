@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Modern Data Architecture POC - Profile Deactivation Script
-# Scales down running compute pods to free memory
+# Usage: profile-down.sh [profile]   (default: demo)
+# Coherent inverse of profile-up.sh (K-B): uninstalls exactly the Helm releases
+# that profile-up.sh installs for the given profile (release name == chart
+# directory name, namespace platform). Namespaces/PVCs are left intact so
+# persistent state survives a down/up cycle.
 # ==============================================================================
 set -euo pipefail
+
+PROFILE="${1:-demo}"
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -12,52 +18,60 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 failures=0
-scaled=0
+removed=0
 
-if ! command -v kubectl >/dev/null 2>&1; then
-    echo -e "${RED}Error: kubectl is not installed or not on PATH.${NC}"
-    exit 1
-fi
-
-echo -e "${BLUE}==================================================================${NC}"
-echo -e "${BLUE}   DEACTIVATING COMPUTE WORKLOADS & RECLAIMING RAM                ${NC}"
-echo -e "${BLUE}==================================================================${NC}"
-
-# One probe up front: distinguishes "cluster unreachable" (hard failure)
-# from "namespace does not exist" (nothing to do).
-if ! namespaces=$(kubectl get namespaces -o name 2>/dev/null); then
-    echo -e "${RED}Error: cannot reach the Kubernetes cluster ('kubectl get namespaces' failed).${NC}"
-    exit 1
-fi
-
-# Scale down deployments in platform and domain namespaces
-for ns in platform sales marketing finance ops; do
-    echo -e "Scaling down deployments in namespace: ${YELLOW}$ns${NC}"
-    if ! printf '%s\n' "$namespaces" | grep -q "^namespace/${ns}$"; then
-        echo -e "  Namespace '${ns}' does not exist - nothing to scale."
-        continue
-    fi
-    if ! deployments=$(kubectl get deployment -o name -n "$ns" 2>/dev/null); then
-        echo -e "  ${RED}FAILED${NC}: could not list deployments in namespace '${ns}'"
-        failures=$((failures + 1))
-        continue
-    fi
-    if [ -z "$deployments" ]; then
-        echo -e "  No deployments found in namespace '${ns}'."
-        continue
-    fi
-    if kubectl scale deployment --all --replicas=0 -n "$ns"; then
-        echo -e "  ${GREEN}OK${NC}: scaled down deployments in '${ns}'"
-        scaled=$((scaled + 1))
+uninstall_chart() {
+    local chart="$1"
+    echo -e "Removing Helm release: ${YELLOW}${chart}${NC}"
+    if helm uninstall "$chart" -n platform; then
+        echo -e "  ${GREEN}OK${NC}: ${chart} uninstalled"
+        removed=$((removed + 1))
     else
-        echo -e "  ${RED}FAILED${NC}: could not scale deployments in namespace '${ns}'"
+        echo -e "  ${YELLOW}SKIP/FAILED${NC}: ${chart} (maybe not installed)"
         failures=$((failures + 1))
     fi
-done
+    return 0
+}
+
+if ! command -v helm >/dev/null 2>&1; then
+    echo -e "${RED}Error: helm is not installed or not on PATH.${NC}"
+    exit 1
+fi
+
+echo -e "${BLUE}==================================================================${NC}"
+echo -e "${BLUE}   DEACTIVATING OPERATIONAL PROFILE: ${YELLOW}$(printf '%s' "$PROFILE" | tr '[:lower:]' '[:upper:]')${NC}"
+echo -e "${BLUE}==================================================================${NC}"
+
+case "$PROFILE" in
+    platform)
+        for chart in s1-ingestion s2-lakehouse s7-fabric; do
+            uninstall_chart "$chart"
+        done
+        ;;
+    stream)
+        for chart in s1-ingestion s2-lakehouse s4-stream s5-serving; do
+            uninstall_chart "$chart"
+        done
+        ;;
+    batch)
+        for chart in s1-ingestion s2-lakehouse s3-batch s5-serving; do
+            uninstall_chart "$chart"
+        done
+        ;;
+    demo)
+        for chart in s1-ingestion s2-lakehouse s3-batch s4-stream s5-serving s6-mesh s7-fabric s8-ops; do
+            uninstall_chart "$chart"
+        done
+        ;;
+    *)
+        echo -e "${RED}Unknown profile: $PROFILE. Choose from: platform, stream, batch, demo${NC}"
+        exit 1
+        ;;
+esac
 
 echo ""
 if [ "$failures" -gt 0 ]; then
-    echo -e "${RED}Deactivation finished with ${failures} failed step(s) (${scaled} namespace(s) scaled down).${NC}"
+    echo -e "${RED}Profile '${PROFILE}' deactivation finished with ${failures} failed/skipped step(s) (${removed} release(s) removed).${NC}"
     exit 1
 fi
-echo -e "${GREEN}Workloads scaled down (${scaled} namespace(s)). Core persistent state retained in PVCs.${NC}"
+echo -e "${GREEN}Profile '${PROFILE}' removed successfully! (${removed} release(s) uninstalled)${NC}"

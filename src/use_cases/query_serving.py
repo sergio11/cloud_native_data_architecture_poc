@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.domain.naming import gold_table, stream_table
+from src.domain.naming import gold_table, serving_view_name, stream_table
 from src.ports.inbound import QueryServingPort, UnifiedRevenueRow
 from src.ports.outbound import QueryExecutorPort
 
@@ -32,7 +32,7 @@ class QueryServingUseCase(QueryServingPort):
     def __init__(self, query_executor: QueryExecutorPort) -> None:
         self._query_executor = query_executor
 
-    def execute_unified_revenue_query(
+    def execute(
         self,
         order_date_gte: str | None = None,
         limit: int = 20,
@@ -54,11 +54,14 @@ class QueryServingUseCase(QueryServingPort):
 
         QueryExecutorPort takes SQL only (no bind parameters), so the filter is
         inlined with quote escaping and the limit is cast to int. Tier table
-        names always derive from ``src.domain.naming`` (single source of
-        truth), never from literals.
+        names are serving live-view names from ``src.domain.naming``
+        (``serving_view_name``, single source of truth), never dotted logical
+        names: the statement runs verbatim on every backend because the
+        serving adapter provisions each ``<physical>_live`` view idempotently
+        (live rows only) instead of rewriting the SQL text.
         """
-        batch_table = gold_table("daily_metrics")
-        stream_table_name = stream_table()
+        batch_table = serving_view_name(gold_table("daily_metrics"))
+        stream_table_name = serving_view_name(stream_table())
         sql = (
             "SELECT order_date, status, total_orders, total_revenue, "
             "avg_order_value, source_tier FROM ("

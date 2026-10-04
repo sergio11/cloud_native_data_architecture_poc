@@ -5,9 +5,12 @@ Verifies pure domain rules, GDPR pseudonymization, business rollups, and contrac
 
 from __future__ import annotations
 
+import hashlib
+import re
+
 from src.domain.aggregations import BusinessAggregator
 from src.domain.contracts import ContractCompatibilityEvaluator
-from src.domain.privacy import PrivacyPolicy
+from src.domain.privacy import DEFAULT_PII_HASH_SALT, PrivacyPolicy, pseudonymize_email
 
 
 def test_gdpr_privacy_policy():
@@ -44,6 +47,38 @@ def test_privacy_masking_blank_and_none_inputs():
 
     processed_blank = PrivacyPolicy.apply_customer_masking({"id": 2, "name": "  ", "email": "  "})
     assert processed_blank["name_masked"] == ""
+
+
+def test_pseudonymize_email_salted_deterministic() -> None:
+    """L2: same email+salt -> same 64-hex hash; another salt -> another hash.
+
+    Pure domain function: the salt travels as an explicit argument (DIP - the
+    domain never reads ``PII_HASH_SALT``; only the composition root does). The
+    salted scheme keeps the Gold ``^[0-9a-f]{64}$`` regex contract, and the
+    legacy ``hash_email`` entry point delegates to the salted default.
+    """
+    assert DEFAULT_PII_HASH_SALT == "poc-demo-salt-v1"
+
+    salted = PrivacyPolicy.pseudonymize_email("Alice.Smith@Example.com", salt=DEFAULT_PII_HASH_SALT)
+    assert salted == PrivacyPolicy.pseudonymize_email("alice.smith@example.com", salt=DEFAULT_PII_HASH_SALT)
+    assert re.fullmatch(r"[0-9a-f]{64}", salted)
+    # Salted by default: no longer the bare SHA-256 of the normalised address.
+    bare = hashlib.sha256(b"alice.smith@example.com").hexdigest()
+    assert salted != bare
+    # Explicit digest contract: f"{salt}:{normalised}".
+    expected = hashlib.sha256(f"{DEFAULT_PII_HASH_SALT}:alice.smith@example.com".encode()).hexdigest()
+    assert salted == expected
+
+    other = PrivacyPolicy.pseudonymize_email("alice.smith@example.com", salt="another-salt")
+    assert re.fullmatch(r"[0-9a-f]{64}", other)
+    assert other != salted
+
+    # Backward compatibility: hash_email delegates to the salted function.
+    assert PrivacyPolicy.hash_email("alice.smith@example.com", salt=DEFAULT_PII_HASH_SALT) == salted
+    assert pseudonymize_email("alice.smith@example.com", salt=DEFAULT_PII_HASH_SALT) == salted
+    # Masking honours the injected salt as well.
+    masked = PrivacyPolicy.apply_customer_masking({"id": 1, "email": "alice.smith@example.com"}, salt="another-salt")
+    assert masked["email_hash"] == other
 
 
 def test_business_aggregator_daily_sales():

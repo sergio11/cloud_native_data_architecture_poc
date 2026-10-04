@@ -15,6 +15,13 @@ spec:
         app: trino-views-bootstrap
     spec:
       restartPolicy: OnFailure
+      volumes:
+        # Full serving SQL (mirror of pipelines/serving/unified_view.sql, see
+        # trino-views-configmap.yaml): schemas + VIEW 1 (RF-11) only. Views 2-3
+        # were removed (K5/K8) - no pipeline produces their source tables.
+        - name: views-sql
+          configMap:
+            name: trino-views-sql
       initContainers:
         - name: wait-for-trino
           image: busybox:1.36
@@ -44,5 +51,10 @@ spec:
                 CREATE SCHEMA IF NOT EXISTS iceberg.finance;
                 SHOW SCHEMAS FROM iceberg;
               "
+              echo "Applying unified serving views (VIEW 1 RF-11)..."
+              trino --server http://trino.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local:8080 --file /sql/unified_view.sql
               echo "Trino serving schemas bootstrap complete."
+          volumeMounts:
+            - name: views-sql
+              mountPath: /sql
 {{- end }}

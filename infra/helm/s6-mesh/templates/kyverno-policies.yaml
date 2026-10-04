@@ -75,9 +75,10 @@ spec:
 ---
 # --- Source: governance/policies/naming-convention.yaml (validate; verbatim
 # except Helm escaping) ---
-# NOTE (K-B): Kyverno's '{{ regex_match(...) }}' uses Go-template delimiters,
-# which collide with Helm's. It is emitted via '{{ "{{" }} ... {{ "}}" }}' so
-# Helm renders the literal Kyverno expression instead of evaluating it.
+# NOTE (K-B): Kyverno's regex_match expression uses Go-template delimiters,
+# which collide with Helm's. It is emitted via quoted brace actions on the
+# key line below, so Helm renders the literal Kyverno expression instead
+# of evaluating it.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:

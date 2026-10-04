@@ -1,7 +1,7 @@
 # Self-contained Prometheus (no upstream subchart; offline env).
 # Rules come from the chart asset prometheus/alerts.yaml via .Files.Get, which
-# returns raw content WITHOUT templating, so the alert expressions containing
-# '{{ $labels... }}' pass through untouched.
+# returns raw content WITHOUT templating, so the alert expressions with
+# dollar-labels placeholders pass through untouched.
 {{- if .Values.prometheus.enabled }}
 apiVersion: v1
 kind: ConfigMap

@@ -1,3 +1,4 @@
+{{- if .Values.marquez.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,3 +53,4 @@ spec:
       name: web
   selector:
     app: marquez
+{{- end }}

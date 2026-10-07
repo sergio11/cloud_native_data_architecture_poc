@@ -27,6 +27,10 @@ spec:
         - name: flink-operator
           image: "{{ .Values.flinkOperator.image.repository }}:{{ .Values.flinkOperator.image.tag }}"
           imagePullPolicy: {{ .Values.flinkOperator.image.pullPolicy }}
+          # The upstream image entrypoint requires the role as first argument
+          # (operator|webhook); without it the container exits immediately.
+          args:
+            - operator
           env:
             - name: OPERATOR_NAMESPACE
               valueFrom:
@@ -41,13 +45,13 @@ spec:
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8080
+              port: 8085
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
+              port: 8085
             initialDelaySeconds: 15
             periodSeconds: 20
 {{- end }}

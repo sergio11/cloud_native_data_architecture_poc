@@ -33,6 +33,10 @@ spec:
             - -logtostderr
             - -namespace=
             - -enable-ui-service=true
+            # Metrics must be enabled explicitly in this operator version, otherwise
+            # nothing listens on 10254 and the probes below kill it.
+            - -enable-metrics
+            - -metrics-port=10254
           ports:
             - name: metrics
               containerPort: 10254
@@ -43,12 +47,13 @@ spec:
             httpGet:
               path: /metrics
               port: 10254
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /metrics
               port: 10254
-            initialDelaySeconds: 15
+            initialDelaySeconds: 30
             periodSeconds: 20
+            failureThreshold: 6
 {{- end }}

@@ -33,8 +33,9 @@ kafka:
       cpu: 800m
       memory: 768Mi
 
-  nodeSelector:
-    node-role.kubernetes.io/storage: "true"
+  # Empty by default so single-node clusters schedule anywhere (multi-node:
+  # nodeSelector: {node-role.kubernetes.io/storage: "true"}).
+  nodeSelector: {}
 
 kafkaUi:
   enabled: true
@@ -47,7 +48,7 @@ kafkaUi:
   service:
     type: NodePort
     port: 8090
-    nodePort: 8090
+    nodePort: 30090
 
   resources:
     requests:
@@ -81,29 +82,35 @@ flinkOperator:
       cpu: 400m
       memory: 256Mi
 
-  nodeSelector:
-    node-role.kubernetes.io/compute: "true"
+  # Empty by default so single-node clusters schedule anywhere (multi-node:
+  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  nodeSelector: {}
 
 flinkJobs:
   ordersStream:
     enabled: true
     # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
     image: poc/flink-stream:0.1.0
+    # Flink process memory must exceed JVM heap + metaspace + overhead;
+    # 256m is rejected by the operator, 768m is the smallest workable value.
     jobManager:
-      memory: "256m"
+      memory: "768m"
       cpu: 0.3
     taskManager:
-      memory: "384m"
+      memory: "1024m"
       cpu: 0.4
+      # Must live under taskManager: the template reads
+      # flinkJobs.<job>.taskManager.replicas (a job-level value renders empty
+      # and the CRD rejects it as null).
       replicas: 1
   clickstreamStream:
     enabled: true
     # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
     image: poc/flink-stream:0.1.0
     jobManager:
-      memory: "256m"
+      memory: "768m"
       cpu: 0.3
     taskManager:
-      memory: "384m"
+      memory: "1024m"
       cpu: 0.4
       replicas: 1

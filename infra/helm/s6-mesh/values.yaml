@@ -31,8 +31,9 @@ kyverno:
       cpu: 250m
       memory: 192Mi
 
-  nodeSelector:
-    node-role.kubernetes.io/compute: "true"
+  # Empty by default so single-node clusters schedule anywhere (multi-node:
+  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  nodeSelector: {}
 
 crds:
   install: true

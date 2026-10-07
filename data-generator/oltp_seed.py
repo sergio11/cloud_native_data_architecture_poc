@@ -172,20 +172,49 @@ def create_schema(conn: psycopg2.extensions.connection, recreate: bool = False) 
     logger.info("Schema created successfully.")
 
 
+def _table_columns(conn: psycopg2.extensions.connection, table: str) -> set[str]:
+    """Returns the live column names of ``table`` (K8s chart schema compatibility).
+
+    The Helm chart ships its own init schema (``postgres-configmap.yaml``) which
+    drifted from this file's DDL (e.g. ``products.cost``/``sku`` NOT NULL,
+    ``campaigns.name`` NOT NULL). Inserts adapt to whichever columns exist so
+    seeding works on empty DBs, chart-created DBs and legacy seeder DBs alike.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = %s;",
+            (table,),
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
 def seed_products(conn: psycopg2.extensions.connection, n: int = 500) -> list[tuple[int, float]]:
     logger.info("Seeding %d products...", n)
     from faker import Faker
 
     faker = Faker()
+    live = _table_columns(conn, "products")
+    with_cost = "cost" in live
+    with_sku = "sku" in live
     rows = []
-    for _ in range(n):
+    for idx in range(n):
         cat = random.choice(PRODUCT_CATEGORIES)
         name = f"{faker.word().capitalize()} {faker.word().capitalize()}"
         price = round(float(np.random.exponential(scale=45.0) + 5.0), 2)
-        rows.append((name, cat, price))
+        row: tuple = (name, cat, price)
+        if with_cost:
+            row = row + (round(price * 0.6, 2),)
+        if with_sku:
+            row = row + (f"SKU-{idx:06d}-{random.randint(1000, 9999)}",)
+        rows.append(row)
 
-    query = """
-        INSERT INTO products (name, category, base_price)
+    columns = ["name", "category", "base_price"]
+    if with_cost:
+        columns.append("cost")
+    if with_sku:
+        columns.append("sku")
+    query = f"""
+        INSERT INTO products ({", ".join(columns)})
         VALUES %s
         ON CONFLICT DO NOTHING
         RETURNING id, base_price;
@@ -305,16 +334,23 @@ def seed_orders(
 def seed_campaigns(conn: psycopg2.extensions.connection, n: int = 100) -> None:
     logger.info("Seeding %d marketing campaigns...", n)
     today = date.today()
+    with_name = "name" in _table_columns(conn, "campaigns")
     rows = []
-    for _ in range(n):
+    for idx in range(n):
         channel = random.choice(CAMPAIGN_CHANNELS)
         budget = round(float(random.uniform(500, 50000)), 2)
         start = today - timedelta(days=random.randint(10, 180))
         end = start + timedelta(days=random.randint(14, 90))
-        rows.append((channel, budget, start, end))
+        row: tuple = (channel, budget, start, end)
+        if with_name:
+            row = (f"{channel.title()} Drive {start.isoformat()} #{idx}",) + row
+        rows.append(row)
 
-    query = """
-        INSERT INTO campaigns (channel, budget, start_date, end_date)
+    columns = ["channel", "budget", "start_date", "end_date"]
+    if with_name:
+        columns = ["name"] + columns
+    query = f"""
+        INSERT INTO campaigns ({", ".join(columns)})
         VALUES %s
         ON CONFLICT DO NOTHING;
     """

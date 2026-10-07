@@ -22,14 +22,21 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        # Bitnami images run as uid 1001; the PVC root must be writable by it.
+        fsGroup: 1001
+        runAsUser: 1001
+        runAsGroup: 1001
       containers:
         - name: minio
           image: "{{ .Values.minio.image.repository }}:{{ .Values.minio.image.tag }}"
           imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -ce
-            - minio server /data --console-address :9001
+          # Keep the image entrypoint and only override the server arguments.
+          args:
+            - server
+            - /data
+            - --console-address
+            - :9001
           ports:
             - name: s3-api
               containerPort: 9000

@@ -40,8 +40,24 @@ postgresql:
       cpu: 500m
       memory: 384Mi
 
-  nodeSelector:
-    node-role.kubernetes.io/storage: "true"
+  # Probe timings tolerant enough for single-node kind under load (the
+  # default 1s exec timeout flaps and restarts PostgreSQL needlessly).
+  probes:
+    readiness:
+      initialDelaySeconds: 10
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 6
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 6
+
+  # Empty by default so single-node clusters (kind, demo profile) schedule
+  # PostgreSQL anywhere; pin to storage nodes in multi-node setups, e.g.
+  # nodeSelector: {node-role.kubernetes.io/storage: "true"}.
+  nodeSelector: {}
 
   tolerations: []
   affinity: {}

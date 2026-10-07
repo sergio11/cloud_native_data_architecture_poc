@@ -12,8 +12,10 @@ minio:
   enabled: true
   replicaCount: 1
   image:
-    repository: minio/minio
-    tag: "RELEASE.2024-05-10T01-41-38Z"
+    # Upstream minio/minio was removed from Docker Hub and quay.io gates
+    # anonymous pulls, so the POC uses the archived Bitnami build.
+    repository: bitnamilegacy/minio
+    tag: "2025.7.23"
     pullPolicy: IfNotPresent
 
   auth:
@@ -23,9 +25,9 @@ minio:
   service:
     type: NodePort
     apiPort: 9000
-    apiNodePort: 9000
+    apiNodePort: 30900
     consolePort: 9001
-    consoleNodePort: 9001
+    consoleNodePort: 30901
 
   persistence:
     enabled: true
@@ -41,8 +43,10 @@ minio:
       cpu: 500m
       memory: 384Mi
 
-  nodeSelector:
-    node-role.kubernetes.io/storage: "true"
+  # Empty by default so single-node clusters schedule anywhere; pin to
+  # storage nodes in multi-node setups, e.g.
+  # nodeSelector: {node-role.kubernetes.io/storage: "true"}.
+  nodeSelector: {}
 
   tolerations: []
   affinity: {}
@@ -51,8 +55,9 @@ minio:
 bucketInit:
   enabled: true
   image:
-    repository: minio/mc
-    tag: "RELEASE.2024-05-09T17-04-24Z"
+    # Client for the bucket-init job; upstream minio/mc is gone from Docker Hub.
+    repository: bitnamilegacy/minio-client
+    tag: "2025.7.21"
     pullPolicy: IfNotPresent
   buckets:
     - datalake
@@ -76,7 +81,7 @@ polaris:
   service:
     type: NodePort
     port: 8181
-    nodePort: 8181
+    nodePort: 31818
 
   config:
     realm: "default-realm"
@@ -95,8 +100,10 @@ polaris:
       cpu: 600m
       memory: 512Mi
 
-  nodeSelector:
-    node-role.kubernetes.io/storage: "true"
+  # Empty by default so single-node clusters schedule anywhere; pin to
+  # storage nodes in multi-node setups, e.g.
+  # nodeSelector: {node-role.kubernetes.io/storage: "true"}.
+  nodeSelector: {}
 
   tolerations: []
   affinity: {}

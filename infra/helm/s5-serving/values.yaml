@@ -17,7 +17,7 @@ trino:
   service:
     type: NodePort
     port: 8080
-    nodePort: 8080
+    nodePort: 30088
 
   resources:
     requests:
@@ -31,8 +31,9 @@ trino:
     maxHeapSize: "1024M"
     gc: "-XX:+UseG1GC"
 
-  nodeSelector:
-    node-role.kubernetes.io/compute: "true"
+  # Empty by default so single-node clusters schedule anywhere (multi-node:
+  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  nodeSelector: {}
 
   tolerations: []
   affinity: {}

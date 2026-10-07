@@ -16,5 +16,14 @@ FROM flink:1.18-scala_2.12
 COPY pipelines/ /opt/flink/pipelines/
 COPY src/ /opt/flink/src/
 
+# The flink:1.18 base image ships no Python interpreter, but the PyFlink
+# PythonDriver executes the `python` binary: install it (no-op if present)
+# and expose it under the expected name.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
 # Minimal runtime deps of the streaming drivers (yaml/requests/click).
-RUN pip install --no-cache-dir pyyaml requests click
+# Debian bookworm's pip honours PEP 668 here, hence --break-system-packages.
+RUN python3 -m pip install --no-cache-dir pyyaml requests click \
+    || python3 -m pip install --no-cache-dir --break-system-packages pyyaml requests click

@@ -11,8 +11,9 @@ sparkOperator:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/googlecloudplatform/spark-operator
-    tag: "v1beta2-1.4.0-3.5.0"
+    # v1beta2-1.6.2-3.5.0 = latest v1beta2 CRD API compatible with Spark 3.5.x.
+    repository: kubeflow/spark-operator
+    tag: "v1beta2-1.6.2-3.5.0"
     pullPolicy: IfNotPresent
 
   resources:
@@ -23,8 +24,9 @@ sparkOperator:
       cpu: 250m
       memory: 256Mi
 
-  nodeSelector:
-    node-role.kubernetes.io/compute: "true"
+  # Empty by default so single-node clusters schedule anywhere (multi-node:
+  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  nodeSelector: {}
 
   tolerations: []
   affinity: {}
@@ -54,8 +56,9 @@ sparkDefaults:
       version: "3.5.1"
       role: executor
 
-  nodeSelector:
-    node-role.kubernetes.io/compute: "true"
+  # Empty by default so single-node clusters schedule anywhere (multi-node:
+  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  nodeSelector: {}
 
   iceberg:
     catalogName: "polaris"

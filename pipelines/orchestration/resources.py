@@ -5,13 +5,22 @@ Provides connectors to Apache Spark, Apache Flink, Marquez/OpenLineage, and Grea
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import requests
 from dagster import ConfigurableResource
 
+from pipelines.orchestration.flink_replay import (
+    CONSUMER_GROUP_VARS,
+    START_OFFSET_VAR,
+    build_replay_env,
+    replay_group_id,
+)
 from pipelines.orchestration.local_dispatch import run_script
 
 if TYPE_CHECKING:
@@ -38,26 +47,98 @@ class SparkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster 
 
 
 class FlinkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
-    """Resource to interact with Apache Flink (K8s Operator in the K8s profile)."""
+    """Resource to drive the Apache Flink speed layer on the cluster (RF-10).
+
+    The speed layer is a REAL Flink job submitted by the Flink Kubernetes
+    Operator (``FlinkDeployment`` in the s4-stream chart). It has no local
+    counterpart, so this resource talks to the cluster with ``kubectl``
+    read-modify-write against the deployment instead of shelling out to a
+    Python script.
+    """
 
     operator_endpoint: str = "http://flink-operator.platform.svc:8080"
+    compute_namespace: str = "sales"
+    kubectl_binary: str = "kubectl"
 
-    def trigger_savepoint_and_replay(self, deployment_name: str, earliest_offset: bool = True) -> bool:
-        """Replay the orders stream locally (mirrors `rake stream:replay`).
-
-        Runs ``pipelines/stream/flink_orders_stream.py --topic sales.orders.events``
-        with ``--start-offset earliest`` when ``earliest_offset`` is set; a
-        non-zero exit raises so Dagster marks the asset failed.
-        """
-        logger.info(
-            "LOCAL profile: replaying stream deployment '%s' (earliest_offset=%s) via local dispatch",
-            deployment_name,
-            earliest_offset,
+    def _kubectl(self, args: list[str], stdin: str | None = None) -> str:
+        """Runs a kubectl command, raising with its output when it fails."""
+        result = subprocess.run(
+            [self.kubectl_binary, *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            input=stdin,
+            check=False,
         )
-        args = ["--topic", "sales.orders.events"]
-        if earliest_offset:
-            args.extend(["--start-offset", "earliest"])
-        run_script("pipelines/stream/flink_orders_stream.py", args)
+        if result.returncode != 0:
+            raise RuntimeError(f"kubectl {' '.join(args)} exited with {result.returncode}: {result.stderr.strip()}")
+        return result.stdout
+
+    def current_deployment(self, deployment_name: str) -> dict[str, Any]:
+        """Returns the live FlinkDeployment object as a dict."""
+        raw = self._kubectl(["get", "flinkdeployment", deployment_name, "-n", self.compute_namespace, "-o", "json"])
+        parsed: Any = None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"kubectl returned invalid JSON for {deployment_name}: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"kubectl returned a non-object for {deployment_name}.")
+        return dict(parsed)
+
+    def trigger_savepoint_and_replay(
+        self,
+        deployment_name: str = "flink-orders-stream",
+        earliest_offset: bool = True,
+    ) -> bool:
+        """Triggers a Kappa replay of a speed-layer deployment (RF-10).
+
+        Rotates the Kafka consumer group and rewinds the read offset so the job
+        re-reads the whole topic log from offset 0 and re-emits every window;
+        the Iceberg sink upserts on ``(window_start, key)``, so the replay is
+        idempotent and the table ends up with the recomputed values.
+
+        The consumer group MUST be rotated as well as the offset: a committed
+        group ignores ``earliest`` and would replay nothing while still
+        reporting success (see :mod:`pipelines.orchestration.flink_replay`).
+
+        Returns:
+            True once the patched deployment has been accepted.
+        """
+        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        deployment = self.current_deployment(deployment_name)
+        spec = deployment.get("spec") or {}
+        env = list(spec.get("env") or [])
+
+        group_var = next((var for var in CONSUMER_GROUP_VARS if any(e.get("name") == var for e in env)), None)
+        if group_var is None:
+            raise RuntimeError(
+                f"{deployment_name} declares no known consumer group variable "
+                f"({', '.join(CONSUMER_GROUP_VARS)}); refusing to trigger a replay that may be a no-op."
+            )
+
+        group_id = replay_group_id(deployment_name, stamp)
+        patched_env = build_replay_env(
+            env,
+            consumer_group_var=group_var,
+            group_id=group_id,
+        )
+        if not earliest_offset:
+            patched_env = [
+                dict(entry, value="latest") if entry.get("name") == START_OFFSET_VAR else entry for entry in patched_env
+            ]
+
+        deployment["spec"]["env"] = patched_env
+        logger.info(
+            "Triggering Kappa replay on %s: %s=%s, %s=%s",
+            deployment_name,
+            group_var,
+            group_id,
+            START_OFFSET_VAR,
+            "earliest" if earliest_offset else "latest",
+        )
+        self._kubectl(["replace", "-f", "-"], stdin=json.dumps(deployment))
         return True
 
 

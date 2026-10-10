@@ -8,14 +8,18 @@
 # Only charts this profile deploys have a section (all 8 here).
 # S8 scope: prometheus+grafana only (dagster/metabase have no templates).
 # S4 note: demo enables ordersStream only; clickstreamStream is explicitly
-# disabled to stay within the 7.5 GB RAM ceiling (old pedidosStream key never
-# existed in s4 values).
-# Target RAM Footprint: ~7.2 GB RAM (Strict < 7.5 GB Ceiling)
+# disabled to stay within the RAM ceiling.
+# RAM WARNING (RNF-01 / RC-02): with the Flink job enabled the sum of container
+# LIMITS is ~8000 MB, ABOVE the old 7.5 GB ceiling. Cause is not tuning: the
+# Flink operator rejects a JobManager under 768 MB, so the stream tier alone
+# needs ~1.8 GB. RC-02's own mitigation (ADR-004) applies: run the heavy
+# engines (Spark batch, Flink stream) SEQUENTIALLY. targetRamMb below is the
+# real figure, not an aspirational one.
 # ==============================================================================
 profile:
   name: "demo"
-  description: "RF-24 Full Architecture Demo - All subsystems active within 7.5GB RAM ceiling"
-  targetRamMb: 7424
+  description: "RF-24 Full Architecture Demo - all subsystems, heavy engines run sequentially"
+  targetRamMb: 8000
   targetCpuCores: 6.0
 
 subsystems:
@@ -113,10 +117,11 @@ subsystems:
       ordersStream:
         enabled: true
         jobManager:
-          memory: "256m"
-          cpu: 0.3
+          # Floor imposed by the Flink operator (see values.yaml).
+          memory: "768m"
+          cpu: 0.4
         taskManager:
-          memory: "384m"
+          memory: "1024m"
           cpu: 0.4
           replicas: 1
       clickstreamStream:

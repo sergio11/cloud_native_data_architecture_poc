@@ -212,9 +212,9 @@ def test_live_views_pass_through_without_version_column(tmp_path: Path, monkeypa
 
 def test_trino_artifacts_declare_pass_through_live_views() -> None:
     unified = (REPO_ROOT / "pipelines" / "serving" / "unified_view.sql").read_text(encoding="utf-8")
-    configmap = (
-        REPO_ROOT / "infra" / "helm" / "s5-serving" / "templates" / "trino-views-configmap.yaml"
-    ).read_text(encoding="utf-8")
+    configmap = (REPO_ROOT / "infra" / "helm" / "s5-serving" / "templates" / "trino-views-configmap.yaml").read_text(
+        encoding="utf-8"
+    )
     for view in ("gold_sales_daily_metrics_live", "stream_sales_orders_windowed_live"):
         assert view in unified
         assert view in configmap

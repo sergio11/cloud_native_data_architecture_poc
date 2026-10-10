@@ -152,14 +152,20 @@ GOLD_TABLES: list[dict[str, Any]] = [
 ]
 
 # Stream Iceberg tables to register in Polaris.
-# Only tables actually written by the streaming drivers are listed:
+# Only tables actually written by the streaming jobs are listed:
 #   flink_orders_stream     -> stream.sales.orders_windowed
 #   flink_clickstream_stream -> stream.marketing.clickstream_windowed
-# Both are produced by BusinessAggregator.aggregate_tumbling_window, whose
-# row shape is window_start/window_end/order_date/status/window_revenue/
-# window_orders/avg_order_value/source_tier (order_date is required by
-# unified_view.sql). Neither table is represented by a manifest asset today,
-# so no ``manifest`` target is declared and the manifest step warns instead.
+#
+# The row shape is the one the Flink jobs produce from
+# pipelines/stream/window_logic.py, which is kept in parity with
+# BusinessAggregator.aggregate_tumbling_window (tests/unit/test_stream_window_parity.py):
+#   * orders_windowed     : window_start, window_end, order_date, status,
+#                          window_revenue, window_orders, avg_order_value, source_tier
+#   * clickstream_windowed: window_start, window_end, order_date, event_type,
+#                          event_count, unique_sessions, source_tier
+# order_date is required by unified_view.sql on the orders side. Neither table is
+# represented by a manifest asset today, so no ``manifest`` target is declared and
+# the manifest step warns instead.
 STREAM_TABLES: list[dict[str, Any]] = [
     _table(
         "stream.sales.orders_windowed",
@@ -180,10 +186,9 @@ STREAM_TABLES: list[dict[str, Any]] = [
             {"name": "window_start", "type": "timestamp", "required": True},
             {"name": "window_end", "type": "timestamp", "required": True},
             {"name": "order_date", "type": "date", "required": True},
-            {"name": "status", "type": "string", "required": False},
-            {"name": "window_revenue", "type": "double", "required": False},
-            {"name": "window_orders", "type": "long", "required": False},
-            {"name": "avg_order_value", "type": "double", "required": False},
+            {"name": "event_type", "type": "string", "required": False},
+            {"name": "event_count", "type": "long", "required": False},
+            {"name": "unique_sessions", "type": "long", "required": False},
             {"name": "source_tier", "type": "string", "required": False},
         ],
     ),

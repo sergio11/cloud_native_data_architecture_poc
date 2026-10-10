@@ -1,0 +1,17 @@
+{{- if .Values.lakehouseStorage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.lakehouseStorage.name | default "lakehouse-storage" }}
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: lakehouse-storage
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.lakehouseStorage.accessMode | default "ReadWriteOnce" }}
+  storageClassName: {{ .Values.lakehouseStorage.storageClass | default "standard" }}
+  resources:
+    requests:
+      storage: {{ .Values.lakehouseStorage.size | default "2Gi" }}
+{{- end }}

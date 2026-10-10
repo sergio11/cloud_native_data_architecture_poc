@@ -107,3 +107,12 @@ polaris:
 
   tolerations: []
   affinity: {}
+
+# Shared Lakehouse Storage PVC (used across batch medallion, streaming, and serving jobs)
+lakehouseStorage:
+  enabled: true
+  name: "lakehouse-storage"
+  accessMode: "ReadWriteOnce"
+  storageClass: "standard"
+  size: "2Gi"
+

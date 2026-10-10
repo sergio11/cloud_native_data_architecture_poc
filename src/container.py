@@ -56,21 +56,24 @@ class Container:
 
     def __init__(
         self,
-        db_path: str = "data/lakehouse.db",
+        db_path: str | None = None,
         marquez_url: str | None = None,
         repo_root: str = ".",
         event_db_path: str | None = None,
         lineage_audit_path: str | None = None,
     ) -> None:
-        self._db_path = db_path
-        self._marquez_url = marquez_url
+        effective_db_path = db_path if db_path is not None else os.getenv("LAKEHOUSE_DB_PATH", "data/lakehouse.db")
+        self._db_path = effective_db_path
+        self._marquez_url = marquez_url or os.getenv("MARQUEZ_URL")
         self._repo_root = repo_root
         # Hermetic defaults: sibling files of the lakehouse DB, so a Container
         # pointed at tmp_path never writes under the repository's data/ dir.
         # For the default db_path these resolve to the historical data/ paths.
-        base_dir = os.path.dirname(db_path) or "."
-        self._event_db_path = event_db_path or os.path.join(base_dir, "event_log.db")
-        self._lineage_audit_path = lineage_audit_path or os.path.join(base_dir, "lineage_audit.jsonl")
+        base_dir = os.path.dirname(effective_db_path) or "."
+        self._event_db_path = event_db_path or os.getenv("EVENT_DB_PATH") or os.path.join(base_dir, "event_log.db")
+        self._lineage_audit_path = (
+            lineage_audit_path or os.getenv("LINEAGE_AUDIT_PATH") or os.path.join(base_dir, "lineage_audit.jsonl")
+        )
 
     # Outbound Adapters (lazy). Public attributes are typed as ports (DIP):
     # drivers depend on abstractions; only these constructors name concretes.

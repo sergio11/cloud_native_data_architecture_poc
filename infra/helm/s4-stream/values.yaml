@@ -16,6 +16,10 @@ kafka:
     tag: "3.7.0"
     pullPolicy: IfNotPresent
 
+  # In-cluster bootstrap advertised to the Flink jobs. Without it the pods fall
+  # back to localhost:9092 and find no broker.
+  bootstrapServers: "kafka.platform.svc.cluster.local:9092"
+
   service:
     type: ClusterIP
     port: 9092
@@ -86,6 +90,17 @@ flinkOperator:
   # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
   nodeSelector: {}
 
+# warehouse MUST match the Polaris defaultBaseLocation
+# (s2-lakehouse/values.yaml -> polaris.config.warehouseLocation), else Flink and
+# Polaris disagree about where the table files live.
+icebergCatalog:
+  name: "polaris"
+  uri: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
+  warehouse: "s3://warehouse/"
+  s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
+  s3AccessKey: "minioadmin"
+  s3SecretKey: "minioadmin"
+
 flinkJobs:
   ordersStream:
     enabled: true
@@ -103,6 +118,12 @@ flinkJobs:
       # flinkJobs.<job>.taskManager.replicas (a job-level value renders empty
       # and the CRD rejects it as null).
       replicas: 1
+    topic: "sales.orders.events"
+    kafkaGroupId: "flink-orders-speed-group"
+    # 'earliest' re-reads the whole topic log from offset 0 (RF-10 Kappa
+    # replay). It only replays from 0 when the consumer group has no committed
+    # offsets, so a replay must also override kafkaGroupId with a fresh value.
+    kafkaStartOffset: "latest"
   clickstreamStream:
     enabled: true
     # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
@@ -114,3 +135,6 @@ flinkJobs:
       memory: "1024m"
       cpu: 0.4
       replicas: 1
+    topic: "marketing.clickstream.raw"
+    kafkaGroupId: "flink-clickstream-speed-group"
+    kafkaStartOffset: "latest"

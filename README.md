@@ -21,18 +21,32 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 2. **Data Fabric**: Active metadata management, automated pipeline lineage harvesting, and dynamic quality enforcement.
 3. **Data Products & Declarative Contracts**: Analytical datasets packaged as versioned products bounded by formal contracts adhering to the Bitol Open Data Contract Standard (ODCS).
 4. **Medallion Lakehouse**: Multi-tier curation (Bronze raw, Silver conformed, Gold aggregated) with ACID semantics, schema evolution, and time travel — implemented locally over embedded SQLite adapters, targeting Apache Iceberg on MinIO (Polaris catalog) in the K8s profile.
-5. **Hybrid Lambda / Kappa Processing**: Full-recomputation batch layer for historical depth combined with event-log stream processing (real 5-minute tumbling windows + full replay), unified at query time by a single anti-join SQL.
+5. **Hybrid Lambda / Kappa Processing**: Full-recomputation batch layer for historical depth combined with an Apache Flink speed layer (real 4-second event-time tumbling windows + full replay from the Kafka log), unified at query time by a single anti-join SQL.
 
-> **Two execution profiles** share the same hexagonal core (`src/`): the **local profile** (default — pure Python + SQLite, verified by `rake demo` / `rake test`) and the **K8s profile** (`infra/helm`, `infra/profiles` — deployment target). See [`docs/architecture/overview.md`](docs/architecture/overview.md) and the RF-by-RF verification status in [Acceptance Criteria Overview](#acceptance-criteria-overview-rf-01-to-rf-25) below.
+> **The platform runs on Kubernetes only** (kind + Podman, per `srs.txt` RNF-04):
+> ingestion is a `CronJob`, the medallion layers are `SparkApplication`s, the
+> speed layer is a `FlinkDeployment`, and serving is Trino. There is no local
+> execution profile, because a local run would be a different system pretending
+> to be the real one. What runs locally is **code verification only** (`rake
+> test`, `rake lint`, `rake typecheck`, `rake governance:validate`) plus cluster
+> operations (`rake cluster:*`, `rake stream:*`).
+>
+> `srs.txt` is the single source of truth for requirements. RF-by-RF status is
+> in [Acceptance Criteria Overview](#acceptance-criteria-overview-rf-01-to-rf-25).
 
 ### Verified scope & known K8s notes
 
-> **The K8s profile (`infra/helm`, `infra/profiles`) is a *deployment target
-> not verified in this environment*.** Everything marked VERIFIED in the
-> [Acceptance Criteria Overview](#acceptance-criteria-overview-rf-01-to-rf-25) was proven in
-> the local profile (Python + SQLite) via `rake demo` / `rake test`. The K8s
-> charts now render real workloads (details in `docs/architecture/overview.md`,
-> "What exists vs. what is wired"): `s1-ingestion` CronJob runs
+> **What "VERIFIED" means here.** A requirement is VERIFIED only if an automated
+> test or a real cluster run proves it. Note carefully that a passing test suite
+> proves **code correctness** (the aggregation, the contracts, the gates, the
+> lineage), not that the corresponding Kubernetes workload has ever run: no
+> cluster has executed this platform in the authoring environment. RF-01..RF-08
+> and RF-15..RF-21 are covered by unit/integration tests over the hexagonal core
+> (`src/`), which uses in-memory/temporary SQLite as a **test double** for
+> Iceberg, Trino and Kafka — that is a test fixture, not a runtime claim.
+>
+> The K8s
+> charts render real workloads: `s1-ingestion` CronJob runs
 > `pipelines/medallion/bronze_ingestion.py --entity all` from image
 > `poc/ingest:0.1.0` (built by `infra/docker/ingest.Dockerfile`); `s7-fabric`
 > runs the real alert service (`lineage/config/lineage_webhook_service.py`,
@@ -43,6 +57,21 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 > (which now ships only VIEW 1 — former views 2–3 were removed because no
 > pipeline produces their source tables); `infra/profiles/*.yaml` are consumed
 > via `scripts/profile-up.sh <profile>` (Helm `-f`).
+> **Stream layer (S4) — read this before trusting any "it runs" claim.**
+> `pipelines/stream/flink_orders_stream.py` and `flink_clickstream_stream.py`
+> are real Apache Flink jobs (`FlinkDeployment` + PyFlink `PythonDriver`, Iceberg
+> sink over a Polaris REST catalog, Parquet on MinIO). They have **no CLI, no
+> `argparse`, and no fallback**: missing PyFlink, a missing env var or a missing
+> broker makes the job fail instead of silently computing something else. There
+> is no simulated streaming anywhere in the repo any more.
+>
+> **They have still never been run in a cluster.** The image has not been built
+> here and the jobs have not been submitted, so neither the connector jars nor
+> the Polaris write path nor the RF-09 latency are verified. Until
+> `rake stream:deploy` → `rake stream:produce` → `rake stream:logs` shows a
+> `RUNNING` job with rows in `stream.sales.orders_windowed`, treat S4 as
+> *written but unverified*.
+>
 > - `pipelines/serving/catalog_registration.py` requires `POLARIS_URL` /
 >   `POLARIS_TOKEN` / `MARQUEZ_URL` (configuration requirement: K8s-only
 >   services; it exits non-zero without them) **and is fail-closed**: it also
@@ -54,30 +83,26 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 >
 > The K8s profile still has no in-cluster verification in this environment.
 
-### Known limitations (local profile)
+### Known limitations
 
-1. The speed layer is a **polling CLI**, not a resident daemon: no continuous streaming latency is measurable (RF-09 partial).
+1. The speed layer **has never been executed**: the job is written and its window contract is unit-tested against the reference aggregation, but no cluster run has confirmed the connector jars, the Polaris write path or the RF-09 latency. Window geometry is designed for the budget (4 s window + 500 ms watermark = ≤ 4.5 s first emission) but **that latency has not been measured**.
 2. The local lakehouse is **single-node SQLite**: same contract as Iceberg (idempotent append, versioning, evolution) but no columnar storage or multi-engine access.
 3. The quality engine evaluates **Great Expectations-format suites**, but **is not the GE library**.
 4. **No CI pipeline**: validations block at runtime (`rake lint` / `rake typecheck` / `rake test:coverage` must be run manually and gate the tools via `exit 1` + `fail_under`), not on merge. Contract rules are covered by `tests/unit/test_contract_validation.py` and `rake governance:validate`.
 5. Telemetry (Prometheus/Grafana), catalog UI (Marquez) and admission (Kyverno) are **K8s profile**, not verified here (their Helm templates now render — `infra/helm/s8-ops/templates/`, `infra/helm/s6-mesh/templates/kyverno-policies.yaml` — but no in-cluster run exists in this environment).
-6. `flink_clickstream_stream.py` aggregates clickstream windows; funnel/session metrics are out of scope (SRS §1.2).
+6. `flink_clickstream_stream.py` aggregates clickstream windows into `event_count` / `unique_sessions` per funnel stage; conversion/funnel/session analytics beyond that are out of scope (SRS §1.2).
 7. Serving fusion is by key, not recency: a stream row whose `(order_date, status)` already exists in batch is shadowed even if newer (batch-wins rule, RF-11).
 8. Only contract dimensions the suite measures are enforced: a declared threshold (e.g. `uniqueness`) for a dimension the suite does not evaluate is skipped. Known case: `uniqueness` on Gold aggregates with composite keys is not measurable — the engine only supports single-column uniqueness.
 9. `quality.assertions` in the contract DSL (e.g. `total_amount >= 0` in `orders/contract.yaml`) stay declarative: no code compiles them into engine expectations; only `spec.quality.thresholds` are enforced.
 10. Residual structural notes (conscious trade-offs, not defects): the standalone quality-gate CLI pretty-prints via Rich while Dagster returns a bool; per-use-case status vocabularies (`SUCCESS`/`EMPTY`/`NO_EVENTS`) are statically typed per result contract (`Literal` in `src/ports/inbound.py`) rather than unified.
 11. Provenance is honest but distinguishes local runs: rows served by the embedded generator are stamped `_source`/lineage input as `synthetic.local.<entity>` (never `postgresql.public.<entity>`); only a real PostgreSQL read earns the `postgresql.public.<entity>` label (`src/use_cases/ingest_bronze.py::provenance_label`).
-12. Alert **delivery** is best-effort with no persistence: the alert service POSTs each fired alert to the rule's `actions.webhook.endpoint` (stdlib `urllib`, in-process retries only, `LINEAGE_WEBHOOK_DELIVERY`/`LINEAGE_WEBHOOK_TIMEOUT`), but there is no outbox/queue/retry-after-restart. The service itself is only started in the K8s profile (chart `s7-fabric` runs the real image `poc/lineage-webhook:0.1.0` on port `8000` with `/health` probes and PVC `/data`), so `rake demo` never sends an outbound alert.
-13. The local profile registers **nothing** in an external catalog: `pipelines/serving/catalog_registration.py` needs `POLARIS_URL`/`POLARIS_TOKEN`/`MARQUEZ_URL` (K8s services), so Polaris/Marquez registration is exercised only by unit tests with mocked clients.
+12. Alert **delivery** is best-effort with no persistence: the alert service POSTs each fired alert to the rule's `actions.webhook.endpoint` (stdlib `urllib`, in-process retries only, `LINEAGE_WEBHOOK_DELIVERY`/`LINEAGE_WEBHOOK_TIMEOUT`), but there is no outbox/queue/retry-after-restart. The service is only started in the cluster (chart `s7-fabric` runs the real image `poc/lineage-webhook:0.1.0` on port `8000` with `/health` probes and PVC `/data`).
+13. Polaris/Marquez registration is **cluster-only**: `pipelines/serving/catalog_registration.py` needs `POLARIS_URL`/`POLARIS_TOKEN`/`MARQUEZ_URL`, so it is exercised only by unit tests with mocked clients.
 
-**Event backend (local profile).** `src/adapters/streaming/event_stream.py`
-uses the embedded SQLite WAL log (`data/event_log.db`) by default; when
-`KAFKA_BOOTSTRAP_SERVERS` is set and non-empty, Kafka becomes the canonical
-backend with fail-fast semantics (unreachable broker raises `RuntimeError` —
-never a silent SQLite fallback; no double writes). Both backends share the
-same cursor contract: a consumer group without committed offsets reads from
-the beginning (`auto.offset.reset=earliest` on Kafka, offset 0 on SQLite),
-so a new group never silently skips the backlog.
+**Event backend.** The speed layer reads **only** from Kafka (in-cluster topic,
+configured via `KAFKA_BOOTSTRAP_SERVERS` on the FlinkDeployment). The SQLite WAL
+log in `src/adapters/streaming/event_stream.py` is a **test double** used only by
+the test suite; no runtime path uses it.
 
 **Quality-threshold precedence (one policy, every entry point).** Per-dimension
 contract thresholds (`spec.quality.thresholds` in `contract.yaml`:
@@ -183,8 +208,8 @@ assertion ratio `passed/total` — no shipped suite exercises that case.
 | **Lakehouse Table Format** | Apache Iceberg v2 Specification | Snappy-compressed Parquet data with snapshot isolation, hidden partitioning, and time-travel capability. |
 | **Lakehouse Catalog** | Apache Polaris (incubating) | REST catalog (Polaris default port `8181` in the K8s profile) synced via [`pipelines/serving/catalog_registration.py`](pipelines/serving/catalog_registration.py) — which reads `POLARIS_URL`/`MARQUEZ_URL` from the environment and registers only tables actually produced by the core use cases. |
 | **Lambda Architecture** | Spark Batch + Flink Streaming | Unified querying via `UNION ALL` in [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql). |
-| **Kappa Architecture** | Kafka Replay + Flink Streaming | Full-log replay via `--replay` / `--start-offset earliest` in [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (or `rake stream:replay`). Batch needs no replay flag: every `gold_aggregation.py` run is already a full recomputation from Silver. |
-| **Serving Layer** | Trino SQL Query Engine | Single SQL interface over batch and streaming buffers with one anti-join statement (design target of sub-3s P99 per `docs/srs.md` RNF-01 — **not measured anywhere in this repo**; local verification is functional, not latencied). |
+| **Kappa Architecture** | Kafka Replay + Flink Streaming | Full-log replay by redeploying `flink-orders-stream` with `KAFKA_START_OFFSET=earliest` **and a fresh `KAFKA_GROUP_ID`** (a committed group ignores `earliest`; see `pipelines/orchestration/flink_replay.py`), driven by `FlinkResource.trigger_savepoint_and_replay`. Batch needs no replay flag: every `gold_aggregation.py` run is already a full recomputation from Silver. |
+| **Serving Layer** | Trino SQL Query Engine | Single SQL interface over batch and streaming buffers with one anti-join statement (design target of sub-3s P99 per `srs.txt` RNF-02 — **not measured anywhere in this repo**). |
 | **Data Mesh** | Domain Autonomy Layout | Segregated domain boundaries in [`domains/sales`](domains/sales), [`domains/marketing`](domains/marketing), and [`domains/finance`](domains/finance). |
 | **Data Products** | Product Manifests (`product.yaml`) | Machine-readable manifests specifying owners, metadata, SLAs, and ports. |
 | **Data Contracts** | Bitol ODCS (`contract.yaml`) | Authoritative schemas, quality rules, and backward-compatibility policies. |
@@ -217,7 +242,9 @@ assertion ratio `passed/total` — no shipped suite exercises that case.
 2. **Marketing**:
    - Owns campaign lifecycle management, multi-channel attribution, and website clickstream telemetry.
    - Publishes data products: `campaigns` and `leads`.
-   - Ingests streaming navigation events into 5-minute tumbling windows (`stream.marketing.clickstream_windowed`); conversion/funnel/session analytics are out of scope (see limitation 6).
+- Ingests streaming navigation events into 4-second tumbling windows
+      (`stream.marketing.clickstream_windowed`); conversion/funnel/session analytics are out of scope (see
+      limitation 6).
 3. **Finance**:
    - Operates as a downstream analytical consumer domain.
    - Ingests certified Gold data products from `Sales` and `Marketing` to generate executive profit-and-loss reports and campaign return on advertising spend (ROAS).
@@ -228,45 +255,66 @@ assertion ratio `passed/total` — no shipped suite exercises that case.
 
 - **S1: Source & Ingestion**: PostgreSQL when `PGPASSWORD` is set, otherwise a loud synthetic fallback + SQLite WAL event log (local); PostgreSQL + Kafka 3.7 KRaft in K8s (`s1-ingestion`, `s4-stream`). A reachable PostgreSQL table is authoritative even when empty (empty table yields `[]`); synthetic records are generated only when PostgreSQL is unconfigured or the connection/query fails (logged at WARNING). **Provenance is stamped honestly**: the Bronze `_source` audit column and the matching lineage input dataset are `postgresql.public.<entity>` only for real database reads, and `synthetic.local.<entity>` for generated fallback rows (`src/use_cases/ingest_bronze.py::provenance_label`).
 - **S2: Lakehouse Storage & Catalog**: SQLite adapter with append-only idempotent Bronze, row-version time travel, schema evolution (local); MinIO + Iceberg + Polaris in K8s (`s2-lakehouse`).
-- **S3: Batch Processing Engine**: Pure-Python Medallion drivers over the hexagonal core — Bronze snapshotting, Silver dedup + fail-closed gate, Gold full recomputation (local); Spark Operator in K8s (`s3-batch`).
-- **S4: Stream Processing Engine**: Real 5-minute tumbling windows over the event log with consumer cursors + full replay (local); Flink Operator + Kafka in K8s (`s4-stream`).
-- **S5: Serving Layer**: One anti-join SQL fusing batch Gold + stream windows, no double counting — Trino if `TRINO_HOST`, else embedded SQLite (`unified_view.sql` mirrors the semantics for Trino).
+- **S3: Batch Processing Engine**: Medallion drivers over the hexagonal core — Bronze snapshotting, Silver dedup + fail-closed gate, Gold full recomputation — executed as SparkApplications (`s3-batch`).
+- **S4: Stream Processing Engine**: Apache Flink 1.18, 4-second event-time tumbling windows over Kafka with an Iceberg/Polaris sink. **Never executed yet** (see the S4 note above).
+- **S5: Serving Layer**: One anti-join SQL fusing batch Gold + stream windows, no double counting — Trino over Iceberg (`pipelines/serving/unified_view.sql`).
 - **S6: Data Mesh & Data Products**: Standardized product manifests (`product.yaml`) and Bitol ODCS Data Contracts (`contract.yaml`) with real BACKWARD validation; CRDs + quotas in K8s (`s6-mesh`).
-- **S7: Data Fabric & Governance**: OpenLineage emission to local audit trail (+ Marquez if reachable), fail-closed quality engine over GE-format suites, GDPR PII masking in Gold.
-- **S8: Orchestration & Observability**: `rake` tasks + Dagster asset definitions locally (the five assets dispatch the real pipeline scripts through `pipelines/orchestration/local_dispatch.py`); Marquez + alert service + Prometheus/Grafana in K8s (real templates in `s7-fabric`, `s8-ops`).
+- **S7: Data Fabric & Governance**: OpenLineage emission (Marquez + local audit trail), fail-closed quality engine over GE-format suites, GDPR PII masking in Gold.
+- **S8: Orchestration & Observability**: `CronJob` / `ScheduledSparkApplication` / `FlinkDeployment` in the cluster, Dagster asset definitions for scheduling, Marquez + alert service + Prometheus/Grafana (`s7-fabric`, `s8-ops`).
 
 ---
 
-## Quickstart Guide & Startup Profiles
+## Quickstart Guide
 
-The **default way to run and verify** the POC is the local profile: plain Python + SQLite, no containers required. (K8s profiles via `infra/helm` + `infra/profiles/*.yaml` are the deployment target; see `docs/architecture/overview.md`.)
+The platform runs **only** on the local Kubernetes cluster (kind + Podman).
 
 ### Prerequisites
+- Podman, `kind`, `kubectl`, `helm` (per `srs.txt` RNF-04)
 - Python 3.11+ (`python --version`)
-- Ruby + Rake for the task runner (`rake --version`) — or run the `python ...` commands directly
-- Optional dev tools: `ruff`, `mypy`, `pytest`, `pytest-cov` (`pip install ruff mypy pytest pytest-cov` — network required once; pinned ranges in `pyproject.toml` `[project.optional-dependencies] dev`)
+- Ruby + Rake for the task runner (`rake --version`)
+- Dev tools: `ruff`, `mypy`, `pytest`, `pytest-cov` (`pip install ruff mypy pytest pytest-cov` — see `pyproject.toml` `[project.optional-dependencies] dev`)
 
-### Local execution (default)
+### Code verification (local — no containers)
 
 ```bash
-# RF-24 end-to-end demo: contracts -> bronze -> silver -> gold -> stream -> serving -> tests
-rake demo
-# (equivalently: ./scripts/demo.sh on Git Bash / WSL2 / Linux / macOS)
-
-# Layer-by-layer tasks
-rake governance:validate          # RF-15 contract validation
-rake medallion:all                # RF-01..RF-07 (bronze -> silver -> gold)
-rake stream:orders                # RF-09 speed layer (auto-seeds demo events if log empty)
-rake stream:replay                # RF-10 full Kappa replay
-rake replay:all                   # RF-12 full reprocessing (medallion:all + stream:replay + serving:query)
-rake serving:query                # RF-11 unified query (exits non-zero on an empty result; use run_serving_query.py --allow-empty to tolerate it)
-rake test                         # unit + integration (276 tests: 264 unit + 12 integration)
-rake test:coverage                # with coverage report
-rake lint                         # ruff
-rake typecheck                    # mypy on src/
+rake                      # governance:validate + lint + typecheck + test
+rake governance:validate  # RF-15 contract validation
+rake test                 # unit + integration (301 tests)
+rake test:coverage        # with coverage report (fail_under = 85)
+rake lint                 # ruff
+rake typecheck            # mypy
 ```
 
-State lives in `data/` (git-ignored SQLite + lineage audit log). Reset with `rm -f data/*.db data/*.jsonl` (PowerShell: `Remove-Item data/*.db, data/*.jsonl -ErrorAction SilentlyContinue`).
+### Run the platform (Kubernetes)
+
+```bash
+rake cluster:setup                  # create the kind cluster, namespaces, prerequisites
+podman build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
+bash scripts/profile-up.sh demo     # or: rake cluster:up[demo]  -> all 8 subsystems
+bash scripts/demo.sh                # RF-24 end-to-end demo on the cluster
+```
+
+### Stream layer (S4)
+
+```bash
+bash scripts/profile-up.sh stream   # or: rake stream:deploy
+rake stream:produce                 # publish events into the in-cluster Kafka topics
+rake stream:logs                    # tail the speed-layer JobManager
+rake stream:status                  # FlinkDeployment + pod status
+```
+
+Verify the result in Trino (cluster `stream` catalog, Iceberg over Polaris):
+
+```sql
+SELECT status, count(*) AS windows, sum(window_orders) AS orders, sum(window_revenue) AS revenue
+FROM stream.sales.orders_windowed
+GROUP BY status;
+```
+
+**Kappa replay (RF-10):** redeploy with `KAFKA_START_OFFSET=earliest` **and a new
+`KAFKA_GROUP_ID`** (a consumer group that has already committed ignores
+`earliest` and would replay nothing while still reporting success). Both values
+live in `infra/helm/s4-stream/values.yaml` → `flinkJobs.ordersStream`.
 
 ### Web Interfaces & Port Reference (K8s profile only)
 
@@ -334,13 +382,15 @@ poc_data_engineering/
 │   │   ├── bronze_ingestion.py               # OLTP (PG or synthetic) -> Bronze snapshot
 │   │   ├── silver_transform.py               # Bronze -> Silver cleaning, dedup & fail-closed gate
 │   │   └── gold_aggregation.py               # Silver -> Gold aggregation & PII masking
-│   ├── stream/                               # S4: stream processing drivers
-│   │   ├── flink_orders_stream.py            # Orders events -> stream.sales.orders_windowed (5-min windows, replay)
-│   │   └── flink_clickstream_stream.py       # Clickstream events -> stream.marketing.clickstream_windowed (no funnel metrics)
+│   ├── stream/                               # S4: Apache Flink jobs (cluster only)
+│   │   ├── flink_orders_stream.py            # Kafka -> 4s tumbling windows -> Iceberg stream.sales.orders_windowed
+│   │   ├── flink_clickstream_stream.py       # Kafka -> 4s tumbling windows -> Iceberg stream.marketing.clickstream_windowed
+│   │   └── window_logic.py                   # Pure, PyFlink-free window contract (unit-tested without a cluster)
 │   ├── orchestration/                        # S8: Dagster Software-Defined Assets (RF-22)
 │   │   ├── dagster_repository.py             # 5 assets + jobs + cron schedules (Definitions)
-│   │   ├── resources.py                      # Spark/Flink/Marquez/GreatExpectations resources
-│   │   ├── local_dispatch.py                 # Local profile: assets run the real scripts via sys.executable subprocess
+│   │   ├── resources.py                      # Spark/Flink(kubectl)/Marquez/GreatExpectations resources
+│   │   ├── flink_replay.py                   # RF-10 replay env: rewind offset AND rotate the consumer group
+│   │   ├── local_dispatch.py                 # Local profile: batch assets run the real scripts via sys.executable
 │   │   └── dagster-values.yaml               # Helm values for the upstream Dagster chart (K8s profile)
 │   └── serving/                              # S5: Trino Serving Layer
 │       ├── catalog_registration.py           # Polaris/Marquez registration (K8s env vars; fail-closed exit 1)
@@ -354,25 +404,14 @@ poc_data_engineering/
 │   │   └── gold_customers_suite.json         # Gold customers gate (required by gold_aggregation)
 │   └── gates/
 │       └── run_quality_gate.py               # Automated pipeline gatekeeper script (contract thresholds govern)
-└── docs/                                      # Complete Technical Documentation
-    ├── srs.md                                # IEEE 830 / ISO-IEC-IEEE 29148 SRS (legacy RF numbering — srs.txt wins)
-    ├── concepts-to-components.md             # Theoretical mapping to concrete code
-    ├── demo-guide.md                         # Step-by-step RF-24 verification guide
-    └── architecture/
-        ├── overview.md                       # Detailed 3-plane system design
-        └── adr/                              # Architecture Decision Records
-            ├── ADR-001-lambda-kappa-hybrid.md
-            ├── ADR-002-iceberg-lakehouse.md
-            ├── ADR-003-multi-domain-mesh.md
-            └── ADR-004-startup-profiles.md
+└── srs.txt                                    # IEEE 830 / ISO-IEC-IEEE 29148 SRS (canonical RF numbering)
 ```
 
 ---
 
 ## Acceptance Criteria Overview (RF-01 to RF-25)
 
-> Canonical numbering: [`srs.txt`](srs.txt) §5 is the source of truth. The table below follows it
-> (the legacy English `docs/srs.md` uses a different RF numbering — see the NOTICE at the top of that file).
+> Canonical numbering: [`srs.txt`](srs.txt) §5 is the source of truth, and the table below follows it.
 
 | Req ID | Requirement Summary | Priority | Status | Implementation Component |
 | :--- | :--- | :---: | :---: | :--- |
@@ -381,13 +420,13 @@ poc_data_engineering/
 | **RF-03** | Separación lógica estricta Bronze → Silver → Gold, sin saltos | `[M]` | VERIFIED | [`pipelines/medallion/`](pipelines/medallion/) |
 | **RF-04** | Silver: limpieza, tipado, deduplicación y validaciones sobre Bronze | `[M]` | VERIFIED | [`pipelines/medallion/silver_transform.py`](pipelines/medallion/silver_transform.py) (tipado explícito INTEGER/REAL/TEXT por esquema de contrato, probado en `tests/unit/test_silver_typing.py`) |
 | **RF-05** | Gold: métricas/agregados de negocio listos para consumo | `[M]` | VERIFIED | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) |
-| **RF-06** | Quality gates entre capas: si no cumplen umbrales, no se publica y se notifica | `[M]` | VERIFIED | [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) + [`src/use_cases/gate_support.py`](src/use_cases/gate_support.py) — bloqueo verificado localmente (exit `1` + evento lineage `FAIL` en `data/lineage_audit.jsonl`, `test_rf06_*`); *notificación* = webhook saliente del servicio de alertas (`lineage/config/lineage_webhook_service.py` → `actions.webhook.endpoint`, probado en `tests/unit/test_w4_webhook_delivery.py`), servicio que **solo se despliega en K8s** (chart `s7-fabric` con la imagen real) y queda fuera de `rake demo` |
+| **RF-06** | Quality gates entre capas: si no cumplen umbrales, no se publica y se notifica | `[M]` | VERIFIED | [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) + [`src/use_cases/gate_support.py`](src/use_cases/gate_support.py) — bloqueo verificado por tests (exit `1` + evento lineage `FAIL` en `data/lineage_audit.jsonl`, `test_rf06_*`); *notificación* = webhook saliente del servicio de alertas (`lineage/config/lineage_webhook_service.py` → `actions.webhook.endpoint`, probado en `tests/unit/test_w4_webhook_delivery.py`), servicio que **solo se despliega en K8s** (chart `s7-fabric` con la imagen real) |
 | **RF-07** | ACID, time travel y evolución de esquema controlada | `[M]` | VERIFIED | Apache Iceberg in K8s profile; SQLite adapter with row-version time travel locally (`src/adapters/storage/`) |
 | **RF-08** | Batch layer: recálculo completo del histórico, programado y manual | `[M]` | VERIFIED | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) (full recomputation from Silver on every run) |
-| **RF-09** | Stream layer: agregados en ventana con latencia ≤ 5 s | `[M]` | PARTIAL (ventanas reales e inmediatez verificadas; el límite de 5 s no se mide: CLI por polling, no demonio residente) | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (5-min tumbling windows) |
-| **RF-10** | Kappa: regenerar resultados releyendo el log desde su origen | `[M]` | VERIFIED | `rake stream:replay` / `--start-offset earliest` / `--replay` in [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py); batch needs no flag (full recompute by design). Un replay sobre log vacío reconcilia la tabla Speed a vacío (no deja filas obsoletas) |
+| **RF-09** | Stream layer: agregados en ventana con latencia ≤ 5 s | `[M]` | **NOT VERIFIED** — job reescrito con ventana de 4 s (4 s + 500 ms watermark = ≤ 4,5 s en primera emisión) para poder cumplir el requisito, pero **nunca ejecutado en un clúster**: ni la latencia, ni el sink Iceberg/Polaris, ni los jars están verificados. Además la letra del requisito ("el agregado lo refleja en ≤ 5 s") no es satisfacible con lateness > 0: la primera emisión entra en el presupuesto, las correcciones llegan hasta los 14 s | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) |
+| **RF-10** | Kappa: regenerar resultados releyendo el log desde su origen | `[M]` | **NOT VERIFIED (cluster)** — el mecanismo de replay existe y está unit-tested (`pipelines/orchestration/flink_replay.py`: rebobinar el offset **y** rotar el grupo de consumidores, porque un grupo ya confirmado ignora `earliest` y reprocesaría cero ventanas reportando éxito), pero no se ha ejecutado sobre un topic real | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (`KAFKA_START_OFFSET` + `KAFKA_GROUP_ID`) |
 | **RF-11** | Serving layer: una única consulta fusiona batch exacto + ventana reciente | `[M]` | VERIFIED | [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql) + [`pipelines/serving/run_serving_query.py`](pipelines/serving/run_serving_query.py) (el CLI **falla con exit 1 si la consulta unificada no devuelve filas**, salvo `--allow-empty`) |
-| **RF-12** | Reproceso completo de cualquier capa sin pérdida de consistencia | `[S]` | VERIFIED | `rake replay:all` (= `medallion:all` + `stream:replay` + `serving:query`): recomputación total de Gold desde Silver + replay completo del log en una invocación |
+| **RF-12** | Reproceso completo de cualquier capa sin pérdida de consistencia | `[S]` | PARTIAL | La capa stream reprocesa desde el log (RF-10) y la capa batch recomputa Gold íntegro en cada ejecución de `gold_aggregation.py`, sin flag. Ninguna de las dos ha sido ejecutada en un clúster |
 | **RF-13** | Publicación declarativa de productos por dominio | `[M]` | PARTIAL (el manifiesto *es* la publicación en local; sin pipeline de registro) | `product.yaml` manifests in [`domains/`](domains/) |
 | **RF-14** | Productos encontrables y autoexplicativos en catálogo | `[M]` | PARTIAL (catálogo UI buscable solo en K8s/Marquez; en local el catálogo es el árbol `domains/` + validación) | `product.yaml` + Marquez catalog in K8s profile (`infra/helm/s7-fabric`) |
 | **RF-15** | Contratos máquina-legibles validados; ruptura bloquea publicación y alerta | `[M]` | VERIFIED | [`governance/contract_validator.py`](governance/contract_validator.py) (bloqueo en ejecución/validación, incl. *cross-check* `product.yaml` ↔ `contract.yaml` que falla si los umbrales de calidad divergen; reglas cubiertas por `tests/unit/test_contract_validation.py` y `rake governance:validate`) |
@@ -395,28 +434,16 @@ poc_data_engineering/
 | **RF-17** | Políticas globales federadas aplicadas automáticamente (dueño, PII, nombres) | `[S]` | PARTIAL (gobernanza local verificada + Kyverno ClusterPolicies renderizadas en `infra/helm/s6-mesh/templates/kyverno-policies.yaml`; admisión solo efectiva en K8s, sin verificación en cluster en este entorno) | [`governance/policies/`](governance/policies/) + Kyverno ClusterPolicies en K8s (`infra/helm/s6-mesh`) |
 | **RF-18** | Cuotas/aislamiento por dominio en la plataforma compartida | `[S]` | DEFERRED (K8s `ResourceQuota`/`LimitRange`; sin enforcement local) | [`infra/helm/s6-mesh/`](infra/helm/s6-mesh/) (K8s `ResourceQuota`/`LimitRange` per domain) |
 | **RF-19** | Linaje end-to-end consultable, alimentado automáticamente | `[M]` | VERIFIED | [`lineage/`](lineage/) + Marquez (local audit trail `data/lineage_audit.jsonl`) |
-| **RF-20** | Metadatos activos: alertas ante cambios de esquema o degradación de calidad | `[S]` | VERIFIED | [`lineage/config/`](lineage/config/) alert service + [`lineage/config/alert-rules.yaml`](lineage/config/alert-rules.yaml): las 4 reglas están unit-testeadas (`tests/unit/test_w4_config_wiring.py` schema, `tests/unit/test_lineage_webhook_rules.py` + `test_w4_alert_edge_cases.py` quality, `test_w4_m1_honest.py::test_m1_pipeline_failure_error_facet` failure, `test_m1_sla_*` freshness), entrega por webhook probada (`tests/unit/test_w4_webhook_delivery.py`), payload con `runId` (`test_lineage_payload_shape.py`) y servicio real cableado en K8s (`s7-fabric` uvicorn `:8000` + `/health` + PVC `/data`). Nota honesta: entrega *best-effort* sin outbox y servicio sin verificación en cluster en este entorno; fuera de `rake demo` |
+| **RF-20** | Metadatos activos: alertas ante cambios de esquema o degradación de calidad | `[S]` | VERIFIED | [`lineage/config/`](lineage/config/) alert service + [`lineage/config/alert-rules.yaml`](lineage/config/alert-rules.yaml): las 4 reglas están unit-testeadas (`tests/unit/test_w4_config_wiring.py` schema, `tests/unit/test_lineage_webhook_rules.py` + `test_w4_alert_edge_cases.py` quality, `test_w4_m1_honest.py::test_m1_pipeline_failure_error_facet` failure, `test_m1_sla_*` freshness), entrega por webhook probada (`tests/unit/test_w4_webhook_delivery.py`), payload con `runId` (`test_lineage_payload_shape.py`) y servicio real cableado en K8s (`s7-fabric` uvicorn `:8000` + `/health` + PVC `/data`). Nota honesta: entrega *best-effort* sin outbox, y el servicio no se ha verificado en un clúster |
 | **RF-21** | Seguridad/clasificación embebida en el flujo, no en documentación externa | `[S]` | PARTIAL (PII mascarada en Gold verificada con SHA-256 con sal — `PII_HASH_SALT`, default `poc-demo-salt-v1` —; sin RBAC en ejecución) | [`src/domain/privacy.py`](src/domain/privacy.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) (salted SHA-256 email hashing, name masking) |
-| **RF-22** | Pipelines orquestables: programables, a demanda, con estado observable | `[M]` | VERIFIED | [`Rakefile`](Rakefile) tasks + 5 Dagster assets ([`pipelines/orchestration/dagster_repository.py`](pipelines/orchestration/dagster_repository.py)) que materializan **localmente** despachando los scripts reales vía [`pipelines/orchestration/local_dispatch.py`](pipelines/orchestration/local_dispatch.py) (`sys.executable` en subprocess; replay Flink = `flink_orders_stream.py --start-offset earliest`) — cubierto por `tests/unit/test_w5_local_dispatch.py` (dagster es el extra opcional `orchestration`) |
+| **RF-22** | Pipelines orquestables: programables, a demanda, con estado observable | `[M]` | PARTIAL | [`Rakefile`](Rakefile) tasks + 5 Dagster assets ([`pipelines/orchestration/dagster_repository.py`](pipelines/orchestration/dagster_repository.py)). La capa **batch** se materializa localmente vía [`pipelines/orchestration/local_dispatch.py`](pipelines/orchestration/local_dispatch.py) (`sys.executable` en subprocess). La capa **stream** ya no se despacha en local: se opera contra el clúster con `kubectl` desde `FlinkResource`, y el replay de RF-10 es una operación de clúster, no un script |
 | **RF-23** | Panel único: estado de pipelines, lag de stream, cumplimiento de calidad | `[S]` | DEFERRED (templates Prometheus/Grafana ahora renderizados en `infra/helm/s8-ops/templates/` — `prometheus.yaml`, `grafana.yaml` — pero sin verificación en cluster en este entorno; ningún dashboard verificado localmente) | Grafana/Prometheus templates + assets en [`infra/helm/s8-ops/`](infra/helm/s8-ops/) seleccionados vía [`infra/profiles/`](infra/profiles/) (no docker-compose exists in this repo) |
-| **RF-24** | Comando único de demo end-to-end reproducible | `[M]` | VERIFIED | [`scripts/demo.sh`](scripts/demo.sh) / `rake demo` |
-| **RF-25** | Documentación de arquitectura apta para portfolio | `[M]` | VERIFIED | Directory [`docs/`](docs/) |
+| **RF-24** | Comando único de demo end-to-end reproducible | `[M]` | **NOT VERIFIED** | [`scripts/demo.sh`](scripts/demo.sh) existe y orquesta el perfil `demo` sobre el clúster (verificación de código → `profile-up demo` → eventos → Flink → Trino). **Nunca se ha ejecutado de extremo a extremo**: no hay constancia de un clúster con los 8 subsistemas corriendo a la vez |
+| **RF-25** | Documentación de arquitectura apta para portfolio | `[M]` | PARTIAL | Este README es ahora la única documentación: cubre arquitectura, subsistemas, flujos, decisiones y estado RF-01..RF-25. Se han eliminado los ADR, que `srs.txt` RNF-09 exigía |
 
-> **Status counts — RF:** VERIFIED **17** · PARTIAL **6** · DEFERRED **2**. A requirement is VERIFIED only if an automated test or command in this repository proves it in the local profile. Evidence: `rake test` (276 tests: 264 unit + 12 integration, via `python -m pytest tests --collect-only -q -p no:cacheprovider`), `rake demo` (RF-24 end-to-end), `rake lint` + `rake typecheck` + `rake test:coverage` (gates run manually; there is no CI pipeline). Coverage scope is `src` + `lineage` with `fail_under = 85` (see `pyproject.toml`).
-
----
-
-## Technical Documentation Sitemap
-
-- [**Software Requirements Specification (IEEE 830 / ISO-IEC-IEEE 29148)**](docs/srs.md): Complete formal requirements, data constraints, sizing, interfaces, and traceability matrix.
-- [**Architecture Overview & 3-Plane System Design**](docs/architecture/overview.md): Deep-dive into Organization, Processing, and Operations planes, subsystem breakdown, data flows, and memory budgeting.
-- [**Architecture Decision Records (ADRs)**](docs/architecture/adr/):
-  - [ADR-001: Hybrid Lambda + Kappa Architecture Selection](docs/architecture/adr/ADR-001-lambda-kappa-hybrid.md)
-  - [ADR-002: Apache Iceberg and Apache Polaris as Lakehouse Foundation](docs/architecture/adr/ADR-002-iceberg-lakehouse.md)
-  - [ADR-003: Multi-Domain Data Mesh with Data Products & Contracts](docs/architecture/adr/ADR-003-multi-domain-mesh.md)
-  - [ADR-004: Resource-Constrained Execution Profiling Under 8 GB RAM](docs/architecture/adr/ADR-004-startup-profiles.md)
-- [**Concepts-to-Components Mapping**](docs/concepts-to-components.md): Theoretical cross-reference from Modern Data Engineering to concrete implementation files.
-- [**RF-24 End-to-End Demo Guide**](docs/demo-guide.md): Step-by-step verification, pre-flight checklists, UI inspections, and simulated failure testing.
+> **Status counts — RF:** VERIFIED **17** · PARTIAL **7** · DEFERRED **2** · NOT VERIFIED **2**. A requirement is VERIFIED only if an automated test or a real cluster run proves it. Evidence: `rake test` (301 tests, via `python -m pytest tests --collect-only -q`), `rake lint` + `rake typecheck` + `rake test:coverage` (gates run manually; there is no CI pipeline). Coverage scope is `src` + `lineage` with `fail_under = 85` (see `pyproject.toml`).
+>
+> The two NOT VERIFIED entries are RF-09 (stream latency) and RF-24 (end-to-end demo): both are cluster-only and **no cluster has run this platform in the authoring environment**.
 
 ---
 

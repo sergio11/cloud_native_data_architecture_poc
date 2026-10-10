@@ -50,10 +50,9 @@ done
 
 # 4. Apply Kyverno Governance Policies
 # NOTE: Kyverno is an OPTIONAL cluster admission component (values-only in
-# infra/helm/s6-mesh; no Kyverno template is rendered yet - see README /
-# docs/architecture/overview.md, RF-17). Applying these ClusterPolicy CRs
-# fails when the Kyverno CRDs are absent, so that failure is reported as a
-# WARN instead of aborting the bootstrap.
+# infra/helm/s6-mesh; no Kyverno template is rendered yet - see README, RF-17).
+# Applying these ClusterPolicy CRs fails when the Kyverno CRDs are absent, so
+# that failure is reported as a WARN instead of aborting the bootstrap.
 echo -e "\n${YELLOW}[Step 4/6] Applying federated governance policies...${NC}"
 if [ -d "governance/policies" ]; then
     if kubectl apply -f governance/policies/; then

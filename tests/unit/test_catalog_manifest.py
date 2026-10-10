@@ -416,8 +416,21 @@ def test_stream_schemas_match_tumbling_window_rows() -> None:
     order_date_field = next(f for f in orders["schema"] if f["name"] == "order_date")
     assert order_date_field["required"] is True
 
+    # The clickstream speed layer aggregates a different measure per funnel
+    # stage, so it must NOT reuse the orders schema: registering the orders
+    # columns here described a table no job can produce.
     click = next(t for t in STREAM_TABLES if t["logical"] == "stream.marketing.clickstream_windowed")
-    assert {f["name"] for f in click["schema"]} == expected
+    click_fields = {f["name"] for f in click["schema"]}
+    assert click_fields == {
+        "window_start",
+        "window_end",
+        "order_date",
+        "event_type",
+        "event_count",
+        "unique_sessions",
+        "source_tier",
+    }
+    assert click_fields != expected
 
 
 # ===========================================================================

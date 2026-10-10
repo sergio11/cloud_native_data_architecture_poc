@@ -81,19 +81,21 @@ subsystems:
       ordersStream:
         enabled: true
         jobManager:
-          memory: "384m"
+          # The operator rejects a JobManager below 768m (JVM heap + metaspace
+          # + overhead), so these MUST NOT be lowered below the chart values.
+          memory: "768m"
           cpu: 0.5
         taskManager:
-          memory: "512m"
+          memory: "1024m"
           cpu: 0.5
           replicas: 1
       clickstreamStream:
         enabled: true
         jobManager:
-          memory: "384m"
+          memory: "768m"
           cpu: 0.5
         taskManager:
-          memory: "512m"
+          memory: "1024m"
           cpu: 0.5
           replicas: 1
 

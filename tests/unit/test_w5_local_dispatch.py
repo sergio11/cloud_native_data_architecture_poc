@@ -21,8 +21,12 @@ from pipelines.orchestration.local_dispatch import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Submit paths passed by the five Dagster assets (dagster_repository.py) and
+# Submit paths passed by the Dagster batch assets (dagster_repository.py) and
 # by the K8s Spark job template, mapped to the local pipeline that must exist.
+#
+# The Flink speed-layer jobs are deliberately absent: they are real Apache Flink
+# jobs submitted by the Flink Kubernetes Operator and have NO local equivalent
+# (see LOCAL_SCRIPT_MAP and the guard test below).
 SUBMIT_PATH_CASES = [
     ("pipelines/medallion/bronze_ingestion.py", "pipelines/medallion/bronze_ingestion.py"),
     ("pipelines/medallion/silver_transform.py", "pipelines/medallion/silver_transform.py"),
@@ -31,7 +35,11 @@ SUBMIT_PATH_CASES = [
         "local:///opt/spark/work-dir/pipelines/medallion/bronze_ingestion.py",
         "pipelines/medallion/bronze_ingestion.py",
     ),
-    ("pipelines/stream/flink_orders_stream.py", "pipelines/stream/flink_orders_stream.py"),
+]
+
+FLINK_JOB_PATHS = [
+    "pipelines/stream/flink_orders_stream.py",
+    "pipelines/stream/flink_clickstream_stream.py",
 ]
 
 
@@ -82,6 +90,27 @@ def test_submit_paths_resolve_to_existing_local_pipeline(submit_path: str, relat
     assert resolved is not None, f"{submit_path} must resolve to a local script"
     assert resolved == (REPO_ROOT / relative).resolve()
     assert resolved.is_file()
+
+
+@pytest.mark.parametrize("job_path", FLINK_JOB_PATHS)
+def test_flink_speed_layer_jobs_are_not_locally_dispatchable(job_path: str) -> None:
+    """The speed layer must never be dispatched as a local Python script.
+
+    These files are Flink jobs: they import PyFlink (only present inside the job
+    image) and take their whole configuration from the environment. Running one
+    as a local subprocess is exactly the fake-streaming failure mode this repo
+    removed, so the dispatch map must not offer them and the docs must not
+    describe them as CLI entry points.
+    """
+    from pipelines.orchestration.local_dispatch import LOCAL_SCRIPT_MAP
+
+    assert job_path not in LOCAL_SCRIPT_MAP, f"{job_path} is a real Flink job and must not be mapped to a local script"
+    source = (REPO_ROOT / job_path).read_text(encoding="utf-8")
+    assert "from pyflink" in source, f"{job_path} should be a genuine PyFlink job"
+    assert "container.process_stream" not in source, (
+        f"{job_path} must not fall back to the hexagonal driver: that was the fake streaming path"
+    )
+    assert "argparse" not in source, f"{job_path} must not expose a CLI fallback"
 
 
 def test_resolve_returns_none_for_unknown_path() -> None:

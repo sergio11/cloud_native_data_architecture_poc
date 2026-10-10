@@ -1,112 +1,356 @@
 """
-flink_orders_stream.py - Streaming Speed Layer pipeline (Kappa Architecture).
-Driving Adapter invoking ProcessStreamUseCase via Hexagonal Architecture container.
-Consumes continuous order event streams from Kafka, calculates 5-minute tumbling windows,
-writes to Speed table, and supports Kappa historical offset replay (RF-10).
+flink_orders_stream.py - Apache Flink 1.18 speed-layer job for sales orders.
+
+Submitted by the Flink Kubernetes Operator through
+``infra/helm/s4-stream/templates/flink-deployments.yaml`` with the PyFlink
+``PythonDriver``. Not a CLI, and no fallback: if PyFlink, the cluster or the
+configuration is missing the job fails rather than running something else.
+
+    Kafka (sales.orders.events) -> dead-letter -> event-time watermarks
+      -> 4 s tumbling windows keyed by status
+      -> upsert into Iceberg stream.sales.orders_windowed (Polaris, Parquet/MinIO)
+
+PyFlink ships no DataStream binding for the Iceberg connector, so this uses the
+documented "Mixing DataStream and Table" pattern: source, watermarks and
+windowing on the DataStream API, then a temporary view the Table API writes.
+
+Configuration comes exclusively from the environment declared in the
+FlinkDeployment. A missing variable is a hard error, never a localhost default.
 """
 
 from __future__ import annotations
 
-import argparse
 import logging
 import os
 import sys
-from datetime import UTC, datetime, timedelta
+from collections.abc import Iterable
+from dataclasses import dataclass
 
-# Ensure repository root is on sys.path
+# The PythonDriver runs this file from the image, where only its own directory is
+# on sys.path. Make the repo root importable for the sibling pure module.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.container import container
+from pyflink.common import Duration, Time, Types, WatermarkStrategy  # noqa: E402
+from pyflink.datastream import DataStream, StreamExecutionEnvironment  # noqa: E402
+from pyflink.datastream.checkpointing import CheckpointingMode  # noqa: E402
+from pyflink.datastream.connectors.kafka import (  # noqa: E402
+    KafkaOffsetsInitializer,
+    KafkaSource,
+)
+from pyflink.datastream.functions import (  # noqa: E402
+    AggregateFunction,
+    Collector,
+    FlatMapFunction,
+    ProcessWindowFunction,
+)
+from pyflink.datastream.row import Row  # noqa: E402
+from pyflink.datastream.window import TimeWindow, TumblingEventTimeWindows  # noqa: E402
+from pyflink.table import StreamTableEnvironment  # noqa: E402
+
+from pipelines.stream.window_logic import (  # noqa: E402
+    ALLOWED_LATENESS_MS,
+    MAX_OUT_OF_ORDERNESS_MS,
+    WINDOW_SIZE_MS,
+    OrderWindowEvent,
+    build_orders_row,
+    orders_row_to_columns,
+    parse_order_event,
+)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger("flink_orders_stream")
 
-DEMO_SEED_COUNT = 14
-DEMO_SEED_SPREAD_SECONDS = 40  # 14 events x 40s => ~8.7 min span => >= 2 tumbling windows
+JOB_NAME = "flink-orders-speed-layer"
+JOB_UID = "flink-orders-speed-layer"
+
+#: Temporary view the Table API writes from.
+TEMP_VIEW = "orders_speed_window"
+
+#: Iceberg identifiers: Polaris namespace "sales", table "orders_windowed".
+ICEBERG_CATALOG_TABLE = "polaris.sales.orders_windowed"
 
 
-def seed_demo_events_if_empty(topic: str, explicit_flag: bool) -> int:
-    """Publishes a small deterministic burst when the topic event log is empty.
+class ConfigurationError(RuntimeError):
+    """Raised when a required environment variable is missing or unusable."""
 
-    The event broker adapter never fabricates events (RF-10), but scripts we do
-    not own (scripts/demo.sh, Rakefile) invoke this pipeline WITHOUT
-    --seed-if-empty and expect a populated speed buffer for the RF-09/RF-10
-    demonstration. Therefore an empty log is seeded automatically, loudly, so
-    demo runs stay truthful while the broker contract stays honest.
-    """
-    existing = container.stream_broker.consume_events(topic=topic, replay=True)
-    if existing:
-        return 0
 
-    now = datetime.now(UTC)
-    seeded = 0
-    for i in range(DEMO_SEED_COUNT):
-        event_ts = now - timedelta(seconds=(DEMO_SEED_COUNT - 1 - i) * DEMO_SEED_SPREAD_SECONDS)
-        payload = {
-            "event_id": f"demo-{topic}-{9001 + i}",
-            "order_id": 9001 + i,
-            "customer_id": i + 1,
-            "total_amount": round(35.0 + (i + 1) * 7.5, 2),
-            "status": "confirmed",
-            "order_date": event_ts.strftime("%Y-%m-%d"),
-            "timestamp": event_ts.isoformat(),
-        }
-        container.stream_broker.publish_event(topic, str(payload["order_id"]), payload)
-        seeded += 1
+def _required(name: str) -> str:
+    """Reads a mandatory environment variable, failing closed when unset."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ConfigurationError(
+            f"Required environment variable {name} is not set. This job refuses to start on a "
+            f"guessed default: declare it in the FlinkDeployment "
+            f"(infra/helm/s4-stream/templates/flink-deployments.yaml)."
+        )
+    return value
 
-    if seeded:
-        if explicit_flag:
-            logger.info("Seeded %d demo events into topic %s (--seed-if-empty)", seeded, topic)
-        else:
-            logger.warning(
-                "Seeded %d demo events into topic %s (auto demo seeding: event log was empty; "
-                "scripts/demo.sh and the Rakefile invoke this pipeline without --seed-if-empty)",
-                seeded,
-                topic,
+
+@dataclass(frozen=True)
+class JobConfig:
+    """Runtime configuration resolved strictly from the environment."""
+
+    bootstrap_servers: str
+    topic: str
+    group_id: str
+    start_offset: str
+    catalog_name: str
+    catalog_uri: str
+    warehouse: str
+    s3_endpoint: str
+    s3_access_key: str
+    s3_secret_key: str
+
+    @classmethod
+    def from_env(cls) -> JobConfig:
+        """Builds the configuration, raising ConfigurationError if incomplete."""
+        start_offset = os.getenv("KAFKA_START_OFFSET", "latest").strip().lower()
+        if start_offset not in ("earliest", "latest"):
+            raise ConfigurationError(
+                f"KAFKA_START_OFFSET must be 'earliest' or 'latest', got {start_offset!r}. "
+                f"'earliest' is the RF-10 Kappa full-replay mode (regenerates every window from "
+                f"offset 0); 'latest' resumes from the committed consumer group position."
             )
-    return seeded
+        return cls(
+            bootstrap_servers=_required("KAFKA_BOOTSTRAP_SERVERS"),
+            topic=os.getenv("KAFKA_TOPIC", "sales.orders.events").strip() or "sales.orders.events",
+            group_id=os.getenv("KAFKA_GROUP_ID", "flink-orders-speed-group").strip() or "flink-orders-speed-group",
+            start_offset=start_offset,
+            catalog_name=os.getenv("ICEBERG_CATALOG_NAME", "polaris").strip() or "polaris",
+            catalog_uri=_required("ICEBERG_CATALOG_URI"),
+            warehouse=_required("ICEBERG_WAREHOUSE"),
+            s3_endpoint=_required("S3_ENDPOINT"),
+            s3_access_key=_required("S3_ACCESS_KEY"),
+            s3_secret_key=_required("S3_SECRET_KEY"),
+        )
+
+
+class _ParseOrderEvent(FlatMapFunction):
+    """Parses Kafka payloads; records without usable event time are dropped."""
+
+    def flat_map(self, value: bytes) -> list[OrderWindowEvent]:
+        event = parse_order_event(value)
+        return [] if event is None else [event]
+
+
+@dataclass
+class RevenueAccumulator:
+    """Running revenue sum and order count for one window."""
+
+    total: float = 0.0
+    count: int = 0
+
+
+class _RevenueAggregate(AggregateFunction[RevenueAccumulator, Row]):
+    """Accumulates revenue sum and order count inside a tumbling window."""
+
+    def create_accumulator(self) -> RevenueAccumulator:
+        return RevenueAccumulator()
+
+    def add(self, value: OrderWindowEvent, accumulator: RevenueAccumulator) -> RevenueAccumulator:
+        accumulator.total += float(value.total_amount)
+        accumulator.count += 1
+        return accumulator
+
+    def get_result(self, accumulator: RevenueAccumulator) -> Row:
+        return Row(float(accumulator.total), int(accumulator.count))
+
+    def merge(self, acc_a: RevenueAccumulator, acc_b: RevenueAccumulator) -> RevenueAccumulator:
+        return RevenueAccumulator(total=acc_a.total + acc_b.total, count=acc_a.count + acc_b.count)
+
+
+class _OrdersWindowFunction(ProcessWindowFunction[Row, Row, str, TimeWindow]):
+    """Converts a windowed aggregate into a published speed-layer row."""
+
+    def process(
+        self,
+        key: str,
+        context: ProcessWindowFunction.Context,
+        elements: Iterable[Row],
+        out: Collector[Row],
+    ) -> None:
+        aggregates = list(elements)
+        if not aggregates:
+            return
+        aggregate = aggregates[0]
+        row = build_orders_row(context.window().start, key, aggregate[0], int(aggregate[1]))
+        out.collect(Row(*orders_row_to_columns(row)))
+
+
+def _assign_event_time(event: OrderWindowEvent, record_timestamp: int) -> int:
+    """Timestamp assigner: the event time carried by the payload, never wall clock."""
+    return int(event.event_time_ms)
+
+
+def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig) -> DataStream[Row]:
+    """Builds the Kafka -> parse -> watermark -> 4 s tumbling window topology."""
+    offsets = (
+        KafkaOffsetsInitializer.earliest() if config.start_offset == "earliest" else KafkaOffsetsInitializer.latest()
+    )
+
+    source = (
+        KafkaSource.builder()
+        .set_bootstrap_servers(config.bootstrap_servers)
+        .set_topics(config.topic)
+        .set_group_id(config.group_id)
+        .set_starting_offsets(offsets)
+        .build()
+    )
+
+    watermarks = (
+        WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_milliseconds(MAX_OUT_OF_ORDERNESS_MS))
+        .with_timestamp_assigner(_assign_event_time)
+        .with_idleness(Duration.of_milliseconds(MAX_OUT_OF_ORDERNESS_MS * 4))
+    )
+
+    event_type_info = Types.POJO(
+        OrderWindowEvent,
+        [("event_time_ms", Types.LONG()), ("status", Types.STRING()), ("total_amount", Types.DOUBLE())],
+    )
+
+    events = (
+        env.from_source(source, WatermarkStrategy.no_watermarks(), "orders-kafka-source")
+        .name("orders-kafka-source")
+        .uid("orders-kafka-source")
+        .flat_map(_ParseOrderEvent(), output_type=event_type_info)
+        .name("parse-order-events")
+        .uid("parse-order-events")
+        .assign_timestamps_and_watermarks(watermarks)
+        .name("order-event-time")
+        .uid("order-event-time")
+    )
+
+    return (
+        events.key_by(lambda event: event.status, key_type=Types.STRING())
+        .window(TumblingEventTimeWindows.of(Time.milliseconds(WINDOW_SIZE_MS)))
+        .allowed_lateness(Time.milliseconds(ALLOWED_LATENESS_MS))
+        .aggregate(
+            _RevenueAggregate(),
+            output_type=Types.ROW(["window_revenue", "window_orders"], [Types.DOUBLE(), Types.BIGINT()]),
+        )
+        .process(
+            _OrdersWindowFunction(),
+            output_type=Types.ROW(
+                [
+                    "window_start",
+                    "window_end",
+                    "order_date",
+                    "status",
+                    "window_revenue",
+                    "window_orders",
+                    "avg_order_value",
+                    "source_tier",
+                ],
+                [
+                    Types.TIMESTAMP(6),
+                    Types.TIMESTAMP(6),
+                    Types.DATE(),
+                    Types.STRING(),
+                    Types.DOUBLE(),
+                    Types.BIGINT(),
+                    Types.DOUBLE(),
+                    Types.STRING(),
+                ],
+            ),
+            key_type=Types.STRING(),
+            window_info=Types.TIMESTAMP(6),
+        )
+        .name("orders-tumbling-window")
+        .uid("orders-tumbling-window")
+    )
+
+
+def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfig) -> None:
+    """Registers the Polaris REST catalog and the speed-layer Iceberg table.
+
+    Both statements are idempotent, so the job owns its own table definition and
+    a restart never depends on out-of-band provisioning.
+    """
+    table_env.execute_sql(
+        f"""
+        CREATE CATALOG IF NOT EXISTS `{config.catalog_name}` WITH (
+            'type' = 'iceberg',
+            'catalog-type' = 'rest',
+            'uri' = '{config.catalog_uri}',
+            'warehouse' = '{config.warehouse}',
+            's3.endpoint' = '{config.s3_endpoint}',
+            's3.access-key' = '{config.s3_access_key}',
+            's3.secret-key' = '{config.s3_secret_key}',
+            's3.path-style-access' = 'true'
+        )
+        """
+    )
+    table_env.execute_sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS `{config.catalog_name}`.`sales`.`orders_windowed` (
+            `window_start`    TIMESTAMP(6),
+            `window_end`      TIMESTAMP(6),
+            `order_date`      DATE,
+            `status`          STRING,
+            `window_revenue`  DOUBLE,
+            `window_orders`   BIGINT,
+            `avg_order_value` DOUBLE,
+            `source_tier`     STRING,
+            PRIMARY KEY (`window_start`, `status`) NOT ENFORCED
+        )
+        PARTITIONED BY (days(`window_start`))
+        WITH ('format' = 'parquet', 'write.upsert.enabled' = 'true')
+        """
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Streaming Speed Layer (Kappa Architecture)")
-    parser.add_argument("--bootstrap-servers", default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
-    parser.add_argument("--topic", default=os.getenv("KAFKA_TOPIC", "sales.orders.events"))
-    parser.add_argument("--target-table", default="stream.sales.orders_windowed")
-    parser.add_argument("--start-offset", default="latest", choices=["earliest", "latest"])
-    parser.add_argument(
-        "--replay",
-        action="store_true",
-        help="Full replay of the topic log from offset 0 (RF-10 full recompute)",
-    )
-    parser.add_argument(
-        "--seed-if-empty",
-        action="store_true",
-        default=False,
-        help="Publish a deterministic 14-event demo burst when the topic log is empty "
-        "(an empty log is also auto-seeded loudly for demo-script compatibility)",
-    )
-    args = parser.parse_args()
-
-    replay_mode = args.replay or args.start_offset == "earliest"
+    """Entry point executed by the Flink Kubernetes Operator (PythonDriver)."""
+    config = JobConfig.from_env()
     logger.info(
-        "Starting Streaming Speed Layer Pipeline on topic '%s' (offset=%s, replay=%s)...",
-        args.topic,
-        args.start_offset,
-        replay_mode,
+        "Submitting %s | topic=%s offset=%s catalog=%s window=%dms allowed_lateness=%dms",
+        JOB_NAME,
+        config.topic,
+        config.start_offset,
+        config.catalog_uri,
+        WINDOW_SIZE_MS,
+        ALLOWED_LATENESS_MS,
     )
 
-    seed_demo_events_if_empty(args.topic, args.seed_if_empty)
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.enable_checkpointing(30_000, CheckpointingMode.EXACTLY_ONCE)
+    env.get_config().set_auto_watermark_interval(1_000)
 
-    res = container.process_stream.execute(
-        topic=args.topic,
-        target_table=args.target_table,
-        replay=replay_mode,
+    windowed = build_source_and_windows(env, config)
+
+    table_env = StreamTableEnvironment.create(env)
+    # Iceberg `timestamp` has no zone; pin the session to UTC so window bounds
+    # do not depend on the container clock.
+    table_env.get_config().get_configuration().set("table.exec.timezone", "UTC")
+    register_iceberg_catalog(table_env, config)
+    table_env.create_temporary_view(TEMP_VIEW, windowed)
+
+    # Terminal submission. Its total absence is what produced the original
+    # "The application contains no execute() calls" failure.
+    result = table_env.execute_sql(
+        f"""
+        INSERT INTO `{config.catalog_name}`.`sales`.`orders_windowed`
+        SELECT window_start, window_end, order_date, status,
+               window_revenue, window_orders, avg_order_value, source_tier
+        FROM {TEMP_VIEW}
+        """
     )
-    logger.info("Streaming speed window processing completed: %s", res)
+
+    job_client = result.get_job_client()
+    if job_client is None:
+        raise RuntimeError("Flink accepted the plan but returned no JobClient: the job never started.")
+    logger.info("JobID=%s running (uid=%s)", job_client.get_job_id(), JOB_UID)
+
+    execution = job_client.get_job_execution_result()
+    if execution is None:
+        raise RuntimeError("Flink returned no JobExecutionResult; the job produced no outcome.")
+    status = execution.get_job_execution_result()
+    if status != 0:
+        raise RuntimeError(f"{JOB_NAME} terminated with execution result {status}.")
 
 
 if __name__ == "__main__":

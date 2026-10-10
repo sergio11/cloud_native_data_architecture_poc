@@ -72,6 +72,16 @@ ignore_missing_imports = true
 module = ["yaml", "jsonschema"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# PyFlink ships no type information and only exists inside the Flink job image
+# (infra/docker/flink.Dockerfile). Scoped rather than global so a typo'd
+# INTERNAL import still fails. This override is also why the job modules do not
+# need inline `type: ignore[import-not-found]` markers: with
+# warn_unused_ignores those markers would themselves error once PyFlink is
+# actually installed.
+module = ["pyflink.*"]
+ignore_missing_imports = true
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

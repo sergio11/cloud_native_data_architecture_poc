@@ -48,9 +48,7 @@ def _assert_service_shape(payload: dict[str, Any]) -> None:
     assert isinstance(payload["eventTime"], str) and payload["eventTime"].strip() != ""
 
 
-def test_emit_payload_includes_run_run_id_in_jsonl_and_post(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_emit_payload_includes_run_run_id_in_jsonl_and_post(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     svc = _load_service(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
 

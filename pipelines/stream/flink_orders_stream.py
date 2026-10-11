@@ -25,26 +25,26 @@ import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 # The PythonDriver runs this file from the image, where only its own directory is
 # on sys.path. Make the repo root importable for the sibling pure module.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from pyflink.common import Duration, Time, Types, WatermarkStrategy  # noqa: E402
+from pyflink.common import Duration, Row, Time, WatermarkStrategy  # noqa: E402
+from pyflink.common.typeinfo import Types  # noqa: E402
 from pyflink.datastream import DataStream, StreamExecutionEnvironment  # noqa: E402
-from pyflink.datastream.checkpointing import CheckpointingMode  # noqa: E402
+from pyflink.datastream.checkpointing_mode import CheckpointingMode  # noqa: E402
 from pyflink.datastream.connectors.kafka import (  # noqa: E402
     KafkaOffsetsInitializer,
     KafkaSource,
 )
 from pyflink.datastream.functions import (  # noqa: E402
     AggregateFunction,
-    Collector,
     FlatMapFunction,
     ProcessWindowFunction,
 )
-from pyflink.datastream.row import Row  # noqa: E402
-from pyflink.datastream.window import TimeWindow, TumblingEventTimeWindows  # noqa: E402
+from pyflink.datastream.window import TumblingEventTimeWindows  # noqa: E402
 from pyflink.table import StreamTableEnvironment  # noqa: E402
 
 from pipelines.stream.window_logic import (  # noqa: E402
@@ -145,7 +145,7 @@ class RevenueAccumulator:
     count: int = 0
 
 
-class _RevenueAggregate(AggregateFunction[RevenueAccumulator, Row]):
+class _RevenueAggregate(AggregateFunction):
     """Accumulates revenue sum and order count inside a tumbling window."""
 
     def create_accumulator(self) -> RevenueAccumulator:
@@ -163,7 +163,7 @@ class _RevenueAggregate(AggregateFunction[RevenueAccumulator, Row]):
         return RevenueAccumulator(total=acc_a.total + acc_b.total, count=acc_a.count + acc_b.count)
 
 
-class _OrdersWindowFunction(ProcessWindowFunction[Row, Row, str, TimeWindow]):
+class _OrdersWindowFunction(ProcessWindowFunction):
     """Converts a windowed aggregate into a published speed-layer row."""
 
     def process(
@@ -171,14 +171,13 @@ class _OrdersWindowFunction(ProcessWindowFunction[Row, Row, str, TimeWindow]):
         key: str,
         context: ProcessWindowFunction.Context,
         elements: Iterable[Row],
-        out: Collector[Row],
-    ) -> None:
+    ) -> Iterable[Row]:
         aggregates = list(elements)
         if not aggregates:
-            return
+            return []
         aggregate = aggregates[0]
         row = build_orders_row(context.window().start, key, aggregate[0], int(aggregate[1]))
-        out.collect(Row(*orders_row_to_columns(row)))
+        return [Row(*orders_row_to_columns(row))]
 
 
 def _assign_event_time(event: OrderWindowEvent, record_timestamp: int) -> int:
@@ -202,21 +201,21 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
     )
 
     watermarks = (
-        WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_milliseconds(MAX_OUT_OF_ORDERNESS_MS))
+        WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_millis(MAX_OUT_OF_ORDERNESS_MS))
         .with_timestamp_assigner(_assign_event_time)
-        .with_idleness(Duration.of_milliseconds(MAX_OUT_OF_ORDERNESS_MS * 4))
+        .with_idleness(Duration.of_millis(MAX_OUT_OF_ORDERNESS_MS * 4))
     )
 
-    event_type_info = Types.POJO(
-        OrderWindowEvent,
-        [("event_time_ms", Types.LONG()), ("status", Types.STRING()), ("total_amount", Types.DOUBLE())],
-    )
-
+    # PyFlink 1.18 has no POJO TypeInformation, so the parsed dataclass travels
+    # pickled (the default when output_type is omitted). output_type/key_type are
+    # left unset throughout for the same reason: the only Types factories that
+    # accept multiple arguments are the DataType ones from pyflink.common, which
+    # the DataStream API rejects.
     events = (
         env.from_source(source, WatermarkStrategy.no_watermarks(), "orders-kafka-source")
         .name("orders-kafka-source")
         .uid("orders-kafka-source")
-        .flat_map(_ParseOrderEvent(), output_type=event_type_info)
+        .flat_map(_ParseOrderEvent())
         .name("parse-order-events")
         .uid("parse-order-events")
         .assign_timestamps_and_watermarks(watermarks)
@@ -225,43 +224,65 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
     )
 
     return (
-        events.key_by(lambda event: event.status, key_type=Types.STRING())
+        events.key_by(lambda event: event.status)
         .window(TumblingEventTimeWindows.of(Time.milliseconds(WINDOW_SIZE_MS)))
         .allowed_lateness(Time.milliseconds(ALLOWED_LATENESS_MS))
-        .aggregate(
-            _RevenueAggregate(),
-            output_type=Types.ROW(["window_revenue", "window_orders"], [Types.DOUBLE(), Types.BIGINT()]),
-        )
+        .aggregate(_RevenueAggregate())
         .process(
             _OrdersWindowFunction(),
-            output_type=Types.ROW(
+            # Positional only: RowTypeInfo with named fields blows up in the JVM
+            # (TupleTypeInfoBase NPE) on PyFlink 1.18. Column names are attached
+            # when the stream is registered as a view, via an explicit Schema.
+            Types.ROW(
                 [
-                    "window_start",
-                    "window_end",
-                    "order_date",
-                    "status",
-                    "window_revenue",
-                    "window_orders",
-                    "avg_order_value",
-                    "source_tier",
-                ],
-                [
-                    Types.TIMESTAMP(6),
-                    Types.TIMESTAMP(6),
-                    Types.DATE(),
-                    Types.STRING(),
-                    Types.DOUBLE(),
-                    Types.BIGINT(),
-                    Types.DOUBLE(),
-                    Types.STRING(),
-                ],
+                    Types.SQL_TIMESTAMP(),  # window_start
+                    Types.SQL_TIMESTAMP(),  # window_end
+                    Types.SQL_DATE(),  # order_date
+                    Types.STRING(),  # status
+                    Types.DOUBLE(),  # window_revenue
+                    Types.BIG_INT(),  # window_orders
+                    Types.DOUBLE(),  # avg_order_value
+                    Types.STRING(),  # source_tier
+                ]
             ),
-            key_type=Types.STRING(),
-            window_info=Types.TIMESTAMP(6),
         )
         .name("orders-tumbling-window")
         .uid("orders-tumbling-window")
     )
+
+
+#: Column names for the windowed stream, in the same order as the Types.ROW
+#: above and as the Iceberg table definition.
+WINDOW_COLUMNS = (
+    "window_start",
+    "window_end",
+    "order_date",
+    "status",
+    "window_revenue",
+    "window_orders",
+    "avg_order_value",
+    "source_tier",
+)
+
+
+def window_schema() -> Any:
+    """Builds the Table schema that names the windowed stream's columns."""
+    from pyflink.table import DataTypes, Schema
+
+    types = [
+        DataTypes.TIMESTAMP(6),
+        DataTypes.TIMESTAMP(6),
+        DataTypes.DATE(),
+        DataTypes.STRING(),
+        DataTypes.DOUBLE(),
+        DataTypes.BIGINT(),
+        DataTypes.DOUBLE(),
+        DataTypes.STRING(),
+    ]
+    builder = Schema.new_builder()
+    for name, data_type in zip(WINDOW_COLUMNS, types, strict=True):
+        builder.column(name, data_type)
+    return builder.build()
 
 
 def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfig) -> None:
@@ -325,19 +346,17 @@ def main() -> None:
     table_env = StreamTableEnvironment.create(env)
     # Iceberg `timestamp` has no zone; pin the session to UTC so window bounds
     # do not depend on the container clock.
-    table_env.get_config().get_configuration().set("table.exec.timezone", "UTC")
+    table_env.get_config().set("table.exec.timezone", "UTC")
     register_iceberg_catalog(table_env, config)
-    table_env.create_temporary_view(TEMP_VIEW, windowed)
+    # from_data_stream carries the column names: the DataStream type information
+    # is positional (see build_source_and_windows).
+    table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed, window_schema()))
 
     # Terminal submission. Its total absence is what produced the original
-    # "The application contains no execute() calls" failure.
+    # "The application contains no execute() calls" failure. SELECT * relies on
+    # the column order matching the Iceberg table, which WINDOW_COLUMNS pins.
     result = table_env.execute_sql(
-        f"""
-        INSERT INTO `{config.catalog_name}`.`sales`.`orders_windowed`
-        SELECT window_start, window_end, order_date, status,
-               window_revenue, window_orders, avg_order_value, source_tier
-        FROM {TEMP_VIEW}
-        """
+        f"INSERT INTO `{config.catalog_name}`.`sales`.`orders_windowed` SELECT * FROM {TEMP_VIEW}"
     )
 
     job_client = result.get_job_client()
@@ -345,12 +364,9 @@ def main() -> None:
         raise RuntimeError("Flink accepted the plan but returned no JobClient: the job never started.")
     logger.info("JobID=%s running (uid=%s)", job_client.get_job_id(), JOB_UID)
 
-    execution = job_client.get_job_execution_result()
-    if execution is None:
-        raise RuntimeError("Flink returned no JobExecutionResult; the job produced no outcome.")
-    status = execution.get_job_execution_result()
-    if status != 0:
-        raise RuntimeError(f"{JOB_NAME} terminated with execution result {status}.")
+    # A streaming job is unbounded and never completes, so nothing here may
+    # block waiting for a result: the Flink Operator supervises the deployment.
+    logger.info("%s submitted; the Operator owns supervision and checkpoints", JOB_NAME)
 
 
 if __name__ == "__main__":

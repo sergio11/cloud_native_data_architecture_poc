@@ -13,31 +13,62 @@
 # add it back explicitly rather than re-introducing the coupling by accident.
 #
 # Build from the REPO ROOT:
-#   docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
+#   podman build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
 # ==============================================================================
 FROM flink:1.18-scala_2.12
 
 COPY pipelines/ /opt/flink/pipelines/
 
-# The base image ships no Python interpreter, but the PyFlink PythonDriver
-# executes the `python` binary. The POC requires Python >= 3.11 (`datetime.UTC`),
-# while Ubuntu 22.04 defaults to 3.10, so install 3.11 from deadsnakes into an
-# isolated venv and expose it as `python` (what Spark/PyFlink resolves first).
+# ---------------------------------------------------------------------------
+# Python runtime
+#
+# Python 3.10 (the Ubuntu 22.04 system interpreter), NOT 3.11. This is not a
+# preference: PyFlink 1.18 declares `pemja==0.3.0` as a runtime dependency and
+# pemja publishes no cp311 wheel, so on 3.11 it tries to build from Rust source
+# and fails. PyFlink's own supported range for Flink 1.18 tops out at 3.10.
+# Consequence: code shipped in this image must avoid 3.11-only stdlib such as
+# `datetime.UTC`; use `timezone.utc` instead.
+# ---------------------------------------------------------------------------
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends python3.11 python3.11-venv \
+        ca-certificates curl python3.10 python3.10-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# NOTE: the venv must be on PATH, not symlinked: `python -> /opt/py311/bin/python`
-# loses the venv context and therefore site-packages, and every import fails.
-RUN python3.11 -m venv /opt/py311 \
-    && /opt/py311/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/py311/bin/pip install --no-cache-dir pyyaml requests click \
-    && /opt/py311/bin/python -c "import yaml, requests, click; print('venv deps ok')"
+# PyFlink's runtime dependencies, taken from flink-python/setup.py at
+# release-1.18. The flink:1.18 image ships pyflink.zip and py4j but NOT their
+# pip requirements, so without these the job dies inside
+# get_execution_environment() with a chain of "No module named ..." errors.
+# Pins that matter:
+#   * apache-beam <2.49  - PyFlink 1.18's declared range; 2.7x imports but is
+#                          unsupported and fails later in the runner.
+#   * cloudpickle <3     - required by apache-beam 2.48.
+#   * avro-python3       - provides the `avro` module the coder imports.
+#   * pemja              - declared by PyFlink; needs a cp310 wheel.
+# apache-flink-libraries and py4j are omitted: the first duplicates jars already
+# in the Flink distribution, the second ships in /opt/flink/opt/python.
+RUN python3.10 -m venv /opt/py310 \
+    && /opt/py310/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/py310/bin/pip install --no-cache-dir \
+        "apache-beam==2.48.0" \
+        "avro-python3==1.10.2" \
+        "cloudpickle==2.2.1" \
+        "fastavro==1.9.7" \
+        "pemja==0.3.0" \
+        "grpcio==1.62.3" \
+        "httplib2==0.22.0" \
+        "pandas==2.3.3" \
+        "python-dateutil==2.9.0.post0" \
+        "pytz==2026.5" \
+        "requests==2.32.5" \
+        "pyyaml==6.0.2" \
+        "click==8.1.7" \
+    && /opt/py310/bin/python -c "import yaml, requests, click, grpc, apache_beam, pyarrow, numpy, pandas, cloudpickle, avro, pemja, fastavro" \
+    && /opt/py310/bin/pip freeze > /opt/py310/requirements.lock.txt \
+    && echo 'venv deps ok'
 
+# ---------------------------------------------------------------------------
+# Connector jars
+#
 # The jobs use the DataStream API (KafkaSource) and the Table API only to write
 # into Iceberg, so the DataStream connector artifacts are the ones required. The
 # SQL uber jar flink-sql-connector-kafka is deliberately not used: it bundles a
@@ -49,6 +80,15 @@ ARG KAFKA_CONNECTOR_VERSION=3.1.0-1.18
 ARG KAFKA_CLIENTS_VERSION=3.4.0
 ARG ICEBERG_VERSION=1.6.1
 
+# RocksDB state backend: the charts set state.backend=rocksdb and checkpoints go
+# to s3a://. The flink:1.18 image ships neither lib/ nor opt/ copy, so it is
+# fetched explicitly. Verified at build time, because a missing state backend
+# only fails at the first checkpoint, hours into a run.
+RUN set -eux; \
+    curl -fSL -o /opt/flink/lib/flink-statebackend-rocksdb-${FLINK_VERSION}.jar \
+        "${MAVEN_REPO}/org/apache/flink/flink-statebackend-rocksdb/${FLINK_VERSION}/flink-statebackend-rocksdb-${FLINK_VERSION}.jar"; \
+    ls /opt/flink/lib/flink-statebackend-rocksdb-*.jar
+
 RUN set -eux; \
     curl -fSL -o /opt/flink/lib/flink-connector-base-${FLINK_VERSION}.jar \
         "${MAVEN_REPO}/org/apache/flink/flink-connector-base/${FLINK_VERSION}/flink-connector-base-${FLINK_VERSION}.jar"; \
@@ -59,17 +99,6 @@ RUN set -eux; \
     curl -fSL -o /opt/flink/lib/iceberg-flink-runtime-1.18-${ICEBERG_VERSION}.jar \
         "${MAVEN_REPO}/org/apache/iceberg/iceberg-flink-runtime-1.18/${ICEBERG_VERSION}/iceberg-flink-runtime-1.18-${ICEBERG_VERSION}.jar"
 
-# RocksDB state backend: the charts set state.backend=rocksdb and checkpoints go
-# to s3a://. flink-dist may ship it in lib/ or only in opt/ depending on the
-# build, so normalise it into lib/ and verify: a missing state backend only
-# fails at the first checkpoint, hours later.
-RUN set -eux; \
-    if ! ls /opt/flink/lib/flink-statebackend-rocksdb-*.jar >/dev/null 2>&1; then \
-        ls /opt/flink/opt/flink-statebackend-rocksdb-*.jar >/dev/null; \
-        cp /opt/flink/opt/flink-statebackend-rocksdb-*.jar /opt/flink/lib/; \
-    fi; \
-    ls /opt/flink/lib/flink-statebackend-rocksdb-*.jar
-
 # S3 filesystem plugin for MinIO. No `|| true` here: a missing jar turns every
 # checkpoint into a job failure, and swallowing the error is how this image
 # looked healthy while broken.
@@ -78,5 +107,5 @@ RUN set -eux; \
     cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar /opt/flink/plugins/s3-fs-hadoop/; \
     ls /opt/flink/plugins/s3-fs-hadoop/*.jar
 
-ENV PATH="/opt/py311/bin:${PATH}"
+ENV PATH="/opt/py310/bin:${PATH}"
 ENV PYTHONPATH="/opt/flink/opt/python/pyflink.zip:/opt/flink/opt/python/py4j-0.10.9.7-src.zip:${PYTHONPATH}"

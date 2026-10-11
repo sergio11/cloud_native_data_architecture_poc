@@ -36,6 +36,13 @@ select = ["E", "F", "W", "I", "B", "UP"]
 # E501 is covered by line-length; per-file ignores only where justified below.
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+# UP017 rewrites `timezone.utc` to `datetime.UTC`, which only exists from
+# Python 3.11. The Flink job image runs Python 3.10 because PyFlink 1.18 depends
+# on pemja, which publishes no cp311 wheel (infra/docker/flink.Dockerfile), so
+# the streaming jobs must stay 3.10-compatible.
+"pipelines/stream/*" = ["UP017"]
+
 [tool.ruff.format]
 # Formatter enabled with ruff's documented defaults (deliberately no overrides):
 # quote-style = "double", indent-style = "space", line-ending = "lf",

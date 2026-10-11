@@ -24,25 +24,25 @@ import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 # Make the repo root importable for the sibling pure module.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from pyflink.common import Duration, Time, Types, WatermarkStrategy  # noqa: E402
+from pyflink.common import Duration, Row, Time, WatermarkStrategy  # noqa: E402
+from pyflink.common.typeinfo import Types  # noqa: E402
 from pyflink.datastream import DataStream, StreamExecutionEnvironment  # noqa: E402
-from pyflink.datastream.checkpointing import CheckpointingMode  # noqa: E402
+from pyflink.datastream.checkpointing_mode import CheckpointingMode  # noqa: E402
 from pyflink.datastream.connectors.kafka import (  # noqa: E402
     KafkaOffsetsInitializer,
     KafkaSource,
 )
 from pyflink.datastream.functions import (  # noqa: E402
     AggregateFunction,
-    Collector,
     FlatMapFunction,
     ProcessWindowFunction,
 )
-from pyflink.datastream.row import Row  # noqa: E402
-from pyflink.datastream.window import TimeWindow, TumblingEventTimeWindows  # noqa: E402
+from pyflink.datastream.window import TumblingEventTimeWindows  # noqa: E402
 from pyflink.table import StreamTableEnvironment  # noqa: E402
 
 from pipelines.stream.window_logic import (  # noqa: E402
@@ -138,7 +138,7 @@ class ClickstreamAccumulator:
     sessions: set[str] = field(default_factory=set)
 
 
-class _ClickstreamAggregate(AggregateFunction[ClickstreamAccumulator, Row]):
+class _ClickstreamAggregate(AggregateFunction):
     """Incremental COUNT(*) and COUNT(DISTINCT session_id) per window."""
 
     def create_accumulator(self) -> ClickstreamAccumulator:
@@ -156,7 +156,7 @@ class _ClickstreamAggregate(AggregateFunction[ClickstreamAccumulator, Row]):
         return ClickstreamAccumulator(events=acc_a.events + acc_b.events, sessions=acc_a.sessions | acc_b.sessions)
 
 
-class _ClickstreamWindowFunction(ProcessWindowFunction[Row, Row, str, TimeWindow]):
+class _ClickstreamWindowFunction(ProcessWindowFunction):
     """Converts a windowed aggregate into a published speed-layer row."""
 
     def process(
@@ -164,11 +164,10 @@ class _ClickstreamWindowFunction(ProcessWindowFunction[Row, Row, str, TimeWindow
         key: str,
         context: ProcessWindowFunction.Context,
         elements: Iterable[Row],
-        out: Collector[Row],
-    ) -> None:
+    ) -> Iterable[Row]:
         aggregates = list(elements)
         if not aggregates:
-            return
+            return []
         aggregate = aggregates[0]
         row = build_clickstream_row(
             context.window().start,
@@ -176,7 +175,7 @@ class _ClickstreamWindowFunction(ProcessWindowFunction[Row, Row, str, TimeWindow
             int(aggregate[0]),
             int(aggregate[1]),
         )
-        out.collect(Row(*clickstream_row_to_columns(row)))
+        return [Row(*clickstream_row_to_columns(row))]
 
 
 def _assign_event_time(event: ClickstreamWindowEvent, record_timestamp: int) -> int:
@@ -200,21 +199,18 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
     )
 
     watermarks = (
-        WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_milliseconds(MAX_OUT_OF_ORDERNESS_MS))
+        WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_millis(MAX_OUT_OF_ORDERNESS_MS))
         .with_timestamp_assigner(_assign_event_time)
-        .with_idleness(Duration.of_milliseconds(MAX_OUT_OF_ORDERNESS_MS * 4))
+        .with_idleness(Duration.of_millis(MAX_OUT_OF_ORDERNESS_MS * 4))
     )
 
-    event_type_info = Types.POJO(
-        ClickstreamWindowEvent,
-        [("event_time_ms", Types.LONG()), ("event_type", Types.STRING()), ("session_id", Types.STRING())],
-    )
-
+    # No POJO TypeInformation exists in PyFlink 1.18, so the parsed dataclass
+    # travels pickled; output_type/key_type stay unset for the same reason.
     events = (
         env.from_source(source, WatermarkStrategy.no_watermarks(), "clickstream-kafka-source")
         .name("clickstream-kafka-source")
         .uid("clickstream-kafka-source")
-        .flat_map(_ParseClickstreamEvent(), output_type=event_type_info)
+        .flat_map(_ParseClickstreamEvent())
         .name("parse-clickstream-events")
         .uid("parse-clickstream-events")
         .assign_timestamps_and_watermarks(watermarks)
@@ -226,38 +222,57 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
         events.key_by(lambda event: event.event_type, key_type=Types.STRING())
         .window(TumblingEventTimeWindows.of(Time.milliseconds(WINDOW_SIZE_MS)))
         .allowed_lateness(Time.milliseconds(ALLOWED_LATENESS_MS))
-        .aggregate(
-            _ClickstreamAggregate(),
-            output_type=Types.ROW(["event_count", "unique_sessions"], [Types.BIGINT(), Types.BIGINT()]),
-        )
+        .aggregate(_ClickstreamAggregate())
         .process(
             _ClickstreamWindowFunction(),
-            output_type=Types.ROW(
+            # Positional only; names come from window_schema() at registration.
+            Types.ROW(
                 [
-                    "window_start",
-                    "window_end",
-                    "order_date",
-                    "event_type",
-                    "event_count",
-                    "unique_sessions",
-                    "source_tier",
-                ],
-                [
-                    Types.TIMESTAMP(6),
-                    Types.TIMESTAMP(6),
-                    Types.DATE(),
-                    Types.STRING(),
-                    Types.BIGINT(),
-                    Types.BIGINT(),
-                    Types.STRING(),
-                ],
+                    Types.SQL_TIMESTAMP(),  # window_start
+                    Types.SQL_TIMESTAMP(),  # window_end
+                    Types.SQL_DATE(),  # order_date
+                    Types.STRING(),  # event_type
+                    Types.BIG_INT(),  # event_count
+                    Types.BIG_INT(),  # unique_sessions
+                    Types.STRING(),  # source_tier
+                ]
             ),
-            key_type=Types.STRING(),
-            window_info=Types.TIMESTAMP(6),
         )
         .name("clickstream-tumbling-window")
         .uid("clickstream-tumbling-window")
     )
+
+
+#: Column names for the windowed stream, matching the Types.ROW above and the
+#: Iceberg table definition.
+WINDOW_COLUMNS = (
+    "window_start",
+    "window_end",
+    "order_date",
+    "event_type",
+    "event_count",
+    "unique_sessions",
+    "source_tier",
+)
+
+
+def window_schema() -> Any:
+    """Builds the Table schema that names the windowed stream's columns."""
+    from pyflink.table import DataTypes, Schema
+
+    types = [
+        DataTypes.TIMESTAMP(6),
+        DataTypes.TIMESTAMP(6),
+        DataTypes.DATE(),
+        DataTypes.STRING(),
+        DataTypes.BIGINT(),
+        DataTypes.BIGINT(),
+        DataTypes.STRING(),
+    ]
+    builder = Schema.new_builder()
+    for name, data_type in zip(WINDOW_COLUMNS, types, strict=True):
+        builder.column(name, data_type)
+    return builder.build()
 
 
 def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfig) -> None:
@@ -314,30 +329,22 @@ def main() -> None:
     windowed = build_source_and_windows(env, config)
 
     table_env = StreamTableEnvironment.create(env)
-    table_env.get_config().get_configuration().set("table.exec.timezone", "UTC")
+    table_env.get_config().set("table.exec.timezone", "UTC")
     register_iceberg_catalog(table_env, config)
-    table_env.create_temporary_view(TEMP_VIEW, windowed)
+    # from_data_stream carries the column names; the DataStream type info is positional.
+    table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed, window_schema()))
 
     result = table_env.execute_sql(
-        f"""
-        INSERT INTO `{config.catalog_name}`.`marketing`.`clickstream_windowed`
-        SELECT window_start, window_end, order_date, event_type,
-               event_count, unique_sessions, source_tier
-        FROM {TEMP_VIEW}
-        """
+        f"INSERT INTO `{config.catalog_name}`.`marketing`.`clickstream_windowed` SELECT * FROM {TEMP_VIEW}"
     )
 
     job_client = result.get_job_client()
     if job_client is None:
         raise RuntimeError("Flink accepted the plan but returned no JobClient: the job never started.")
     logger.info("JobID=%s running", job_client.get_job_id())
-
-    execution = job_client.get_job_execution_result()
-    if execution is None:
-        raise RuntimeError("Flink returned no JobExecutionResult; the job produced no outcome.")
-    status = execution.get_job_execution_result()
-    if status != 0:
-        raise RuntimeError(f"{JOB_NAME} terminated with execution result {status}.")
+    # Unbounded streaming job: never block waiting for a result. The Flink
+    # Operator owns supervision, checkpointing and restarts.
+    logger.info("%s submitted; the Operator owns supervision and checkpoints", JOB_NAME)
 
 
 if __name__ == "__main__":

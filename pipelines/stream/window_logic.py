@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger("stream.window_logic")
@@ -107,7 +107,7 @@ def parse_event_time_ms(raw: Any) -> int | None:
         logger.warning("Dead-lettering record with unparseable timestamp %r", text)
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return int(parsed.timestamp() * 1000)
 
 
@@ -164,7 +164,7 @@ def _bounds_text(start_ms: int) -> tuple[str, str, str]:
     ``start_ms`` is always a multiple of ``WINDOW_SIZE_MS`` (4 s), so it divides
     evenly into whole seconds and can be converted without float rounding.
     """
-    start = datetime.fromtimestamp(start_ms // 1000, tz=UTC)
+    start = datetime.fromtimestamp(start_ms // 1000, tz=timezone.utc)
     return start.isoformat(), (start + _WINDOW_SIZE).isoformat(), start.strftime("%Y-%m-%d")
 
 
@@ -222,7 +222,7 @@ def _naive_utc(iso_text: str) -> datetime:
     """
     parsed = datetime.fromisoformat(iso_text)
     if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
 
 

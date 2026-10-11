@@ -39,18 +39,27 @@ spec:
               mountPath: /etc/trino/catalog
             - name: data
               mountPath: /data/trino
+          startupProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /v1/info
               port: 8080
-            initialDelaySeconds: 20
+            initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /v1/info
               port: 8080
-            initialDelaySeconds: 40
+            initialDelaySeconds: 10
             periodSeconds: 20
+            failureThreshold: 5
       volumes:
         - name: config
           configMap:

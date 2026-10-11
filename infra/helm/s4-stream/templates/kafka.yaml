@@ -9,6 +9,7 @@ metadata:
     {{- include "s4-stream.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.kafka.service.type }}
+  publishNotReadyAddresses: true
   ports:
     - name: client
       port: {{ .Values.kafka.service.port }}
@@ -86,6 +87,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/kafka/data
+          startupProbe:
+            tcpSocket:
+              port: 9092
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             tcpSocket:
               port: 9092
@@ -94,8 +100,8 @@ spec:
           livenessProbe:
             tcpSocket:
               port: 9092
-            initialDelaySeconds: 20
             periodSeconds: 20
+            failureThreshold: 3
       volumes:
         {{- if not .Values.kafka.persistence.enabled }}
         - name: data

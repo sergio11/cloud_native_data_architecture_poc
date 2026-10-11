@@ -7,6 +7,14 @@ metadata:
   labels:
     app: kafka-topic-creator
     {{- include "s4-stream.labels" . | nindent 4 }}
+  annotations:
+    # Run as a hook so `helm upgrade` replaces the Job instead of patching it:
+    # Job spec.template is immutable and a server-side apply of a changed
+    # template fails (see s4 upgrade failure). before-hook-creation deletes
+    # the previous hook Job before the new one is created.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 10
   template:

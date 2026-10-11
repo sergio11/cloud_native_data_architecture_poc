@@ -11,15 +11,160 @@
 # the real one.
 #
 # What remains local is code verification only (tests, lint, types, contract
-# validation) plus cluster operations for the stream tier.
+# validation) plus cluster operations. Every cluster task is plain Ruby that
+# drives podman/kind/kubectl/helm directly - there are no shell scripts, so
+# the tasks behave the same on Windows (no bash/WSL dependency).
 # ==============================================================================
 
 require 'rake'
+require 'open3'
+require 'tempfile'
+require 'yaml'
+
+# Interleave our output with the child processes' (kubectl/helm write
+# unbuffered; without this the sections appear out of order when piped).
+$stdout.sync = true
 
 def preflight_require!(cmd, name, remedy)
   sh cmd
 rescue StandardError
   abort "\e[31mPre-flight failed: #{name} check did not run: #{cmd}\e[0m\n\e[33m#{remedy}\e[0m"
+end
+
+# ------------------------------------------------------------------------------
+# Output helpers
+# ------------------------------------------------------------------------------
+def info_msg(msg)    = puts("\e[34m[INFO]\e[0m #{msg}")
+def ok_msg(msg)      = puts("\e[32m[ OK ]\e[0m #{msg}")
+def warn_msg(msg)    = puts("\e[33m[WARN]\e[0m #{msg}")
+def err_msg(msg)     = puts("\e[31m[FAIL]\e[0m #{msg}")
+
+def banner(title)
+  puts "\e[36m== #{title} #{'=' * [70 - title.length, 0].max}\e[0m"
+end
+
+# ------------------------------------------------------------------------------
+# Command helpers
+# ------------------------------------------------------------------------------
+# Runs a command capturing combined output. Never raises: returns [output, ok?].
+# Argument arrays are passed straight to the process (no shell interpolation).
+def capture(*cmd, stdin: nil)
+  out, status = if stdin
+                  Open3.capture2e(*cmd, stdin_data: stdin)
+                else
+                  Open3.capture2e(*cmd)
+                end
+  [out.to_s, status.success?]
+rescue Errno::ENOENT
+  ["#{cmd.first}: command not found", false]
+end
+
+# Runs a command streaming its output; aborts the task with a clean message.
+def run!(*cmd)
+  sh(*cmd)
+rescue StandardError
+  abort "\e[31mFAILED: #{cmd.join(' ')}\e[0m"
+end
+
+# ------------------------------------------------------------------------------
+# Podman / kind discovery
+# ------------------------------------------------------------------------------
+# The kind cluster may live on the rootful connection (`podman-machine-default-root`)
+# or the rootless one; rootless `podman ps` and `kind get clusters` are blind to
+# rootful containers, so BOTH connections are always probed (rootful first).
+KIND_LABEL = 'io.x-k8s.kind.cluster'
+
+def podman_connections
+  out, ok = capture('podman', 'system', 'connection', 'list', '--format', '{{.Name}}')
+  return [] unless ok
+
+  out.lines.map(&:strip).reject(&:empty?).sort_by { |n| n.end_with?('-root') ? 0 : 1 }
+end
+
+# Probes every podman connection once. Returns:
+#   connections: all configured connection names
+#   reachable:   connections whose daemon/machine answers
+#   containers:  kind cluster containers as {connection:, name:, status:}
+def podman_probe
+  connections = podman_connections
+  reachable = []
+  containers = []
+  connections.each do |conn|
+    out, ok = capture('podman', '--connection', conn, 'ps', '-a',
+                      '--filter', "label=#{KIND_LABEL}",
+                      '--format', '{{.Names}}|{{.Status}}')
+    next unless ok
+
+    reachable << conn
+    out.lines.each do |line|
+      name, status = line.strip.split('|', 2)
+      next if name.nil? || name.empty?
+
+      containers << { connection: conn, name: name, status: status.to_s }
+    end
+  end
+  { connections: connections, reachable: reachable, containers: containers }
+end
+
+# `podman ps --format {{.Status}}` reports "Up 5 minutes" / "Exited (0) ..."
+# (unlike Docker, it never says "Running").
+def container_running?(container) = container[:status].start_with?('Up')
+
+# ------------------------------------------------------------------------------
+# Kubernetes / Helm helpers
+# ------------------------------------------------------------------------------
+def api_server
+  out, ok = capture('kubectl', 'config', 'view', '--minify',
+                     '-o', 'jsonpath={.clusters[0].cluster.server}')
+  ok && !out.strip.empty? ? out.strip : nil
+end
+
+def api_up?
+  _, ok = capture('kubectl', 'get', 'nodes', '--request-timeout=5s', '-o', 'name')
+  ok
+end
+
+# kind serves a self-signed certificate on 127.0.0.1; every manual command in
+# this repo uses this flag, so all Helm invocations go through the same constant.
+HELM_KUBE_ARGS = ['--kube-insecure-skip-tls-verify'].freeze
+
+# The Helm releases each startup profile installs (release name == chart dir,
+# namespace platform). Mirrors the contract documented in infra/profiles/*.yaml.
+PROFILE_CHARTS = {
+  'platform' => %w[s1-ingestion s2-lakehouse s7-fabric],
+  'stream'   => %w[s1-ingestion s2-lakehouse s4-stream s5-serving],
+  'batch'    => %w[s1-ingestion s2-lakehouse s3-batch s5-serving],
+  'demo'     => %w[s1-ingestion s2-lakehouse s3-batch s4-stream s5-serving
+                   s6-mesh s7-fabric s8-ops]
+}.freeze
+
+# Extracts `subsystems.<chart>` from infra/profiles/<profile>.yaml into a
+# Tempfile for `helm upgrade -f`. Returns the Tempfile (caller unlinks), nil
+# when the profile has no section for the chart (install with chart defaults),
+# or :error when the profile cannot be read/parsed.
+def extract_profile_values(profile, chart)
+  doc = YAML.load_file(File.join('infra', 'profiles', "#{profile}.yaml"))
+  subsystems = doc.is_a?(Hash) ? doc['subsystems'] : nil
+  section = subsystems.is_a?(Hash) ? subsystems[chart] : nil
+  return nil if section.nil?
+
+  tmp = Tempfile.new(["#{chart}-", '.yaml'])
+  tmp.write(YAML.dump(section))
+  tmp.close
+  tmp
+rescue Psych::Exception, Errno::ENOENT
+  :error
+end
+
+# Streams `helm upgrade --install` for one chart. Returns true/false.
+def helm_upgrade(chart, values_path)
+  cmd = ['helm', 'upgrade', '--install', chart, "infra/helm/#{chart}",
+         '-n', 'platform', *HELM_KUBE_ARGS]
+  cmd += ['-f', values_path] if values_path
+  sh(*cmd)
+  true
+rescue StandardError
+  false
 end
 
 desc 'Default task: run the code-verification suite (the platform itself runs on Kubernetes)'
@@ -57,7 +202,7 @@ namespace :test do
 
   desc 'Run tests with a coverage report'
   task :coverage do
-    sh 'python -m pytest tests --cov=src --cov=lineage --cov-branch --cov-config=pyproject.toml --cov-report=term-missing'
+    sh 'python -m pytest tests --cov=src --cov=lineage --cov-config=pyproject.toml --cov-report=term-missing'
   end
 end
 
@@ -100,33 +245,401 @@ namespace :governance do
 end
 
 # ---------------------------------------------------------------------------
-# Cluster operations (Kubernetes). These do not run the pipelines; they deploy
-# and observe them.
+# Cluster operations (Kubernetes). These do not run the pipelines; they
+# deploy and observe them. kind runs on Podman - possibly the rootful
+# connection - so discovery always probes every connection.
 # ---------------------------------------------------------------------------
 namespace :cluster do
-  desc 'Create the kind cluster, namespaces and prerequisites (bash)'
-  task :setup do
-    sh 'bash scripts/setup.sh'
+  desc 'Guided status: kind container, API, nodes, pods, Helm releases + next step'
+  task :status do
+    banner 'CLUSTER STATUS'
+    next_step = nil
+    probe = podman_probe
+
+    # 1. kind container (any podman connection)
+    if probe[:connections].empty?
+      err_msg('podman is not available or has no connections configured')
+      next_step = 'Install podman (podman machine init && podman machine start)'
+    elsif probe[:reachable].empty?
+      err_msg("podman machine is not running (checked: #{probe[:connections].join(', ')})")
+      next_step = 'podman machine start'
+    elsif probe[:containers].empty?
+      warn_msg("no kind cluster container on: #{probe[:reachable].join(', ')}")
+      next_step = 'rake cluster:setup   # detect or create the cluster'
+    else
+      probe[:containers].each do |c|
+        line = "container #{c[:name]} (#{c[:connection]}): #{c[:status]}"
+        container_running?(c) ? ok_msg(line) : err_msg(line)
+      end
+      next_step = 'rake cluster:start' if probe[:containers].none? { |c| container_running?(c) }
+    end
+
+    # 2. API server
+    server = api_server
+    server ? info_msg("API server: #{server}") : warn_msg('no API server in the current kubeconfig context')
+    api = api_up?
+    if api
+      ok_msg('API reachable')
+    else
+      err_msg('API unreachable (kubectl cannot reach the server)')
+      next_step ||= 'rake cluster:start'
+    end
+
+    if api
+      # 3. Nodes
+      puts "\n\e[33mNodes:\e[0m"
+      sh 'kubectl', 'get', 'nodes' rescue warn_msg('kubectl get nodes failed')
+
+      # 4. Pods: list everything, then flag the ones that are not healthy
+      puts "\n\e[33mPods:\e[0m"
+      pods_out, pods_ok = capture('kubectl', 'get', 'pods', '-A', '--no-headers')
+      if pods_ok
+        sh 'kubectl', 'get', 'pods', '-A' rescue nil
+        unhealthy = pods_out.lines.filter_map do |line|
+          cols = line.split(/\s+/)
+          next nil if cols.size < 6
+
+          name, ns, ready, status = cols[0], cols[1], cols[2], cols[3]
+          if %w[Running Succeeded Completed].include?(status)
+            next nil if status != 'Running'
+
+            want, have = ready.split('/').map(&:to_i)
+            next nil if want == have
+
+            { ns: ns, name: name, why: "Running but not Ready (#{ready})" }
+          else
+            { ns: ns, name: name, why: status }
+          end
+        end
+        if unhealthy.empty?
+          ok_msg('all pods healthy')
+        else
+          warn_msg("#{unhealthy.size} pod(s) not healthy:")
+          unhealthy.each { |p| puts "      - #{p[:ns]}/#{p[:name]}: #{p[:why]}" }
+          first = unhealthy.first
+          next_step ||= "kubectl describe pod -n #{first[:ns]} #{first[:name]}  |  rake cluster:logs[#{first[:name]}]"
+        end
+      else
+        warn_msg("could not list pods: #{pods_out.lines.first}")
+      end
+
+      # 5. Helm releases
+      puts "\n\e[33mHelm releases (namespace platform):\e[0m"
+      helm_out, helm_ok = capture('helm', 'list', '-n', 'platform', *HELM_KUBE_ARGS)
+      puts helm_out
+      warn_msg('helm list failed') unless helm_ok
+    end
+
+    puts
+    if next_step
+      warn_msg("Next step: #{next_step}")
+    else
+      ok_msg('Cluster is healthy. Detail: kubectl get pods -A · helm history <release> -n platform · rake cluster:logs[<name>]')
+    end
   end
 
-  desc 'Deploy a startup profile (args: profile=platform|stream|batch|demo) (bash)'
+  desc 'Start the kind cluster container and wait for the API and nodes'
+  task :start do
+    banner 'CLUSTER START'
+    probe = podman_probe
+    if probe[:connections].empty?
+      abort "\e[31mpodman is not available. Install it and run: podman machine init && podman machine start\e[0m"
+    end
+    if probe[:reachable].empty?
+      abort "\e[31mpodman machine is not running. Run: podman machine start\e[0m"
+    end
+    if probe[:containers].empty?
+      abort "\e[31mNo kind cluster container found. Run: rake cluster:setup\e[0m"
+    end
+
+    probe[:containers].each do |c|
+      if container_running?(c)
+        ok_msg("container #{c[:name]} already running (#{c[:connection]})")
+      else
+        info_msg("starting #{c[:name]} (currently: #{c[:status]}) via #{c[:connection]}...")
+        run! 'podman', '--connection', c[:connection], 'start', c[:name]
+        ok_msg("container #{c[:name]} started")
+      end
+    end
+
+    info_msg("waiting for the API (#{api_server || 'endpoint unknown'})...")
+    deadline = Time.now + 120
+    last_error = nil
+    until api_up?
+      if Time.now > deadline
+        err_msg('API did not become reachable within 120 s')
+        warn_msg("last kubectl error: #{last_error&.lines&.last&.strip}")
+        abort "\e[33mInspect the control plane: podman logs #{probe[:containers].first[:name]} --tail 50\e[0m"
+      end
+      last_error, = capture('kubectl', 'get', 'nodes', '--request-timeout=5s')
+      sleep 3
+    end
+    ok_msg('API reachable')
+
+    run! 'kubectl', 'wait', '--for=condition=Ready', 'nodes', '--all', '--timeout=180s'
+    ok_msg('all nodes Ready')
+    puts "\n\e[33mNext step: rake cluster:status\e[0m"
+  end
+
+  desc 'Stop the kind cluster container (RestartPolicy=no: it does not auto-restart)'
+  task :stop do
+    banner 'CLUSTER STOP'
+    probe = podman_probe
+    running = probe[:containers].select { |c| container_running?(c) }
+    if running.empty?
+      ok_msg('no kind cluster container is running')
+      next
+    end
+    running.each do |c|
+      info_msg("stopping #{c[:name]} via #{c[:connection]}...")
+      run! 'podman', '--connection', c[:connection], 'stop', c[:name]
+      ok_msg("#{c[:name]} stopped")
+    end
+    warn_msg('RestartPolicy=no: the cluster will NOT come back on host/WSL reboot - use rake cluster:start')
+  end
+
+  desc 'Tail the logs of the pod whose name contains <name> (args: cluster:logs[<substring>])'
+  task :logs, [:name] do |_t, args|
+    target = args[:name].to_s
+    abort "\e[31mUsage: rake cluster:logs[<pod-name-substring>]\e[0m" if target.empty?
+
+    pods_out, ok = capture('kubectl', 'get', 'pods', '-A', '--no-headers')
+    abort "\e[31mCannot list pods: #{pods_out.lines.first}\e[0m" unless ok
+
+    matches = pods_out.lines.filter_map do |line|
+      cols = line.split(/\s+/)
+      next nil if cols.size < 6
+
+      { name: cols[0], ns: cols[1] } if cols[0].include?(target)
+    end
+    case matches.size
+    when 0
+      abort "\e[31mNo pod matches '#{target}'. List them with: kubectl get pods -A\e[0m"
+    when 1
+      pod = matches.first
+      containers_out, c_ok = capture('kubectl', 'get', 'pod', '-n', pod[:ns], pod[:name],
+                                     '-o', 'jsonpath={.spec.containers[*].name}')
+      containers = c_ok ? containers_out.split : []
+      if containers.size > 1
+        abort "\e[31mPod #{pod[:ns]}/#{pod[:name]} has several containers (#{containers.join(', ')}).\n" \
+              "Run: kubectl logs -n #{pod[:ns]} #{pod[:name]} -c <container>\e[0m"
+      end
+      info_msg("logs: #{pod[:ns]}/#{pod[:name]} (Ctrl+C to stop)")
+      run! 'kubectl', 'logs', '-n', pod[:ns], pod[:name], '--tail=200', '-f'
+    else
+      err_msg("'#{target}' matches several pods:")
+      matches.each { |m| puts "      - #{m[:ns]}/#{m[:name]}" }
+      abort "\e[33mBe more specific: rake cluster:logs[<longer substring>]\e[0m"
+    end
+  end
+
+  desc 'Verify prerequisites, detect-or-create the kind cluster, namespaces, policies, platform profile'
+  task :setup do
+    banner 'CLUSTER SETUP'
+
+    # 1. Prerequisites
+    info_msg('checking prerequisites (kubectl, helm, podman, kind)...')
+    remedies = {
+      'kubectl' => 'Install kubectl and make sure it is on PATH.',
+      'helm'    => 'Install Helm and make sure it is on PATH.',
+      'podman'  => 'Install Podman (podman machine init && podman machine start on Windows/macOS).',
+      'kind'    => 'Install kind (https://kind.sigs.k8s.io/).'
+    }
+    { 'kubectl' => %w[version --client], 'helm' => %w[version --short],
+      'podman' => %w[version], 'kind' => %w[version] }.each do |tool, args|
+      _, ok = capture(tool, *args)
+      abort "\e[31mPre-flight failed: #{tool} is not available.\e[0m\n\e[33m#{remedies[tool]}\e[0m" unless ok
+    end
+    ok_msg('prerequisites verified')
+
+    # 2. Host persistence directories (kind extraMounts read them)
+    %w[data/control-plane data/worker-storage data/worker-compute].each do |dir|
+      mkdir_p dir
+      info_msg("directory #{dir}")
+    end
+
+    # 3. Detect or create the cluster
+    probe = podman_probe
+    if probe[:reachable].empty?
+      abort "\e[31mpodman machine is not running. Run: podman machine start, then rake cluster:setup\e[0m"
+    end
+    if probe[:containers].empty?
+      info_msg('no kind cluster found - creating it from infra/kind/cluster-config.yaml (podman provider)...')
+      ENV['KIND_EXPERIMENTAL_PROVIDER'] = 'podman'
+      begin
+        run! 'kind', 'create', 'cluster', '--config', 'infra/kind/cluster-config.yaml'
+      ensure
+        ENV.delete('KIND_EXPERIMENTAL_PROVIDER')
+      end
+      ok_msg('kind cluster created')
+    else
+      probe[:containers].each { |c| info_msg("reusing existing cluster container #{c[:name]} (#{c[:connection]})") }
+    end
+
+    # 4. Start (no-op when already running) and wait for API + nodes
+    Rake::Task['cluster:start'].invoke
+
+    # 5. Namespaces with domain/platform labels
+    info_msg('configuring namespaces...')
+    namespaces = {
+      'platform' => 'Infrastructure, catalogs, message broker, object storage',
+      'sales'    => 'Sales domain data products and pipelines',
+      'marketing'=> 'Marketing domain data products and funnels',
+      'finance'  => 'Finance domain data products and ledger',
+      'ops'      => 'Observability, orchestration, and business intelligence'
+    }
+    namespaces.each do |ns, ns_desc|
+      _, exists = capture('kubectl', 'get', 'namespace', ns)
+      if exists
+        run! 'kubectl', 'label', 'namespace', ns,
+             'data-mesh.io/domain=' + ns, 'data-platform.io/managed=true', '--overwrite'
+        info_msg("namespace #{ns} exists")
+      else
+        run! 'kubectl', 'create', 'namespace', ns
+        run! 'kubectl', 'label', 'namespace', ns,
+             'data-mesh.io/domain=' + ns, 'data-platform.io/managed=true',
+             'data-platform.io/description=' + ns_desc, '--overwrite'
+        ok_msg("namespace #{ns} created")
+      end
+    end
+
+    # 6. Kyverno governance policies (optional component: WARN, never abort)
+    if Dir.exist?('governance/policies')
+      _, applied = capture('kubectl', 'apply', '-f', 'governance/policies/')
+      if applied
+        ok_msg('governance admission policies applied')
+      else
+        warn_msg('could not apply governance/policies (Kyverno not installed?) - admission policies skipped')
+      end
+    end
+
+    # 7. Storage: default StorageClass + local-path-fast (WaitForFirstConsumer)
+    _, annotated = capture('kubectl', 'annotate', 'storageclass', 'standard',
+                           'storageclass.kubernetes.io/is-default-class=true', '--overwrite')
+    annotated ? ok_msg("storageclass 'standard' is the default") : warn_msg("could not annotate storageclass 'standard'")
+    _, sc_applied = capture('kubectl', 'apply', '-f', '-', stdin: <<~YAML)
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: local-path-fast
+      provisioner: rancher.io/local-path
+      volumeBindingMode: WaitForFirstConsumer
+      reclaimPolicy: Delete
+    YAML
+    sc_applied ? ok_msg("storageclass 'local-path-fast' present") : warn_msg("could not apply storageclass 'local-path-fast'")
+
+    # 8. Helm repositories (network-dependent: WARN, never abort)
+    {
+      'strimzi' => 'https://strimzi.io/charts/',
+      'minio' => 'https://charts.min.io/',
+      'trino' => 'https://trinodb.github.io/charts',
+      'dagster' => 'https://dagster-io.github.io/helm',
+      'prometheus-community' => 'https://prometheus-community.github.io/helm-charts',
+      'kyverno' => 'https://kyverno.github.io/kyverno/',
+      'spark-operator' => 'https://kubeflow.github.io/spark-operator'
+    }.each do |name, url|
+      _, ok = capture('helm', 'repo', 'add', name, url, '--force-update')
+      ok ? info_msg("helm repo #{name}") : warn_msg("could not reach helm repo '#{name}' (offline? local cache will be used)")
+    end
+    _, = capture('helm', 'repo', 'update')
+
+    # 9. Bootstrap the platform profile and report
+    Rake::Task['cluster:up'].invoke('platform')
+    puts
+    sh 'kubectl', 'get', 'pods', '-A' rescue nil
+    ok_msg('Cluster setup finished. Follow with: rake cluster:status')
+  end
+
+  desc "Deploy a startup profile with Helm (args: profile=platform|stream|batch|demo, default: stream)"
   task :up, [:profile] do |_t, args|
     profile = args[:profile] || 'stream'
-    sh 'bash scripts/profile-up.sh', profile
+    profile_file = File.join('infra', 'profiles', "#{profile}.yaml")
+    unless PROFILE_CHARTS.key?(profile) && File.exist?(profile_file)
+      abort "\e[31mUnknown profile: #{profile}. Choose from: #{PROFILE_CHARTS.keys.join(', ')}\e[0m"
+    end
+    _, helm_ok = capture('helm', 'version', '--short')
+    abort "\e[31mhelm is not installed or not on PATH.\e[0m" unless helm_ok
+
+    banner "ACTIVATING OPERATIONAL PROFILE: #{profile.upcase}"
+    charts = PROFILE_CHARTS.fetch(profile)
+    failures = 0
+    deployed = 0
+    tempfiles = []
+    begin
+      charts.each do |chart|
+        unless File.directory?(File.join('infra', 'helm', chart))
+          err_msg("MISSING: infra/helm/#{chart} not found")
+          failures += 1
+          next
+        end
+        info_msg("deploying Helm chart: #{chart}")
+        values = extract_profile_values(profile, chart)
+        if values == :error
+          err_msg("could not extract 'subsystems.#{chart}' from #{profile_file}")
+          failures += 1
+          next
+        end
+        if values.nil?
+          warn_msg("no '#{chart}' section in profile; installing with chart defaults")
+        else
+          tempfiles << values
+          info_msg("profile section -> -f #{values.path}")
+        end
+        if helm_upgrade(chart, values&.path)
+          ok_msg("#{chart}")
+          deployed += 1
+        else
+          err_msg("#{chart}")
+          failures += 1
+        end
+      end
+    ensure
+      tempfiles.each do |t|
+        t.unlink
+      rescue StandardError
+        nil
+      end
+    end
+    puts
+    if failures.positive?
+      abort "\e[31mProfile '#{profile}' FAILED: #{deployed} chart(s) deployed, #{failures} step(s) failed.\e[0m"
+    end
+    ok_msg("Profile '#{profile}' applied successfully! (#{deployed} chart(s) deployed)")
   end
 
-  desc 'Tear a startup profile down (args: profile=platform|stream|batch|demo) (bash)'
+  desc "Tear a startup profile down (args: profile=platform|stream|batch|demo, default: stream)"
   task :down, [:profile] do |_t, args|
     profile = args[:profile] || 'stream'
-    sh 'bash scripts/profile-down.sh', profile
+    unless PROFILE_CHARTS.key?(profile)
+      abort "\e[31mUnknown profile: #{profile}. Choose from: #{PROFILE_CHARTS.keys.join(', ')}\e[0m"
+    end
+    banner "DEACTIVATING OPERATIONAL PROFILE: #{profile.upcase}"
+    removed = 0
+    failures = 0
+    PROFILE_CHARTS.fetch(profile).each do |chart|
+      info_msg("removing Helm release: #{chart}")
+      _, ok = capture('helm', 'uninstall', chart, '-n', 'platform', *HELM_KUBE_ARGS)
+      if ok
+        ok_msg("#{chart} uninstalled")
+        removed += 1
+      else
+        warn_msg("#{chart} (maybe not installed)")
+        failures += 1
+      end
+    end
+    puts
+    if failures.positive?
+      abort "\e[31mProfile '#{profile}' finished with #{failures} failed/skipped step(s) (#{removed} release(s) removed).\e[0m"
+    end
+    ok_msg("Profile '#{profile}' removed successfully! (#{removed} release(s) uninstalled)")
   end
 end
 
 namespace :stream do
-  desc 'Deploy Kafka + Flink Operator + the speed-layer jobs via Helm (bash)'
+  desc 'Deploy Kafka + Flink Operator + the speed-layer jobs via Helm'
   task :deploy do
     puts "\e[33m[S4] Deploying Kafka + Flink Operator + Flink jobs...\e[0m"
-    sh 'bash scripts/profile-up.sh stream'
+    Rake::Task['cluster:up'].invoke('stream')
     puts "\e[32mStream tier deployed. Follow with `rake stream:status` and `rake stream:logs`.\e[0m"
   end
 
@@ -149,6 +662,40 @@ namespace :stream do
     puts "\e[33m[S4] Publishing events to Kafka for 60 s at 20 events/s...\e[0m"
     sh 'python data-generator/event_producer.py --bootstrap-servers localhost:9092 --rate 20 --duration 60'
   end
+end
+
+desc 'RF-24 end-to-end demo on the cluster: code verification -> demo profile -> events -> Flink -> Trino'
+task :demo do
+  puts '==> Verifying code (the only local step)'
+  %w[governance:validate lint typecheck test].each { |t| Rake::Task[t].invoke }
+
+  puts '==> Deploying the demo profile (all 8 subsystems) to the local kind cluster'
+  Rake::Task['cluster:up'].invoke('demo')
+
+  puts '==> Waiting for the Flink speed-layer jobs to be RUNNING'
+  sh 'kubectl wait --for=condition=ready pod -l app=flink-orders-stream -n sales --timeout=300s' rescue warn_msg('flink orders pod not ready yet')
+  sh 'kubectl get flinkdeployments -A'
+
+  puts '==> Publishing events into Kafka for 60 s'
+  Rake::Task['stream:produce'].invoke
+
+  puts '==> Waiting one window plus watermark before reading back'
+  sleep 15
+
+  puts '==> Querying the speed layer through Trino (batch + stream, RF-11)'
+  run! 'kubectl', 'run', 'trino-cli', '--rm', '-i', '--restart=Never', '--image=trinodb/trino:444',
+       '--command', '--', 'trino', '--server', 'http://trino.platform.svc.cluster.local:8080',
+       '--execute',
+       'SELECT status, count(*) AS windows, sum(window_orders) AS orders, sum(window_revenue) AS revenue FROM stream.sales.orders_windowed GROUP BY status ORDER BY status'
+
+  puts '==> Querying the unified serving view (RF-11)'
+  run! 'kubectl', 'run', 'trino-unified', '--rm', '-i', '--restart=Never', '--image=trinodb/trino:444',
+       '--command', '--', 'trino', '--server', 'http://trino.platform.svc.cluster.local:8080',
+       '--execute',
+       'SELECT order_date, status, total_orders, total_revenue, source_tier FROM iceberg.serving.sales_unified_revenue ORDER BY order_date DESC LIMIT 20'
+
+  puts
+  puts "\e[32mDemo finished. Stream logs: rake stream:logs\e[0m"
 end
 
 desc 'Clean local caches and temporary files (test fixtures, bytecode)'

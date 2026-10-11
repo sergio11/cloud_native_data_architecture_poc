@@ -23,42 +23,38 @@ spec:
     s3.secret-key: "{{ .Values.icebergCatalog.s3SecretKey }}"
   serviceAccount: flink-service-account
   jobManager:
+    podTemplate:
+      spec:
+        containers:
+          - name: flink-main-container
+            env:
+              - name: KAFKA_TOPIC
+                value: {{ .Values.flinkJobs.ordersStream.topic | quote }}
+              - name: KAFKA_GROUP_ID
+                value: {{ .Values.flinkJobs.ordersStream.kafkaGroupId | quote }}
+              - name: KAFKA_START_OFFSET
+                value: {{ .Values.flinkJobs.ordersStream.kafkaStartOffset | quote }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
     resource:
       memory: {{ .Values.flinkJobs.ordersStream.jobManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.ordersStream.jobManager.cpu }}
   taskManager:
+    podTemplate:
+      spec:
+        containers:
+          - name: flink-main-container
+            env:
+              - name: KAFKA_TOPIC
+                value: {{ .Values.flinkJobs.ordersStream.topic | quote }}
+              - name: KAFKA_GROUP_ID
+                value: {{ .Values.flinkJobs.ordersStream.kafkaGroupId | quote }}
+              - name: KAFKA_START_OFFSET
+                value: {{ .Values.flinkJobs.ordersStream.kafkaStartOffset | quote }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
     resource:
       memory: {{ .Values.flinkJobs.ordersStream.taskManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.ordersStream.taskManager.cpu }}
     replicas: {{ .Values.flinkJobs.ordersStream.taskManager.replicas }}
-  # The job fails closed when any of these is missing: without them it would
-  # silently fall back to localhost and write nothing.
-  env:
-    - name: KAFKA_BOOTSTRAP_SERVERS
-      value: {{ .Values.kafka.bootstrapServers | quote }}
-    - name: KAFKA_TOPIC
-      value: {{ .Values.flinkJobs.ordersStream.topic | quote }}
-    - name: KAFKA_GROUP_ID
-      value: {{ .Values.flinkJobs.ordersStream.kafkaGroupId | quote }}
-    - name: KAFKA_START_OFFSET
-      value: {{ .Values.flinkJobs.ordersStream.kafkaStartOffset | quote }}
-    - name: ICEBERG_CATALOG_NAME
-      value: {{ .Values.icebergCatalog.name | quote }}
-    - name: ICEBERG_CATALOG_URI
-      value: {{ .Values.icebergCatalog.uri | quote }}
-    - name: ICEBERG_WAREHOUSE
-      value: {{ .Values.icebergCatalog.warehouse | quote }}
-    - name: S3_ENDPOINT
-      value: {{ .Values.icebergCatalog.s3Endpoint | quote }}
-    - name: S3_ACCESS_KEY
-      value: {{ .Values.icebergCatalog.s3AccessKey | quote }}
-    - name: S3_SECRET_KEY
-      value: {{ .Values.icebergCatalog.s3SecretKey | quote }}
-    # OAuth2 credential for Polaris 1.x REST catalog authentication.
-    # Format "client_id:client_secret" must match polaris.clientId/clientSecret
-    # in s2-lakehouse/values.yaml and POLARIS_BOOTSTRAP_CREDENTIALS.
-    - name: POLARIS_OAUTH2_CREDENTIAL
-      value: {{ .Values.icebergCatalog.oauth2Credential | quote }}
   job:
     jarURI: "local:///opt/flink/opt/flink-python-1.18.1.jar"
     entryClass: "org.apache.flink.client.python.PythonDriver"
@@ -91,37 +87,38 @@ spec:
     s3.secret-key: "{{ .Values.icebergCatalog.s3SecretKey }}"
   serviceAccount: flink-service-account
   jobManager:
+    podTemplate:
+      spec:
+        containers:
+          - name: flink-main-container
+            env:
+              - name: KAFKA_CLICKSTREAM_TOPIC
+                value: {{ .Values.flinkJobs.clickstreamStream.topic | quote }}
+              - name: KAFKA_CLICKSTREAM_GROUP_ID
+                value: {{ .Values.flinkJobs.clickstreamStream.kafkaGroupId | quote }}
+              - name: KAFKA_START_OFFSET
+                value: {{ .Values.flinkJobs.clickstreamStream.kafkaStartOffset | quote }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
     resource:
       memory: {{ .Values.flinkJobs.clickstreamStream.jobManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.clickstreamStream.jobManager.cpu }}
   taskManager:
+    podTemplate:
+      spec:
+        containers:
+          - name: flink-main-container
+            env:
+              - name: KAFKA_CLICKSTREAM_TOPIC
+                value: {{ .Values.flinkJobs.clickstreamStream.topic | quote }}
+              - name: KAFKA_CLICKSTREAM_GROUP_ID
+                value: {{ .Values.flinkJobs.clickstreamStream.kafkaGroupId | quote }}
+              - name: KAFKA_START_OFFSET
+                value: {{ .Values.flinkJobs.clickstreamStream.kafkaStartOffset | quote }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
     resource:
       memory: {{ .Values.flinkJobs.clickstreamStream.taskManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.clickstreamStream.taskManager.cpu }}
     replicas: {{ .Values.flinkJobs.clickstreamStream.taskManager.replicas }}
-  env:
-    - name: KAFKA_BOOTSTRAP_SERVERS
-      value: {{ .Values.kafka.bootstrapServers | quote }}
-    - name: KAFKA_CLICKSTREAM_TOPIC
-      value: {{ .Values.flinkJobs.clickstreamStream.topic | quote }}
-    - name: KAFKA_CLICKSTREAM_GROUP_ID
-      value: {{ .Values.flinkJobs.clickstreamStream.kafkaGroupId | quote }}
-    - name: KAFKA_START_OFFSET
-      value: {{ .Values.flinkJobs.clickstreamStream.kafkaStartOffset | quote }}
-    - name: ICEBERG_CATALOG_NAME
-      value: {{ .Values.icebergCatalog.name | quote }}
-    - name: ICEBERG_CATALOG_URI
-      value: {{ .Values.icebergCatalog.uri | quote }}
-    - name: ICEBERG_WAREHOUSE
-      value: {{ .Values.icebergCatalog.warehouse | quote }}
-    - name: S3_ENDPOINT
-      value: {{ .Values.icebergCatalog.s3Endpoint | quote }}
-    - name: S3_ACCESS_KEY
-      value: {{ .Values.icebergCatalog.s3AccessKey | quote }}
-    - name: S3_SECRET_KEY
-      value: {{ .Values.icebergCatalog.s3SecretKey | quote }}
-    - name: POLARIS_OAUTH2_CREDENTIAL
-      value: {{ .Values.icebergCatalog.oauth2Credential | quote }}
   job:
     jarURI: "local:///opt/flink/opt/flink-python-1.18.1.jar"
     entryClass: "org.apache.flink.client.python.PythonDriver"

@@ -15,6 +15,10 @@ spec:
       targetPort: 8181
       nodePort: {{ .Values.polaris.service.nodePort }}
       protocol: TCP
+    - name: management
+      port: 8182
+      targetPort: 8182
+      protocol: TCP
   selector:
     app: polaris
 {{- end }}

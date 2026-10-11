@@ -75,13 +75,30 @@ polaris:
   replicaCount: 1
   image:
     repository: apache/polaris
-    tag: "latest"
+    # Pinned (RNF-09). "latest" silently moved to 1.8.0 and 2.x will break the
+    # configuration below, which is written against the 1.8 Quarkus runtime.
+    tag: "1.8.0"
     pullPolicy: IfNotPresent
 
   service:
     type: NodePort
     port: 8181
     nodePort: 31818
+
+  # Realm and fixed root credentials handed to Polaris via
+  # POLARIS_BOOTSTRAP_CREDENTIALS. Without them Polaris generates a random pair
+  # on every boot, so Trino, Flink and Spark can never be pointed at it. These
+  # same values must be given to every Iceberg REST client.
+  realm: "POLARIS"
+  clientId: "poc-admin"
+  clientSecret: "poc-admin-secret"
+
+  # Durable catalog metadata. Without it the catalog is wiped on every Polaris
+  # restart and the Iceberg tables in MinIO become invisible to every engine.
+  persistence:
+    username: "postgres"
+    password: "oltp_password_secret"
+    jdbcUrl: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp"
 
   config:
     realm: "default-realm"
@@ -94,11 +111,14 @@ polaris:
 
   resources:
     requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 600m
+      cpu: 200m
+      # Quarkus runs with -XX:MaxRAMPercentage=80 + ExitOnOutOfMemoryError, so
+      # the limit IS the heap budget. At 512Mi the JVM spends its time in GC
+      # and the first boot against the JDBC metastore never reaches ready.
       memory: 512Mi
+    limits:
+      cpu: 800m
+      memory: 1024Mi
 
   # Empty by default so single-node clusters schedule anywhere; pin to
   # storage nodes in multi-node setups, e.g.

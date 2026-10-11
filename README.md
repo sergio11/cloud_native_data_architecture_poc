@@ -57,19 +57,38 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 > (which now ships only VIEW 1 — former views 2–3 were removed because no
 > pipeline produces their source tables); `infra/profiles/*.yaml` are consumed
 > via `scripts/profile-up.sh <profile>` (Helm `-f`).
+>
+> **Polaris configuration (S2).** `realm` is `POLARIS` (the default realm the
+> server attends), `clientId`/`clientSecret` are fixed (`poc-admin` /
+> `poc-admin-secret`) and injected via `POLARIS_BOOTSTRAP_CREDENTIALS`. The
+> metastore is in-memory (the JDBC alternative caused >15 min boot on this 6 GB
+> cluster); the `polaris-catalog-bootstrap` Job re-creates the catalog
+> idempotently after every Polaris restart. The former `polaris-configmap.yaml`
+> (Polaris ≤1.0 YAML format, never mounted) has been retired.
+>
+> **Trino catalog (S5).** Three identical Polaris catalog definitions (`iceberg`,
+> `gold`, `stream`) have been consolidated into **one catalog `iceberg`**.
+> `unified_view.sql` and all view references now use `iceberg.<namespace>.<table>`
+> (`iceberg.sales.daily_metrics`, `iceberg.sales.orders_windowed`). OAuth2 is
+> configured (`iceberg.rest-catalog.security=OAUTH2`) as required by Polaris 1.x.
+> `s3.region` is set to `us-east-1` (required by the Trino native S3 client even
+> for MinIO). JVM heap is 896 M (was 1024 M — dangerously close to the 1280 Mi
+> container limit with `ExitOnOutOfMemoryError`).
+>
 > **Stream layer (S4) — read this before trusting any "it runs" claim.**
 > `pipelines/stream/flink_orders_stream.py` and `flink_clickstream_stream.py`
 > are real Apache Flink jobs (`FlinkDeployment` + PyFlink `PythonDriver`, Iceberg
 > sink over a Polaris REST catalog, Parquet on MinIO). They have **no CLI, no
 > `argparse`, and no fallback**: missing PyFlink, a missing env var or a missing
-> broker makes the job fail instead of silently computing something else. There
-> is no simulated streaming anywhere in the repo any more.
+> broker makes the job fail instead of silently computing something else. OAuth2
+> credentials (`POLARIS_OAUTH2_CREDENTIAL`) are now injected via the
+> `FlinkDeployment` env section and read by `JobConfig.from_env()`.
 >
 > **They have still never been run in a cluster.** The image has not been built
 > here and the jobs have not been submitted, so neither the connector jars nor
 > the Polaris write path nor the RF-09 latency are verified. Until
 > `rake stream:deploy` → `rake stream:produce` → `rake stream:logs` shows a
-> `RUNNING` job with rows in `stream.sales.orders_windowed`, treat S4 as
+> `RUNNING` job with rows in `iceberg.sales.orders_windowed`, treat S4 as
 > *written but unverified*.
 >
 > - `pipelines/serving/catalog_registration.py` requires `POLARIS_URL` /
@@ -82,6 +101,7 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 >   local task.
 >
 > The K8s profile still has no in-cluster verification in this environment.
+
 
 ### Known limitations
 

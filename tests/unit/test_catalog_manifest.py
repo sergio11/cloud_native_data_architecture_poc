@@ -366,17 +366,63 @@ def test_registry_identifiers_match_pipeline_reality() -> None:
 
 
 def test_registry_matches_unified_view_selects() -> None:
+    """Verify unified_view.sql reads the registered gold/stream tables.
+
+    Catalog consolidation (2026-10-11): the SQL no longer uses the Trino
+    multi-catalog format "gold.sales.X" / "stream.sales.X". All tables are
+    now accessed via a single Trino catalog "iceberg":
+        iceberg.sales.daily_metrics    ← was gold.sales.daily_metrics
+        iceberg.sales.orders_windowed  ← was stream.sales.orders_windowed
+
+    The logical registry names still use the tier prefix ("gold.", "stream."),
+    so we map iceberg references back:
+        iceberg.sales.daily_metrics  → gold.sales.daily_metrics   (in GOLD_TABLES)
+        iceberg.sales.orders_windowed → stream.sales.orders_windowed (in STREAM_TABLES)
+    """
     sql = (REPO_ROOT / "pipelines" / "serving" / "unified_view.sql").read_text(encoding="utf-8")
-    referenced = {
+
+    # Extract all 3-part table references from FROM/JOIN clauses (strip comments first).
+    sql_no_comments = re.sub(r"--[^\n]*", "", sql)
+    raw_refs = {
         ".".join(parts)
-        for parts in re.findall(r"\b(?:FROM|JOIN)\s+(gold|stream)\.(\w+)\.(\w+)", sql, flags=re.IGNORECASE)
+        for parts in re.findall(
+            r"\b(?:FROM|JOIN)\s+(\w+)\.(\w+)\.(\w+)",
+            sql_no_comments,
+            flags=re.IGNORECASE,
+        )
     }
-    registered = {t["logical"] for t in GOLD_TABLES + STREAM_TABLES}
-    assert referenced, "unified_view.sql must read gold/stream tables"
-    assert referenced <= registered, (
-        f"unified_view.sql reads {sorted(referenced - registered)} which are not registered"
+
+    # Only keep iceberg.* references (the single catalog used after consolidation).
+    iceberg_refs = {r for r in raw_refs if r.startswith("iceberg.")}
+    assert iceberg_refs, (
+        "unified_view.sql must read at least one iceberg.<namespace>.<table> "
+        "reference. Got raw_refs=" + str(raw_refs)
     )
-    assert "stream.sales.orders_windowed" in referenced
+
+    # Map iceberg.sales.orders_windowed → stream.sales.orders_windowed etc.
+    # The rule: if a table name appears in STREAM_TABLES registry → prepend "stream.",
+    # otherwise → prepend "gold.".
+    stream_names = {t["name"] for t in STREAM_TABLES}
+    gold_names = {t["name"] for t in GOLD_TABLES}
+
+    def _logical(iceberg_ref: str) -> str:
+        _, namespace, name = iceberg_ref.split(".")
+        if name in stream_names:
+            return f"stream.{namespace}.{name}"
+        if name in gold_names:
+            return f"gold.{namespace}.{name}"
+        return iceberg_ref  # unknown — will fail the subset check below
+
+    logical_refs = {_logical(r) for r in iceberg_refs}
+    registered = {t["logical"] for t in GOLD_TABLES + STREAM_TABLES}
+
+    assert logical_refs <= registered, (
+        f"unified_view.sql reads {sorted(logical_refs - registered)} "
+        f"which are not in the registered table registry"
+    )
+    assert "stream.sales.orders_windowed" in logical_refs, (
+        "unified_view.sql must join the speed-layer table orders_windowed"
+    )
 
 
 def test_gold_customers_schema_matches_aggregate_gold() -> None:

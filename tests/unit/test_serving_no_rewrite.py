@@ -219,8 +219,10 @@ def test_trino_artifacts_declare_pass_through_live_views() -> None:
         assert view in unified
         assert view in configmap
     # Trino twins are pure pass-through over the versioned sources.
-    assert "SELECT * FROM gold.sales.daily_metrics;" in unified
-    assert "SELECT * FROM stream.sales.orders_windowed;" in unified
+    # Catalog consolidation (2026-10-11): single "iceberg" catalog replaces
+    # deprecated "gold" and "stream" Trino catalog names.
+    assert "SELECT * FROM iceberg.sales.daily_metrics;" in unified
+    assert "SELECT * FROM iceberg.sales.orders_windowed;" in unified
     # VIEW 1 (RF-11) keeps its semantics: same anti-join on the same keys.
     assert "WHERE NOT EXISTS (" in unified
     assert "b.order_date = s.order_date" in unified

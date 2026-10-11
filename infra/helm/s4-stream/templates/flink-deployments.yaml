@@ -54,6 +54,11 @@ spec:
       value: {{ .Values.icebergCatalog.s3AccessKey | quote }}
     - name: S3_SECRET_KEY
       value: {{ .Values.icebergCatalog.s3SecretKey | quote }}
+    # OAuth2 credential for Polaris 1.x REST catalog authentication.
+    # Format "client_id:client_secret" must match polaris.clientId/clientSecret
+    # in s2-lakehouse/values.yaml and POLARIS_BOOTSTRAP_CREDENTIALS.
+    - name: POLARIS_OAUTH2_CREDENTIAL
+      value: {{ .Values.icebergCatalog.oauth2Credential | quote }}
   job:
     jarURI: "local:///opt/flink/opt/flink-python-1.18.1.jar"
     entryClass: "org.apache.flink.client.python.PythonDriver"
@@ -115,6 +120,8 @@ spec:
       value: {{ .Values.icebergCatalog.s3AccessKey | quote }}
     - name: S3_SECRET_KEY
       value: {{ .Values.icebergCatalog.s3SecretKey | quote }}
+    - name: POLARIS_OAUTH2_CREDENTIAL
+      value: {{ .Values.icebergCatalog.oauth2Credential | quote }}
   job:
     jarURI: "local:///opt/flink/opt/flink-python-1.18.1.jar"
     entryClass: "org.apache.flink.client.python.PythonDriver"

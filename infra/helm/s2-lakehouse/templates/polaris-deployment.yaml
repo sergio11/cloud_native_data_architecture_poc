@@ -42,9 +42,29 @@ spec:
             - name: rest-api
               containerPort: 8181
               protocol: TCP
+            # Quarkus management interface: this is where /q/health lives.
+            # The catalog API on 8181 requires authentication and is the wrong
+            # target for a kubelet probe.
+            - name: management
+              containerPort: 8182
+              protocol: TCP
           env:
-            - name: POLARIS_CONFIG
-              value: /app/config/polaris-server.yml
+            # In-memory metastore. The relational-jdbc alternative needs a first
+            # boot that maps the Hibernate schema, which on this 6 GB cluster
+            # takes longer than any probe budget we can afford: Polaris never
+            # reached ready in 15 minutes. The trade-off is that the CATALOG is
+            # rebuilt on every Polaris restart; the Iceberg tables themselves
+            # live in MinIO and survive. `polaris-bootstrap-job.yaml` re-creates
+            # the catalog idempotently, so a restart is recoverable.
+            #
+            # Fixed root credentials. Without these Polaris generates a random
+            # pair on every boot and only prints it to stdout, so no Iceberg
+            # client could ever be pointed at it. Format per
+            # RootCredentialsSet.fromString() is "realm,clientId,clientSecret"
+            # with ";" between realms. Anything else fails fast with
+            # "Invalid credentials format" and the server exits.
+            - name: POLARIS_BOOTSTRAP_CREDENTIALS
+              value: "{{ .Values.polaris.realm }},{{ .Values.polaris.clientId }},{{ .Values.polaris.clientSecret }}"
             - name: AWS_ACCESS_KEY_ID
               value: {{ .Values.polaris.config.accessKey | quote }}
             - name: AWS_SECRET_ACCESS_KEY
@@ -53,23 +73,30 @@ spec:
               value: {{ .Values.polaris.config.awsRegion | quote }}
           resources:
             {{- toYaml .Values.polaris.resources | nindent 12 }}
-          volumeMounts:
-            - name: config
-              mountPath: /app/config
+          # Polaris 1.8 takes ~80 s to boot on the in-memory metastore and
+          # several minutes on the first JDBC-mapped start (Hibernate schema
+          # creation). With initialDelay 20 s and the default failureThreshold
+          # of 3, the old liveness probe killed it at ~80 s, every time, before
+          # it could serve a single request: 105 restarts and a permanent
+          # CrashLoopBackOff. A startupProbe suspends liveness and readiness
+          # until the server is genuinely up, which is the only correct way to
+          # express a slow boot. Budget: 5 s x 120 = 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8182
+            periodSeconds: 5
+            failureThreshold: 120
           readinessProbe:
             httpGet:
-              path: /api/catalog/v1/config
-              port: 8181
-            initialDelaySeconds: 10
+              path: /q/health/ready
+              port: 8182
             periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /api/catalog/v1/config
-              port: 8181
-            initialDelaySeconds: 20
+              path: /q/health/live
+              port: 8182
             periodSeconds: 20
-      volumes:
-        - name: config
-          configMap:
-            name: polaris-config
+            failureThreshold: 6
 {{- end }}

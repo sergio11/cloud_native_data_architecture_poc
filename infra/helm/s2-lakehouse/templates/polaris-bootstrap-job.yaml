@@ -1,0 +1,165 @@
+{{- if .Values.polaris.enabled }}
+# =============================================================================
+# polaris-bootstrap-job.yaml
+#
+# Idempotent Polaris catalog bootstrap. Runs after every Polaris restart.
+#
+# Problem: Polaris 1.8 with the in-memory metastore loses all catalog state on
+# restart. The Iceberg table *files* survive in MinIO but the catalog entries
+# (namespace "sales" + table "orders_windowed") disappear, making every engine
+# blind to them. This Job re-creates the catalog after each boot.
+#
+# Design:
+#   1. Wait for Polaris management port /q/health/ready (same target as the
+#      startupProbe — guarantees the server accepted its credentials).
+#   2. Obtain an OAuth2 token from the Polaris token endpoint using the fixed
+#      root credentials from values.yaml (realm POLARIS, client_id poc-admin).
+#   3. Create the catalog "polaris" pointing at MinIO if it does not already
+#      exist (idempotent: HTTP 409 Conflict is treated as success).
+#   4. Create the "sales" and "marketing" namespaces inside the catalog
+#      (idempotent: 409 is treated as success).
+#
+# The Job runs with restartPolicy: OnFailure and backoffLimit: 20 so that
+# transient Polaris boot delays do not leave the catalog unpopulated.
+#
+# Credentials are read from values.yaml (polaris.realm / clientId / clientSecret)
+# and must match POLARIS_BOOTSTRAP_CREDENTIALS set in polaris-deployment.yaml.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-catalog-bootstrap
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: polaris-catalog-bootstrap
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+  annotations:
+    # Unique suffix forces a new Job on every Helm upgrade so the catalog
+    # is always re-created after a Polaris restart during a redeploy.
+    helm.sh/hook-weight: "10"
+spec:
+  # Keep completed pods for 10 minutes so logs are readable after success.
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 20
+  template:
+    metadata:
+      labels:
+        app: polaris-catalog-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # Step 1: wait until Polaris is genuinely healthy (not just port-open).
+        # Uses the management port 8182 which serves /q/health/ready without
+        # authentication (same endpoint as the startupProbe).
+        - name: wait-for-polaris
+          image: curlimages/curl:8.9.1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Polaris management port /q/health/ready..."
+              until curl -sf http://polaris.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local:8182/q/health/ready; do
+                echo "Polaris not ready yet, retrying in 5s..."
+                sleep 5
+              done
+              echo "Polaris is ready."
+      containers:
+        - name: catalog-init
+          image: curlimages/curl:8.9.1
+          env:
+            - name: POLARIS_BASE_URL
+              value: "http://polaris.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local:8181"
+            - name: POLARIS_REALM
+              value: {{ .Values.polaris.realm | quote }}
+            - name: POLARIS_CLIENT_ID
+              value: {{ .Values.polaris.clientId | quote }}
+            - name: POLARIS_CLIENT_SECRET
+              value: {{ .Values.polaris.clientSecret | quote }}
+            - name: CATALOG_NAME
+              value: {{ .Values.polaris.config.defaultCatalog | quote }}
+            - name: WAREHOUSE_LOCATION
+              value: {{ .Values.polaris.config.warehouseLocation | quote }}
+            - name: S3_ENDPOINT
+              value: {{ .Values.polaris.config.s3Endpoint | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.polaris.config.awsRegion | quote }}
+          command:
+            - /bin/sh
+            - -ce
+            - |
+              echo "=== Polaris Catalog Bootstrap ==="
+              echo "Realm: ${POLARIS_REALM}  Catalog: ${CATALOG_NAME}"
+
+              # -----------------------------------------------------------------
+              # Step 2: obtain an OAuth2 bearer token
+              # Endpoint: /api/catalog/v1/oauth/tokens
+              # Polaris 1.8 management API requires a token even for admin calls.
+              # -----------------------------------------------------------------
+              TOKEN=$(curl -sf \
+                -X POST "${POLARIS_BASE_URL}/api/catalog/v1/oauth/tokens" \
+                -H "Content-Type: application/x-www-form-urlencoded" \
+                -d "grant_type=client_credentials&client_id=${POLARIS_CLIENT_ID}&client_secret=${POLARIS_CLIENT_SECRET}&scope=PRINCIPAL_ROLE:ALL" \
+                | grep -o '"access_token":"[^"]*"' \
+                | sed 's/"access_token":"//;s/"$//')
+
+              if [ -z "${TOKEN}" ]; then
+                echo "ERROR: failed to obtain OAuth2 token from Polaris."
+                exit 1
+              fi
+              echo "Token obtained."
+
+              AUTH="Authorization: Bearer ${TOKEN}"
+
+              # -----------------------------------------------------------------
+              # Step 3: create the catalog (idempotent — 409 = already exists)
+              # Management API endpoint: /api/management/v1/catalogs
+              # -----------------------------------------------------------------
+              echo "Creating catalog '${CATALOG_NAME}'..."
+              STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+                -X POST "${POLARIS_BASE_URL}/api/management/v1/catalogs" \
+                -H "${AUTH}" \
+                -H "Content-Type: application/json" \
+                -d "{
+                  \"name\": \"${CATALOG_NAME}\",
+                  \"type\": \"INTERNAL\",
+                  \"properties\": {
+                    \"default-base-location\": \"${WAREHOUSE_LOCATION}\"
+                  },
+                  \"storageConfigInfo\": {
+                    \"storageType\": \"S3\",
+                    \"allowedLocations\": [\"${WAREHOUSE_LOCATION}\"],
+                    \"s3.endpoint\": \"${S3_ENDPOINT}\",
+                    \"s3.region\": \"${AWS_REGION}\",
+                    \"s3.path-style-access\": \"true\"
+                  }
+                }")
+
+              if [ "${STATUS}" = "201" ] || [ "${STATUS}" = "409" ]; then
+                echo "Catalog '${CATALOG_NAME}' ready (HTTP ${STATUS})."
+              else
+                echo "ERROR: catalog creation returned HTTP ${STATUS}."
+                exit 1
+              fi
+
+              # -----------------------------------------------------------------
+              # Step 4: create namespaces inside the catalog (idempotent)
+              # Catalog API endpoint: /api/catalog/v1/{catalog}/namespaces
+              # -----------------------------------------------------------------
+              for NS in sales marketing finance; do
+                echo "Creating namespace '${NS}' in catalog '${CATALOG_NAME}'..."
+                NS_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+                  -X POST "${POLARIS_BASE_URL}/api/catalog/v1/${CATALOG_NAME}/namespaces" \
+                  -H "${AUTH}" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"namespace\": [\"${NS}\"]}")
+
+                if [ "${NS_STATUS}" = "200" ] || [ "${NS_STATUS}" = "409" ]; then
+                  echo "Namespace '${NS}' ready (HTTP ${NS_STATUS})."
+                else
+                  echo "ERROR: namespace '${NS}' creation returned HTTP ${NS_STATUS}."
+                  exit 1
+                fi
+              done
+
+              echo "=== Polaris catalog bootstrap complete ==="
+{{- end }}

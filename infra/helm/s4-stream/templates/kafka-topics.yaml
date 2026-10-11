@@ -22,8 +22,13 @@ spec:
             - /bin/sh
             - -c
             - |
-              echo "Waiting for Kafka broker on port 9092..."
+              echo "Waiting for Kafka broker on port 9092 (timeout 300s)..."
+              DEADLINE=$(($(date +%s) + 300))
               until nc -z -w 2 kafka.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local 9092; do
+                if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+                  echo "ERROR: Kafka did not become reachable within 300 seconds."
+                  exit 1
+                fi
                 sleep 2
               done
               echo "Kafka is reachable."

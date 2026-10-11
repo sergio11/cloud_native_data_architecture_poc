@@ -16,16 +16,20 @@ metadata:
     {{- include "s5-serving.labels" . | nindent 4 }}
 data:
   unified_view.sql: |
+    -- Catalog consolidation (2026-10-11): three Trino catalogs collapsed into
+    -- ONE catalog "iceberg". References formerly in "gold." and "stream." Trino
+    -- catalogs are now in "iceberg.sales.*" and "iceberg.sales.*" namespaces.
     CREATE SCHEMA IF NOT EXISTS iceberg.serving;
     CREATE SCHEMA IF NOT EXISTS iceberg.sales;
+    CREATE SCHEMA IF NOT EXISTS iceberg.stream;
     CREATE SCHEMA IF NOT EXISTS iceberg.marketing;
     CREATE SCHEMA IF NOT EXISTS iceberg.finance;
 
     CREATE OR REPLACE VIEW iceberg.serving.gold_sales_daily_metrics_live AS
-    SELECT * FROM gold.sales.daily_metrics;
+    SELECT * FROM iceberg.sales.daily_metrics;
 
     CREATE OR REPLACE VIEW iceberg.serving.stream_sales_orders_windowed_live AS
-    SELECT * FROM stream.sales.orders_windowed;
+    SELECT * FROM iceberg.sales.orders_windowed;
 
     CREATE OR REPLACE VIEW iceberg.serving.sales_unified_revenue AS
     SELECT
@@ -43,7 +47,7 @@ data:
             gross_revenue                                AS total_revenue,
             average_order_value                          AS avg_order_value,
             'batch_historical'                           AS source_tier
-        FROM gold.sales.daily_metrics
+        FROM iceberg.sales.daily_metrics
         UNION ALL
         SELECT
             s.order_date                                 AS order_date,
@@ -54,10 +58,10 @@ data:
                 / NULLIF(SUM(CAST(s.window_orders AS BIGINT)), 0)
                                                          AS avg_order_value,
             'stream_speed'                               AS source_tier
-        FROM stream.sales.orders_windowed s
+        FROM iceberg.sales.orders_windowed s
         WHERE NOT EXISTS (
             SELECT 1
-            FROM gold.sales.daily_metrics b
+            FROM iceberg.sales.daily_metrics b
             WHERE b.order_date = s.order_date
               AND b.status = s.status
         )
@@ -65,3 +69,4 @@ data:
     ) unified
     ORDER BY order_date DESC, status DESC;
 {{- end }}
+

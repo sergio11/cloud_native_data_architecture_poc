@@ -1,33 +1,16 @@
-{{- if .Values.polaris.enabled }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: polaris-config
-  namespace: {{ .Values.global.namespace | default "platform" }}
-  labels:
-    app: polaris
-    {{- include "s2-lakehouse.labels" . | nindent 4 }}
-data:
-  polaris-server.yml: |
-    server:
-      type: simple
-      applicationContextPath: /
-      connector:
-        type: http
-        port: 8181
-        bindHost: 0.0.0.0
-    metaStoreManager:
-      type: in-memory
-    defaultRealm: {{ .Values.polaris.config.realm | quote }}
-    aws:
-      endpoint: {{ .Values.polaris.config.s3Endpoint | quote }}
-      region: {{ .Values.polaris.config.awsRegion | quote }}
-      pathStyleAccess: true
-      credentials:
-        accessKeyId: {{ .Values.polaris.config.accessKey | quote }}
-        secretAccessKey: {{ .Values.polaris.config.secretKey | quote }}
-    catalogs:
-      - name: {{ .Values.polaris.config.defaultCatalog | quote }}
-        type: internal
-        defaultBaseLocation: {{ .Values.polaris.config.warehouseLocation | quote }}
-{{- end }}
+{{/*
+  polaris-configmap.yaml — RETIRED 2026-10-11
+
+  This ConfigMap used the Polaris ≤1.0 YAML server configuration format.
+  Polaris 1.8 (Quarkus runtime) reads ALL configuration through environment
+  variables and Java system properties — it does not read a mounted YAML file.
+  The deployment never had a volumeMount for this ConfigMap, so it was always
+  dead code.
+
+  The ConfigMap is intentionally not rendered (no `kind: ConfigMap` block).
+  The deployment declares no volumes. All Polaris configuration lives in
+  the env section of polaris-deployment.yaml, driven by s2-lakehouse/values.yaml.
+
+  Do NOT re-introduce file-based config without first verifying that the target
+  Polaris version actually reads it (check upstream docs for the `quarkus` profile).
+*/}}

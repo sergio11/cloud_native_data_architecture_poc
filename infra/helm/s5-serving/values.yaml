@@ -28,7 +28,10 @@ trino:
       memory: 1280Mi
 
   jvm:
-    maxHeapSize: "1024M"
+    # Heap deliberately set below the 1280Mi container limit:
+    # 1024M left only 256MiB for metaspace + direct memory (OOM risk).
+    # 896M gives ~384MiB headroom — safe with ExitOnOutOfMemoryError.
+    maxHeapSize: "896M"
     gc: "-XX:+UseG1GC"
 
   # Empty by default so single-node clusters schedule anywhere (multi-node:
@@ -43,9 +46,15 @@ catalogs:
     enabled: true
     restCatalogUri: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
     s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
+    # s3.region is required by the Trino native S3 client even for MinIO.
+    s3Region: "us-east-1"
     s3AccessKey: "minioadmin"
     s3SecretKey: "minioadmin"
     s3PathStyleAccess: true
+    # OAuth2 credential for Polaris 1.x REST catalog authentication.
+    # Format: "client_id:client_secret" — must match polaris.clientId / clientSecret
+    # in s2-lakehouse/values.yaml and POLARIS_BOOTSTRAP_CREDENTIALS.
+    oauth2Credential: "poc-admin:poc-admin-secret"
 
   kafka:
     enabled: true

@@ -96,6 +96,10 @@ class JobConfig:
     s3_endpoint: str
     s3_access_key: str
     s3_secret_key: str
+    # OAuth2 credential for Polaris 1.x REST catalog.
+    # Format: "client_id:client_secret". Injected via POLARIS_OAUTH2_CREDENTIAL
+    # env var in the FlinkDeployment (s4-stream/templates/flink-deployments.yaml).
+    oauth2_credential: str
 
     @classmethod
     def from_env(cls) -> JobConfig:
@@ -119,6 +123,7 @@ class JobConfig:
             s3_endpoint=_required("S3_ENDPOINT"),
             s3_access_key=_required("S3_ACCESS_KEY"),
             s3_secret_key=_required("S3_SECRET_KEY"),
+            oauth2_credential=_required("POLARIS_OAUTH2_CREDENTIAL"),
         )
 
 
@@ -283,11 +288,18 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
             'type' = 'iceberg',
             'catalog-type' = 'rest',
             'uri' = '{config.catalog_uri}',
-'warehouse' = '{config.warehouse}',
+            'warehouse' = '{config.warehouse}',
             's3.endpoint' = '{config.s3_endpoint}',
             's3.access-key' = '{config.s3_access_key}',
             's3.secret-key' = '{config.s3_secret_key}',
-            's3.path-style-access' = 'true'
+            's3.path-style-access' = 'true',
+            's3.region' = 'us-east-1',
+            -- OAuth2 required by Polaris 1.x REST catalog.
+            -- Without these the catalog registration call returns 401 and
+            -- no Iceberg table is reachable from this job.
+            'credential' = '{config.oauth2_credential}',
+            'scope' = 'PRINCIPAL_ROLE:ALL',
+            'token-refresh-enabled' = 'true'
         )
         """
     )

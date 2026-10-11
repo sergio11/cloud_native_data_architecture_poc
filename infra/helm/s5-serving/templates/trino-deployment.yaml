@@ -68,10 +68,6 @@ spec:
             items:
               - key: iceberg.properties
                 path: iceberg.properties
-              - key: gold.properties
-                path: gold.properties
-              - key: stream.properties
-                path: stream.properties
               - key: kafka.properties
                 path: kafka.properties
         - name: data

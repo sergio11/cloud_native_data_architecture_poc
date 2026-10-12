@@ -42,16 +42,28 @@ spec:
               value: "true"
           resources:
             {{- toYaml .Values.flinkOperator.resources | nindent 12 }}
+          # The operator is a JVM that needs well over a minute to bind 8085 on
+          # a 4-CPU node. Without a startupProbe the livenessProbe fires while it
+          # is still booting and kubelet SIGTERMs it (exit 143) before it ever
+          # becomes healthy, so it restarts forever. The startupProbe suspends
+          # both probes until the JVM answers, which is the only place a Java
+          # cold start can be given real time.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8085
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /readyz
               port: 8085
-            initialDelaySeconds: 10
             periodSeconds: 10
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8085
-            initialDelaySeconds: 15
             periodSeconds: 20
+            failureThreshold: 6
 {{- end }}

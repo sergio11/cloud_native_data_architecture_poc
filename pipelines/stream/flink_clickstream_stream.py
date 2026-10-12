@@ -30,6 +30,7 @@ from typing import Any
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from pyflink.common import Duration, Row, Time, WatermarkStrategy  # noqa: E402
+from pyflink.common.serialization import SimpleStringSchema  # noqa: E402
 from pyflink.common.typeinfo import Types  # noqa: E402
 from pyflink.datastream import DataStream, StreamExecutionEnvironment  # noqa: E402
 from pyflink.datastream.checkpointing_mode import CheckpointingMode  # noqa: E402
@@ -130,7 +131,7 @@ class JobConfig:
 class _ParseClickstreamEvent(FlatMapFunction):
     """Parses Kafka payloads; records without session or event time are dropped."""
 
-    def flat_map(self, value: bytes) -> list[ClickstreamWindowEvent]:
+    def flat_map(self, value: str) -> list[ClickstreamWindowEvent]:
         event = parse_clickstream_event(value)
         return [] if event is None else [event]
 
@@ -200,6 +201,11 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
         .set_topics(config.topic)
         .set_group_id(config.group_id)
         .set_starting_offsets(offsets)
+        # Mandatory: without a deserialization schema KafkaSourceBuilder.build()
+        # fails job submission with "Deserialization schema is required but not
+        # provided". The value is the JSON payload decoded to str, which is
+        # exactly what window_logic.decode_payload expects.
+        .set_value_only_deserializer(SimpleStringSchema())
         .build()
     )
 

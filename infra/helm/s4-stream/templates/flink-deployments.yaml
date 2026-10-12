@@ -16,6 +16,8 @@ spec:
     state.backend: rocksdb
     state.checkpoints.dir: "s3a://checkpoints/flink-orders"
     state.savepoints.dir: "s3a://checkpoints/flink-orders-savepoints"
+    high-availability.type: kubernetes
+    high-availability.storageDir: "s3a://checkpoints/ha"
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     s3.path.style.access: "true"
@@ -34,7 +36,7 @@ spec:
                 value: {{ .Values.flinkJobs.ordersStream.kafkaGroupId | quote }}
               - name: KAFKA_START_OFFSET
                 value: {{ .Values.flinkJobs.ordersStream.kafkaStartOffset | quote }}
-              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 14 }}
     resource:
       memory: {{ .Values.flinkJobs.ordersStream.jobManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.ordersStream.jobManager.cpu }}
@@ -50,7 +52,7 @@ spec:
                 value: {{ .Values.flinkJobs.ordersStream.kafkaGroupId | quote }}
               - name: KAFKA_START_OFFSET
                 value: {{ .Values.flinkJobs.ordersStream.kafkaStartOffset | quote }}
-              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 14 }}
     resource:
       memory: {{ .Values.flinkJobs.ordersStream.taskManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.ordersStream.taskManager.cpu }}
@@ -62,6 +64,7 @@ spec:
     parallelism: 1
     upgradeMode: last-state
 {{- end }}
+---
 {{- if and .Values.flinkOperator.enabled .Values.flinkJobs.clickstreamStream.enabled }}
 apiVersion: flink.apache.org/v1beta1
 kind: FlinkDeployment
@@ -80,6 +83,8 @@ spec:
     state.backend: rocksdb
     state.checkpoints.dir: "s3a://checkpoints/flink-clickstream"
     state.savepoints.dir: "s3a://checkpoints/flink-clickstream-savepoints"
+    high-availability.type: kubernetes
+    high-availability.storageDir: "s3a://checkpoints/ha"
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     s3.path.style.access: "true"
@@ -98,7 +103,7 @@ spec:
                 value: {{ .Values.flinkJobs.clickstreamStream.kafkaGroupId | quote }}
               - name: KAFKA_START_OFFSET
                 value: {{ .Values.flinkJobs.clickstreamStream.kafkaStartOffset | quote }}
-              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 14 }}
     resource:
       memory: {{ .Values.flinkJobs.clickstreamStream.jobManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.clickstreamStream.jobManager.cpu }}
@@ -114,7 +119,7 @@ spec:
                 value: {{ .Values.flinkJobs.clickstreamStream.kafkaGroupId | quote }}
               - name: KAFKA_START_OFFSET
                 value: {{ .Values.flinkJobs.clickstreamStream.kafkaStartOffset | quote }}
-              {{- include "s4-stream.flinkCommonEnv" . | nindent 12 }}
+              {{- include "s4-stream.flinkCommonEnv" . | nindent 14 }}
     resource:
       memory: {{ .Values.flinkJobs.clickstreamStream.taskManager.memory | quote }}
       cpu: {{ .Values.flinkJobs.clickstreamStream.taskManager.cpu }}

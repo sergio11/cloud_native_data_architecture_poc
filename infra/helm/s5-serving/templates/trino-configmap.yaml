@@ -36,9 +36,7 @@ data:
     # OAuth2 required by Polaris 1.x — without a bearer token every catalog
     # call returns 401 and Trino cannot discover or query any table.
     iceberg.rest-catalog.security=OAUTH2
-    iceberg.rest-catalog.oauth2.server-uri={{ .Values.catalogs.iceberg.restCatalogUri }}/v1/oauth/tokens
     iceberg.rest-catalog.oauth2.credential={{ .Values.catalogs.iceberg.oauth2Credential }}
-    iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
     # Disable vended credentials: we supply our own MinIO key/secret below
     # and Polaris is not configured to vend STS tokens (no-sts mode).
     iceberg.rest-catalog.vended-credentials-enabled=false

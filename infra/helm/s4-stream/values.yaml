@@ -80,11 +80,14 @@ flinkOperator:
 
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 400m
+      cpu: 200m
       memory: 256Mi
+    limits:
+      # The operator reconciles every FlinkDeployment on a 4-CPU node shared
+      # with MinIO, Kafka, Trino and Spark; at 400m it was CPU-throttled into
+      # missing its own health endpoint.
+      cpu: 800m
+      memory: 512Mi
 
   # Empty by default so single-node clusters schedule anywhere (multi-node:
   # nodeSelector: {node-role.kubernetes.io/compute: "true"}).

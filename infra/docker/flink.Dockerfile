@@ -17,8 +17,6 @@
 # ==============================================================================
 FROM flink:1.18-scala_2.12
 
-COPY pipelines/ /opt/flink/pipelines/
-
 # ---------------------------------------------------------------------------
 # Python runtime
 #
@@ -109,3 +107,14 @@ RUN set -eux; \
 
 ENV PATH="/opt/py310/bin:${PATH}"
 ENV PYTHONPATH="/opt/flink/opt/python/pyflink.zip:/opt/flink/opt/python/py4j-0.10.9.7-src.zip:${PYTHONPATH}"
+
+# ---------------------------------------------------------------------------
+# Application code, LAST on purpose.
+#
+# The job drivers change constantly while a pipeline is being debugged on the
+# cluster, and the layers above (venv with ~15 wheels, four connector jars) cost
+# minutes. With the COPY first, editing one .py invalidated all of them and every
+# fix cost a full rebuild; here it is a single ~40 kB layer. Nothing below reads
+# /opt/flink/pipelines, so the ordering is safe.
+# ---------------------------------------------------------------------------
+COPY pipelines/ /opt/flink/pipelines/

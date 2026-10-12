@@ -110,6 +110,58 @@ end
 # (unlike Docker, it never says "Running").
 def container_running?(container) = container[:status].start_with?('Up')
 
+# Runs a shell script INSIDE the podman machine, printing elapsed time every
+# 15 seconds. Three reasons this exists instead of a bare `sh`:
+#
+#   * Transferring a 1.3 GB image is silent until it finishes, and a silent
+#     copy is indistinguishable from a hang - so the task must show a heartbeat.
+#   * Doing the copy from the Windows shell sends every byte across the ssh
+#     tunnel twice: VM -> ssh -> host -> ssh -> VM. Running the pipeline inside
+#     the machine keeps `podman save` reading the machine's own store and never
+#     touches the tunnel at all.
+#   * `podman machine ssh` JOINS its arguments with spaces and hands the result
+#     to a remote shell. A multi-line script is therefore split at every `;` and
+#     newline: `sudo -n sh -c 'set -e; podman save ...'` degenerates into
+#     `sudo -n sh -c set -e; podman save ...`, where only the first command runs
+#     as root and the rest silently run as the ssh user against the wrong store
+#     ("image not known"). The script is therefore collapsed to ONE line and
+#     wrapped in single quotes so it survives as a single remote argument.
+#
+# `podman machine ssh` reaches the machine behind the DEFAULT connection; both
+# configured connections point at the same machine, so which one is default does
+# not change what is read here. Inside the VM the images and the kind container
+# live in root's store, hence sudo.
+def machine_script(script)
+  one_line = script.gsub(/\s+/, ' ').strip
+  if one_line.include?("'")
+    raise ArgumentError, 'machine_script: the script must not contain single quotes (they would end the remote quoting)'
+  end
+
+  out = +''
+  status = nil
+  reader = Thread.new do
+    Open3.popen2e('podman', 'machine', 'ssh', 'sudo', '-n', 'sh', '-c', "'#{one_line}'") do |stdin, pipe, thread|
+      stdin.close
+      pipe.each_line { |line| out << line }
+      status = thread.value
+    end
+  end
+  started = Time.now
+  until reader.join(15)
+    yield "transferring... #{Time.now - started} s elapsed"
+  end
+  reader.value
+  [out, status&.success?]
+end
+
+# Byte-exact progress for a machine script that streams a file, so a slow copy
+# is visibly progressing instead of looking like a hang. `probe` is a script
+# run on every heartbeat and must print a single short line.
+def machine_probe(probe)
+  out, = capture('podman', 'machine', 'ssh', 'sudo', '-n', 'sh', '-c', "'#{probe.gsub(/\s+/, ' ').strip}'")
+  out.lines.last.to_s.strip
+end
+
 # ------------------------------------------------------------------------------
 # Kubernetes / Helm helpers
 # ------------------------------------------------------------------------------
@@ -632,6 +684,125 @@ namespace :cluster do
       abort "\e[31mProfile '#{profile}' finished with #{failures} failed/skipped step(s) (#{removed} release(s) removed).\e[0m"
     end
     ok_msg("Profile '#{profile}' removed successfully! (#{removed} release(s) uninstalled)")
+  end
+
+  # ---------------------------------------------------------------------------
+  # Images
+  #
+  # `kind load docker-image` cannot do this job on Podman: kind drives the
+  # ROOTLESS socket while the images are built into the ROOTFUL store, so its
+  # presence check answers "not present locally" and it refuses to load. The
+  # images are small, local and versionless (poc/*:0.1.0), so they are loaded
+  # through containerd directly instead.
+  # ---------------------------------------------------------------------------
+  POC_IMAGES = %w[
+    docker.io/poc/ingest:0.1.0
+    docker.io/poc/spark-medallion:0.1.0
+    docker.io/poc/flink-stream:0.1.0
+    docker.io/poc/lineage-webhook:0.1.0
+  ].freeze
+
+  namespace :image do
+    desc 'Copy built images into the kind node (args: images=a,b; default: all poc/*)'
+    task :load, [:images] do |_t, args|
+      banner 'IMAGE LOAD'
+      probe = podman_probe
+      node = probe[:containers].first
+      if node.nil?
+        abort "\e[31mNo kind cluster container found. Run: rake cluster:setup\e[0m"
+      end
+
+      images = args[:images].to_s.split(',').map(&:strip).reject(&:empty?)
+      images = POC_IMAGES if images.empty?
+
+      loaded = 0
+      images.each do |image|
+        # The machine store is the source of truth for "does this tag exist".
+        listing, ok = capture('podman', '--connection', node[:connection], 'images',
+                              '--format', '{{.Repository}}:{{.Tag}} {{.Id}}')
+        abort "\e[31mpodman is not reachable on connection #{node[:connection]}\e[0m" unless ok
+
+        entry = listing.lines.find { |line| line.start_with?("#{image} ") }
+        if entry.nil?
+          warn_msg("#{image} is not built yet - build it with podman build first")
+          next
+        end
+        # podman reports the image config digest, which is the same digest
+        # containerd stores as a blob, so this is a precise identity check.
+        # `ctr images list` cannot be used for it: that column is the MANIFEST
+        # digest, which changes on every re-save and is not what the pod pins.
+        short_id = entry.split[1][0, 12]
+
+        node_content, listed = capture('podman', '--connection', node[:connection], 'exec',
+                                       node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
+        if listed && node_content.include?("sha256:#{short_id}")
+          ok_msg("#{image} already in #{node[:name]} (#{short_id}) - skipped")
+          loaded += 1
+          next
+        end
+
+        info_msg("#{image} -> #{node[:name]} (image #{short_id}, copying inside the machine)")
+        # Two phases so progress is measurable: the save grows the tar, then the
+        # import grows the node blob store. One piped command hides both and
+        # looks exactly like a hang.
+        tar = "/tmp/kind-load-#{File.basename(image).tr(':', '-')}.tar"
+        blobs = lambda do
+          listing, ok = capture('podman', '--connection', node[:connection], 'exec',
+                                node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
+          ok ? listing.lines.size : 0
+        end
+
+        info_msg('  phase 1/2: podman save inside the machine')
+        save_out, saved = machine_script("podman save -o #{tar} #{image}") do |_tick|
+          size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0")
+          warn_msg("  save: #{(size.to_i / 1_048_576).to_s.rjust(5)} MB written")
+        end
+        unless saved
+          err_msg("#{image}: podman save failed")
+          puts save_out
+          next
+        end
+        final_size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0").to_i
+        ok_msg("  saved #{final_size / 1_048_576} MB into the machine")
+
+        info_msg('  phase 2/2: ctr images import into the kind node')
+        before = blobs.call
+        out, success = machine_script("cat #{tar} | podman exec -i #{node[:name]} " \
+                                      'ctr -n k8s.io images import -; rm -f ' + tar) do |_tick|
+          warn_msg("  import: #{blobs.call - before} new blobs in the node (total #{blobs.call})")
+        end
+
+        verify, checked = capture('podman', '--connection', node[:connection], 'exec',
+                                  node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
+        present = checked && verify.include?("sha256:#{short_id}")
+        if success && present
+          ok_msg("#{image} loaded and present in the node (#{short_id})")
+          loaded += 1
+        else
+          err_msg("#{image} NOT loaded#{success ? '' : ' (command failed)'} - #{short_id} absent from the node store")
+          puts out unless out.strip.empty?
+          next
+        end
+      end
+      puts
+      if loaded == images.size
+        ok_msg("#{loaded} image(s) available in #{node[:name]}")
+        warn_msg('existing pods keep the digest they started with: recreate them to pick up a new build') unless loaded.zero?
+      else
+        abort "\e[31m#{loaded}/#{images.size} image(s) loaded into #{node[:name]}\e[0m"
+      end
+    end
+
+    desc 'List the images the kind node actually has, with their digests'
+    task :list do
+      probe = podman_probe
+      node = probe[:containers].first
+      abort "\e[31mNo kind cluster container found. Run: rake cluster:setup\e[0m" if node.nil?
+
+      banner 'IMAGE LIST'
+      run! 'podman', '--connection', node[:connection], 'exec', node[:name],
+           'ctr', '-n', 'k8s.io', 'images', 'list'
+    end
   end
 end
 

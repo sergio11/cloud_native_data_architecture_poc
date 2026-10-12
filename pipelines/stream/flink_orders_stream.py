@@ -302,27 +302,32 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
     Both statements are idempotent, so the job owns its own table definition and
     a restart never depends on out-of-band provisioning.
     """
-    table_env.execute_sql(
-        f"""
-        CREATE CATALOG IF NOT EXISTS `{config.catalog_name}` WITH (
-            'type' = 'iceberg',
-            'catalog-type' = 'rest',
-            'uri' = '{config.catalog_uri}',
-            'warehouse' = '{config.warehouse}',
-            's3.endpoint' = '{config.s3_endpoint}',
-            's3.access-key' = '{config.s3_access_key}',
-            's3.secret-key' = '{config.s3_secret_key}',
-            's3.path-style-access' = 'true',
-            's3.region' = 'us-east-1',
-            -- OAuth2 required by Polaris 1.x REST catalog.
-            -- Without these the catalog registration call returns 401 and
-            -- no Iceberg table is reachable from this job.
-            'credential' = '{config.oauth2_credential}',
-            'scope' = 'PRINCIPAL_ROLE:ALL',
-            'token-refresh-enabled' = 'true'
+    # Flink 1.18's parser rejects "CREATE CATALOG IF NOT EXISTS" with
+    # ParseException: Encountered "NOT". The idempotency is therefore explicit:
+    # ask for the registered catalogs and only issue the statement when ours is
+    # missing. (CREATE TABLE IF NOT EXISTS below IS supported and stays.)
+    if config.catalog_name not in table_env.list_catalogs():
+        table_env.execute_sql(
+            f"""
+            CREATE CATALOG `{config.catalog_name}` WITH (
+                'type' = 'iceberg',
+                'catalog-type' = 'rest',
+                'uri' = '{config.catalog_uri}',
+                'warehouse' = '{config.warehouse}',
+                's3.endpoint' = '{config.s3_endpoint}',
+                's3.access-key' = '{config.s3_access_key}',
+                's3.secret-key' = '{config.s3_secret_key}',
+                's3.path-style-access' = 'true',
+                's3.region' = 'us-east-1',
+                -- OAuth2 required by Polaris 1.x REST catalog.
+                -- Without these the catalog registration call returns 401 and
+                -- no Iceberg table is reachable from this job.
+                'credential' = '{config.oauth2_credential}',
+                'scope' = 'PRINCIPAL_ROLE:ALL',
+                'token-refresh-enabled' = 'true'
+            )
+            """
         )
-        """
-    )
     table_env.execute_sql(
         f"""
         CREATE TABLE IF NOT EXISTS `{config.catalog_name}`.`sales`.`orders_windowed` (

@@ -16,8 +16,11 @@ spec:
     state.backend: rocksdb
     state.checkpoints.dir: "s3a://checkpoints/flink-orders"
     state.savepoints.dir: "s3a://checkpoints/flink-orders-savepoints"
-    high-availability.type: kubernetes
-    high-availability.storageDir: "s3a://checkpoints/ha"
+    # No high-availability.* here on purpose. With a single JobManager replica
+    # the HA services only add a leader-election lock plus an S3 blob store the
+    # JM must create before it will bind its REST port, and it waits several
+    # minutes (then never) on a 4-CPU box. A stateless job on one JM needs
+    # neither; add them back with replicas > 1.
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     s3.path.style.access: "true"
@@ -62,7 +65,14 @@ spec:
     entryClass: "org.apache.flink.client.python.PythonDriver"
     args: ["-py", "/opt/flink/pipelines/stream/flink_orders_stream.py"]
     parallelism: 1
-    upgradeMode: last-state
+    # stateless, NOT last-state. last-state restores from the HA metadata the
+    # previous run left behind, so on a first deployment (or after any crash
+    # that lost the JobManager) there is nothing to restore from and the
+    # operator fails with "HA metadata not available to restore from last
+    # state", looping between recovering and failing without ever starting the
+    # job. Switch to last-state only once the job has run and you actually
+    # want state preserved across an upgrade.
+    upgradeMode: stateless
 {{- end }}
 ---
 {{- if and .Values.flinkOperator.enabled .Values.flinkJobs.clickstreamStream.enabled }}
@@ -83,8 +93,7 @@ spec:
     state.backend: rocksdb
     state.checkpoints.dir: "s3a://checkpoints/flink-clickstream"
     state.savepoints.dir: "s3a://checkpoints/flink-clickstream-savepoints"
-    high-availability.type: kubernetes
-    high-availability.storageDir: "s3a://checkpoints/ha"
+    # See the orders job: no HA services with a single JobManager replica.
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     s3.path.style.access: "true"
@@ -129,5 +138,7 @@ spec:
     entryClass: "org.apache.flink.client.python.PythonDriver"
     args: ["-py", "/opt/flink/pipelines/stream/flink_clickstream_stream.py"]
     parallelism: 1
-    upgradeMode: last-state
+    # See the orders job: stateless, because last-state cannot bootstrap a job
+    # that has never run.
+    upgradeMode: stateless
 {{- end }}

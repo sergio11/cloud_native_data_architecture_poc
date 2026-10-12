@@ -77,6 +77,20 @@ ARG FLINK_VERSION=1.18.1
 ARG KAFKA_CONNECTOR_VERSION=3.1.0-1.18
 ARG KAFKA_CLIENTS_VERSION=3.4.0
 ARG ICEBERG_VERSION=1.6.1
+ARG HADOOP_SHADED_VERSION=2.8.3-10.0
+
+# Hadoop runtime classes. Registering the Iceberg REST catalog reaches
+# org.apache.hadoop.conf.Configuration (the catalog builds a Hadoop FileSystem for
+# the warehouse and the s3.* options), and the flink:1.18 image ships no Hadoop
+# jar, so the job died at startup with
+#   java.lang.ClassNotFoundException: org.apache.hadoop.conf.Configuration.
+# The shaded uber jar is what Flink's own flink-hadoop module puts on the
+# classpath, so it is the variant Iceberg is tested against; the unshaded
+# Hadoop client jars would drag in their own AWS SDK and conflict with it.
+RUN set -eux; \
+    curl -fSL -o /opt/flink/lib/flink-shaded-hadoop-2-uber-${HADOOP_SHADED_VERSION}.jar \
+        "${MAVEN_REPO}/org/apache/flink/flink-shaded-hadoop-2-uber/${HADOOP_SHADED_VERSION}/flink-shaded-hadoop-2-uber-${HADOOP_SHADED_VERSION}.jar"; \
+    ls -lh /opt/flink/lib/flink-shaded-hadoop-2-uber-*.jar
 
 # RocksDB state backend: the charts set state.backend=rocksdb and checkpoints go
 # to s3a://. The flink:1.18 image ships neither lib/ nor opt/ copy, so it is

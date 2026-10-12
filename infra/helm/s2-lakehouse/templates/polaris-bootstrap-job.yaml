@@ -79,6 +79,13 @@ spec:
               value: {{ .Values.polaris.config.defaultCatalog | quote }}
             - name: WAREHOUSE_LOCATION
               value: {{ .Values.polaris.config.warehouseLocation | quote }}
+            # URL-encoded form of WAREHOUSE_LOCATION, for the ?warehouse= query
+            # parameter of the Iceberg REST config endpoint (s3://warehouse/ ->
+            # s3%3A%2F%2Fwarehouse%2F). POSIX sh has no URL encoder, so the two
+            # characters that actually need escaping are replaced here and the
+            # rest of the value is expected to be safe.
+            - name: WAREHOUSE_ENCODED
+              value: {{ .Values.polaris.config.warehouseLocation | replace "/" "%2F" | replace ":" "%3A" | quote }}
             - name: S3_ENDPOINT
               value: {{ .Values.polaris.config.s3Endpoint | quote }}
             - name: AWS_REGION
@@ -111,9 +118,40 @@ spec:
               AUTH="Authorization: Bearer ${TOKEN}"
 
               # -----------------------------------------------------------------
-              # Step 3: create the catalog (idempotent — 409 = already exists)
+              # Step 3: recreate the catalog.
+              #
+              # Delete first, on purpose. Treating 409 as success is what made
+              # this silently rot: a catalog created days ago with a different
+              # default-base-location was never corrected, so Polaris answered
+              # POST /catalogs with 409 (it exists) while the Iceberg REST
+              # lookup answered 404 "Unable to find warehouse <the one in
+              # values>" - because it resolves catalogs BY base location and the
+              # old one no longer matched. Recreating makes the catalog always
+              # match these values. Polaris keeps the catalog in memory, so this
+              # is also how a restarted Polaris gets its catalog back.
               # Management API endpoint: /api/management/v1/catalogs
               # -----------------------------------------------------------------
+              echo "Dropping catalog '${CATALOG_NAME}' if present (keeps it in sync with these values)..."
+              # Printed first: when the catalog refuses to drop ("it is not
+              # empty") this line is the only way to see the base location it
+              # actually carries, which is what the Iceberg REST clients resolve.
+              echo "Existing catalog definition:"
+              curl -s "${POLARIS_BASE_URL}/api/management/v1/catalogs/${CATALOG_NAME}" -H "${AUTH}" || true
+              echo ""
+              DROP=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X DELETE "${POLARIS_BASE_URL}/api/management/v1/catalogs/${CATALOG_NAME}?cascade=true&purge=true" \
+                -H "${AUTH}")
+              if [ "${DROP}" = "204" ] || [ "${DROP}" = "200" ]; then
+                echo "Existing catalog dropped (HTTP ${DROP})."
+              elif [ "${DROP}" = "404" ]; then
+                echo "No catalog to drop (HTTP 404), creating it."
+              else
+                # Non-fatal: a catalog Polaris refuses to drop is still usable if
+                # its base location already matches. The verification below is
+                # what decides whether the run is a success.
+                echo "WARN: dropping the catalog returned HTTP ${DROP}; continuing."
+              fi
+
               echo "Creating catalog '${CATALOG_NAME}'..."
               STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
                 -X POST "${POLARIS_BASE_URL}/api/management/v1/catalogs" \
@@ -138,6 +176,28 @@ spec:
                 echo "Catalog '${CATALOG_NAME}' ready (HTTP ${STATUS})."
               else
                 echo "ERROR: catalog creation returned HTTP ${STATUS}."
+                exit 1
+              fi
+
+              # -----------------------------------------------------------------
+              # Step 3b: verify the warehouse actually resolves.
+              #
+              # Polaris resolves an Iceberg REST client to a catalog BY base
+              # location, so a catalog that exists but carries another
+              # default-base-location makes every Flink/Trino job fail with
+              # "Unable to find warehouse <this one>" even though the create
+              # above answered 409 and looked healthy. This is the assertion that
+              # catches it, because a green bootstrap used to be a lie.
+              # -----------------------------------------------------------------
+              echo "Verifying Polaris resolves warehouse '${WAREHOUSE_LOCATION}'..."
+              CONFIG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+                "${POLARIS_BASE_URL}/api/catalog/v1/config?warehouse=${WAREHOUSE_ENCODED}" \
+                -H "${AUTH}")
+              if [ "${CONFIG_STATUS}" = "200" ]; then
+                echo "Warehouse '${WAREHOUSE_LOCATION}' resolves to catalog '${CATALOG_NAME}'."
+              else
+                echo "ERROR: Polaris returned HTTP ${CONFIG_STATUS} for warehouse"
+                echo "       '${WAREHOUSE_LOCATION}'. Iceberg clients cannot use this catalog."
                 exit 1
               fi
 

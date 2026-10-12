@@ -745,15 +745,21 @@ namespace :cluster do
         # Two phases so progress is measurable: the save grows the tar, then the
         # import grows the node blob store. One piped command hides both and
         # looks exactly like a hang.
-        tar = "/tmp/kind-load-#{File.basename(image).tr(':', '-')}.tar"
-        blobs = lambda do
-          listing, ok = capture('podman', '--connection', node[:connection], 'exec',
-                                node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
-          ok ? listing.lines.size : 0
-        end
+        #
+        # The tar is named after the image id and KEPT in the machine. podman save
+        # of this image costs ~5 minutes and most of it is layers the node already
+        # has, so re-saving on every retry threw that away over and over. Keyed by
+        # id, a retry after a failed import pays only the import, and only a
+        # genuinely new build is saved again.
+        tar = "/tmp/kind-load-#{short_id}.tar"
 
         info_msg('  phase 1/2: podman save inside the machine')
-        save_out, saved = machine_script("podman save -o #{tar} #{image}") do |_tick|
+        # test -s first: `podman save -o` refuses to touch an existing
+        # docker-archive ("docker-archive doesn't support modifying existing
+        # images"), so a tar left behind by an interrupted run would otherwise
+        # break every subsequent run until deleted by hand.
+        save_out, saved = machine_script("test -s #{tar} && echo 'CACHED, reusing tar' || " \
+                                         "(rm -f #{tar}; podman save -o #{tar} #{image})") do |_tick|
           size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0")
           warn_msg("  save: #{(size.to_i / 1_048_576).to_s.rjust(5)} MB written")
         end
@@ -763,13 +769,27 @@ namespace :cluster do
           next
         end
         final_size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0").to_i
-        ok_msg("  saved #{final_size / 1_048_576} MB into the machine")
+        if final_size.zero?
+          err_msg("#{image}: no tar produced by the save")
+          puts save_out
+          next
+        end
+        ok_msg("  tar ready: #{final_size / 1_048_576} MB in the machine")
 
         info_msg('  phase 2/2: ctr images import into the kind node')
         before = blobs.call
+        # The tar is deliberately NOT removed here: it is the cache that makes
+        # the next attempt cost only the import. `cluster:image:clean` removes it.
         out, success = machine_script("cat #{tar} | podman exec -i #{node[:name]} " \
-                                      'ctr -n k8s.io images import -; rm -f ' + tar) do |_tick|
-          warn_msg("  import: #{blobs.call - before} new blobs in the node (total #{blobs.call})")
+                                      'ctr -n k8s.io images import -') do |_tick|
+          # Bytes, not blob count: `ctr images import` stages the whole tar before
+          # it commits anything, and almost every layer of this image is already
+          # in the node (content addressed), so the new-blob delta stays at 0
+          # through a transfer that is actually running at full speed.
+          used, = capture('podman', '--connection', node[:connection], 'exec', node[:name],
+                          'df', '--output=used', '-B1', '/var/lib/containerd')
+          mb = used.to_s.strip.split("\n").last.to_s.strip.to_i / 1_048_576
+          warn_msg("  import: #{mb} MB used by the node store (+#{blobs.call - before} blobs)")
         end
 
         verify, checked = capture('podman', '--connection', node[:connection], 'exec',
@@ -791,6 +811,16 @@ namespace :cluster do
       else
         abort "\e[31m#{loaded}/#{images.size} image(s) loaded into #{node[:name]}\e[0m"
       end
+    end
+
+    desc 'Delete the cached image tars inside the machine (cluster:image:load keeps them)'
+    task :clean do
+      banner 'IMAGE CLEAN'
+      out, ok = capture('podman', 'machine', 'ssh', 'sudo', '-n', 'sh', '-c',
+                        "'ls -l /tmp/kind-load-*.tar 2>/dev/null | wc -l; rm -f /tmp/kind-load-*.tar'")
+      abort "\e[31mcould not reach the podman machine\e[0m" unless ok
+
+      warn_msg("deleted #{out.to_s.lines.last.to_s.strip} cached tar(s) from the machine")
     end
 
     desc 'List the images the kind node actually has, with their digests'

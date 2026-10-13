@@ -758,7 +758,7 @@ namespace :cluster do
         # docker-archive ("docker-archive doesn't support modifying existing
         # images"), so a tar left behind by an interrupted run would otherwise
         # break every subsequent run until deleted by hand.
-        save_out, saved = machine_script("test -s #{tar} && echo 'CACHED, reusing tar' || " \
+        save_out, saved = machine_script("test -s #{tar} && echo CACHED || " \
                                          "(rm -f #{tar}; podman save -o #{tar} #{image})") do |_tick|
           size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0")
           warn_msg("  save: #{(size.to_i / 1_048_576).to_s.rjust(5)} MB written")
@@ -777,7 +777,6 @@ namespace :cluster do
         ok_msg("  tar ready: #{final_size / 1_048_576} MB in the machine")
 
         info_msg('  phase 2/2: ctr images import into the kind node')
-        before = blobs.call
         # The tar is deliberately NOT removed here: it is the cache that makes
         # the next attempt cost only the import. `cluster:image:clean` removes it.
         out, success = machine_script("cat #{tar} | podman exec -i #{node[:name]} " \
@@ -788,8 +787,7 @@ namespace :cluster do
           # through a transfer that is actually running at full speed.
           used, = capture('podman', '--connection', node[:connection], 'exec', node[:name],
                           'df', '--output=used', '-B1', '/var/lib/containerd')
-          mb = used.to_s.strip.split("\n").last.to_s.strip.to_i / 1_048_576
-          warn_msg("  import: #{mb} MB used by the node store (+#{blobs.call - before} blobs)")
+          warn_msg("  import: #{used.to_s.strip.split("\n").last.to_s.strip.to_i / 1_048_576} MB used by the node store")
         end
 
         verify, checked = capture('podman', '--connection', node[:connection], 'exec',

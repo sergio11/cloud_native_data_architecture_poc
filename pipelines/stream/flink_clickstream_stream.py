@@ -102,6 +102,15 @@ class JobConfig:
     # env var in the FlinkDeployment (s4-stream/templates/flink-deployments.yaml).
     oauth2_credential: str
 
+    @property
+    def oauth2_server_uri(self) -> str:
+        """Polaris token endpoint, derived from the catalog URI.
+
+        See the orders job: without it Iceberg calls GET /v1/config
+        unauthenticated and Polaris answers 404 "Unable to find warehouse".
+        """
+        return f"{self.catalog_uri.rstrip('/')}/v1/oauth/tokens"
+
     @classmethod
     def from_env(cls) -> JobConfig:
         """Builds the configuration, raising ConfigurationError if incomplete."""
@@ -313,6 +322,7 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
                 -- Without these the catalog registration call returns 401 and
                 -- no Iceberg table is reachable from this job.
                 'credential' = '{config.oauth2_credential}',
+                'oauth2-server-uri' = '{config.oauth2_server_uri}',
                 'scope' = 'PRINCIPAL_ROLE:ALL',
                 'token-refresh-enabled' = 'true'
             )

@@ -166,6 +166,9 @@ spec:
                   \"storageConfigInfo\": {
                     \"storageType\": \"S3\",
                     \"allowedLocations\": [\"${WAREHOUSE_LOCATION}\"],
+                    \"endpoint\": \"${S3_ENDPOINT}\",
+                    \"region\": \"${AWS_REGION}\",
+                    \"pathStyleAccess\": true,
                     \"s3.endpoint\": \"${S3_ENDPOINT}\",
                     \"s3.region\": \"${AWS_REGION}\",
                     \"s3.path-style-access\": \"true\"
@@ -190,14 +193,46 @@ spec:
               # catches it, because a green bootstrap used to be a lie.
               # -----------------------------------------------------------------
               echo "Verifying Polaris resolves warehouse '${WAREHOUSE_LOCATION}'..."
-              CONFIG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                "${POLARIS_BASE_URL}/api/catalog/v1/config?warehouse=${WAREHOUSE_ENCODED}" \
-                -H "${AUTH}")
+              # Retried: Polaris indexes a freshly created catalog asynchronously,
+              # so a lookup issued right after the 201 can miss it. Three tries
+              # with a pause separate "not loaded yet" from "never resolvable".
+              CONFIG_STATUS=000
+              ATTEMPT=1
+              while [ "${ATTEMPT}" -le 3 ]; do
+                CONFIG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+                  "${POLARIS_BASE_URL}/api/catalog/v1/config?warehouse=${WAREHOUSE_ENCODED}" \
+                  -H "${AUTH}")
+                if [ "${CONFIG_STATUS}" = "200" ]; then
+                  break
+                fi
+                echo "  attempt ${ATTEMPT}: HTTP ${CONFIG_STATUS}, waiting 10s..."
+                sleep 10
+                ATTEMPT=$((ATTEMPT + 1))
+              done
               if [ "${CONFIG_STATUS}" = "200" ]; then
                 echo "Warehouse '${WAREHOUSE_LOCATION}' resolves to catalog '${CATALOG_NAME}'."
               else
-                echo "ERROR: Polaris returned HTTP ${CONFIG_STATUS} for warehouse"
-                echo "       '${WAREHOUSE_LOCATION}'. Iceberg clients cannot use this catalog."
+                # Polaris normalises base locations, so a trailing slash in the
+                # values can be exactly why the lookup misses: the catalog is
+                # stored as s3://warehouse but every client asks for
+                # s3://warehouse/. Try the trimmed form before failing, and say
+                # which one works instead of leaving it to be guessed at.
+                echo "WARN: HTTP ${CONFIG_STATUS} for '${WAREHOUSE_LOCATION}', retrying without the trailing slash..."
+                TRIMMED=$(printf '%s' "${WAREHOUSE_LOCATION}" | sed 's:/*$::')
+                TRIMMED_ENCODED=$(printf '%s' "${TRIMMED}" | sed 's|/|%2F|g; s|:|%3A|g')
+                CONFIG_TRIMMED=$(curl -s -o /dev/null -w "%{http_code}" \
+                  "${POLARIS_BASE_URL}/api/catalog/v1/config?warehouse=${TRIMMED_ENCODED}" \
+                  -H "${AUTH}")
+                if [ "${CONFIG_TRIMMED}" = "200" ]; then
+                  echo "RESOLVED: Polaris answers for '${TRIMMED}' but NOT for"
+                  echo "         '${WAREHOUSE_LOCATION}'. The trailing slash is the"
+                  echo "         bug: set polaris.config.warehouseLocation to '${TRIMMED}'"
+                  echo "         and every client must use the same value."
+                  exit 1
+                fi
+                echo "ERROR: Polaris returned HTTP ${CONFIG_STATUS} for '${WAREHOUSE_LOCATION}'"
+                echo "       and HTTP ${CONFIG_TRIMMED} for '${TRIMMED}'. No Iceberg"
+                echo "       client can use this catalog."
                 exit 1
               fi
 

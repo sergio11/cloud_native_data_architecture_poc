@@ -51,6 +51,16 @@ spec:
               value: {{ .Values.minio.auth.rootPassword | quote }}
             - name: MINIO_PROMETHEUS_AUTH_TYPE
               value: "public"
+            # Drops MinIO's startup pre-allocation from 1GiB (the single-node
+            # minimum) to ~256MiB. The chart caps this container at 384Mi
+            # (values.yaml minio.resources.limits.memory), which is below the
+            # 1GiB the server pre-allocates by default, so without this the
+            # broker is OOMKilled on boot. It is the documented knob for
+            # constrained single-node deployments, and the alternative -
+            # raising the limit to 1Gi on a 6 GB node shared with Kafka, Flink
+            # and Trino - is not affordable here.
+            - name: MINIO_CI_CD
+              value: "true"
           resources:
             {{- toYaml .Values.minio.resources | nindent 12 }}
           volumeMounts:
@@ -60,12 +70,17 @@ spec:
             httpGet:
               path: /minio/health/ready
               port: 9000
+            # Without an explicit timeoutSeconds this probe gets the Kubernetes
+            # default of 1s, which is shorter than the GC pause a busy MinIO
+            # produces and flaps the pod for no reason.
+            timeoutSeconds: 5
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /minio/health/live
               port: 9000
+            timeoutSeconds: 5
             initialDelaySeconds: 15
             periodSeconds: 20
       volumes:

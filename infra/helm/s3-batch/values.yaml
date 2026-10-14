@@ -88,6 +88,12 @@ sparkDefaults:
     namespace: "poc_data_engineering"
 
   database:
+    # host/port/name are what the code reads (oltp_source.py builds the
+    # connection with psycopg2 from PGHOST/PGPORT/PGDATABASE). jdbcUrl is kept
+    # for the JVM side, which cannot use libpq.
+    host: "postgres-oltp.platform.svc.cluster.local"
+    port: "5432"
+    name: "poc_oltp"
     jdbcUrl: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp"
     jdbcUser: "postgres"
     jdbcPassword: "oltp_password_secret"

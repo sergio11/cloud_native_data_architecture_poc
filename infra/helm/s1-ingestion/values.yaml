@@ -81,11 +81,25 @@ ingestionRunner:
       cpu: 250m
       memory: 192Mi
   env:
-    JDBC_URL: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp"
-    JDBC_USER: "postgres"
-    JDBC_PASSWORD: "oltp_password_secret"
-    ICEBERG_CATALOG_URL: "http://polaris.platform.svc.cluster.local:8181"
-    MINIO_ENDPOINT: "http://minio.platform.svc.cluster.local:9000"
-    MINIO_ACCESS_KEY: "minioadmin"
-    MINIO_SECRET_KEY: "minioadmin"
-    OPENLINEAGE_URL: "http://marquez.platform.svc.cluster.local:5000"
+    # Names must match what the code reads, not what reads nicely in YAML.
+    # src/adapters/source/oltp_source.py:38,70,101-103 resolves the OLTP source
+    # from PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD, and the previous
+    # JDBC_URL/JDBC_USER/JDBC_PASSWORD here were read by NOTHING - so the
+    # CronJob silently fell back to the embedded synthetic dataset (see
+    # oltp_source.py:70-76, 'PGPASSWORD not set') and PostgreSQL was never
+    # touched, with no error anywhere.
+    PGHOST: "postgres-oltp.platform.svc.cluster.local"
+    PGPORT: "5432"
+    PGDATABASE: "poc_oltp"
+    PGUSER: "postgres"
+    PGPASSWORD: "oltp_password_secret"
+    # src/container.py:67 and src/adapters/lineage/marquez_lineage.py:32 read
+    # MARQUEZ_URL; the previous OPENLINEAGE_URL was read by nothing, so lineage
+    # was never published to Marquez.
+    MARQUEZ_URL: "http://marquez.platform.svc.cluster.local:5000"
+    # Trino, for the serving adapter (src/adapters/serving/sql_serving.py:119-122).
+    TRINO_HOST: "trino.platform.svc.cluster.local"
+    TRINO_PORT: "8080"
+    TRINO_USER: "trino"
+    TRINO_CATALOG: "iceberg"
+    TRINO_SCHEMA: "serving"

@@ -33,22 +33,35 @@ spec:
         role: driver
       serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
       env:
-        - name: JDBC_URL
-          value: {{ .Values.sparkDefaults.database.jdbcUrl | quote }}
-        - name: JDBC_USER
+        # Names must match what the code reads (see s1-ingestion/values.yaml env
+        # for the full note). PG*/MARQUEZ_URL are the ones the Python source
+        # actually resolves; JDBC_*/OPENLINEAGE_URL were read by nothing.
+        - name: PGHOST
+          value: {{ .Values.sparkDefaults.database.host | quote }}
+        - name: PGPORT
+          value: {{ .Values.sparkDefaults.database.port | quote }}
+        - name: PGDATABASE
+          value: {{ .Values.sparkDefaults.database.name | quote }}
+        - name: PGUSER
           value: {{ .Values.sparkDefaults.database.jdbcUser | quote }}
-        - name: JDBC_PASSWORD
+        - name: PGPASSWORD
           value: {{ .Values.sparkDefaults.database.jdbcPassword | quote }}
+        - name: MARQUEZ_URL
+          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
         - name: ICEBERG_CATALOG_URL
           value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
+        - name: ICEBERG_CATALOG_NAME
+          value: {{ .Values.sparkDefaults.iceberg.catalogName | quote }}
+        - name: ICEBERG_WAREHOUSE
+          value: {{ .Values.sparkDefaults.iceberg.warehouse | quote }}
         - name: MINIO_ENDPOINT
           value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
         - name: MINIO_ACCESS_KEY
           value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
         - name: MINIO_SECRET_KEY
           value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
-        - name: OPENLINEAGE_URL
-          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
+        - name: POLARIS_OAUTH2_CREDENTIAL
+          value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
     executor:
       cores: {{ .Values.sparkDefaults.executor.cores }}
       instances: {{ .Values.sparkDefaults.executor.instances }}
@@ -93,16 +106,22 @@ spec:
         role: driver
       serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
       env:
+        - name: MARQUEZ_URL
+          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
         - name: ICEBERG_CATALOG_URL
           value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
+        - name: ICEBERG_CATALOG_NAME
+          value: {{ .Values.sparkDefaults.iceberg.catalogName | quote }}
+        - name: ICEBERG_WAREHOUSE
+          value: {{ .Values.sparkDefaults.iceberg.warehouse | quote }}
         - name: MINIO_ENDPOINT
           value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
         - name: MINIO_ACCESS_KEY
           value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
         - name: MINIO_SECRET_KEY
           value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
-        - name: OPENLINEAGE_URL
-          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
+        - name: POLARIS_OAUTH2_CREDENTIAL
+          value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
     executor:
       cores: {{ .Values.sparkDefaults.executor.cores }}
       instances: {{ .Values.sparkDefaults.executor.instances }}
@@ -147,16 +166,22 @@ spec:
         role: driver
       serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
       env:
+        - name: MARQUEZ_URL
+          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
         - name: ICEBERG_CATALOG_URL
           value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
+        - name: ICEBERG_CATALOG_NAME
+          value: {{ .Values.sparkDefaults.iceberg.catalogName | quote }}
+        - name: ICEBERG_WAREHOUSE
+          value: {{ .Values.sparkDefaults.iceberg.warehouse | quote }}
         - name: MINIO_ENDPOINT
           value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
         - name: MINIO_ACCESS_KEY
           value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
         - name: MINIO_SECRET_KEY
           value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
-        - name: OPENLINEAGE_URL
-          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
+        - name: POLARIS_OAUTH2_CREDENTIAL
+          value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
     executor:
       cores: {{ .Values.sparkDefaults.executor.cores }}
       instances: {{ .Values.sparkDefaults.executor.instances }}

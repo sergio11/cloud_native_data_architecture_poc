@@ -174,9 +174,7 @@ def test_classification_enum_consistent_everywhere() -> None:
     )
     federation_levels = [level["level"] for level in federation["spec"]["standards"]["classification"]["levels"]]
 
-    crd_text = (REPO_ROOT / "infra" / "helm" / "s6-mesh" / "templates" / "crds" / "dataproduct-crd.yaml").read_text(
-        encoding="utf-8"
-    )
+    crd_text = (REPO_ROOT / "infra" / "helm" / "s6-mesh" / "crds" / "dataproduct-crd.yaml").read_text(encoding="utf-8")
     crd_enum = re.search(r"enum:\s*\[([^\]]+)\]", crd_text)
     assert crd_enum, "DataProduct CRD classification enum not found"
     crd_levels = [token.strip().strip('"') for token in crd_enum.group(1).split(",")]

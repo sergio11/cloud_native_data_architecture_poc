@@ -55,13 +55,18 @@ subsystems:
           memory: "384Mi"
     polaris:
       enabled: true
+      # The 384Mi limit this profile used to set is below the floor the chart
+      # itself documents (s2-lakehouse/values.yaml: Quarkus runs with
+      # -XX:MaxRAMPercentage=80, and at 512Mi the JVM spends its time in GC and
+      # never reaches ready). 384Mi is worse, so the startupProbe failed after
+      # 600s and the catalog went CrashLoopBackOff.
       resources:
         requests:
-          cpu: "100m"
-          memory: "256Mi"
-        limits:
-          cpu: "500m"
+          cpu: "150m"
           memory: "384Mi"
+        limits:
+          cpu: "600m"
+          memory: "1024Mi"
 
   s3-batch:
     sparkOperator:
@@ -106,13 +111,19 @@ subsystems:
     flinkOperator:
       enabled: true
       replicaCount: 1
+      # Was 300m / 256Mi. The Flink Kubernetes Operator is a Quarkus JVM:
+      # 256Mi cannot hold a heap plus metaspace plus Netty direct buffers, so it
+      # was OOMKilled and the demo reported "jobs never go RUNNING" instead of
+      # an error. The 400m CPU floor is documented in
+      # s4-stream/templates/flink-operator-deployment.yaml: below it the
+      # operator was CPU-throttled into missing its own health endpoint.
       resources:
         requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "300m"
+          cpu: "200m"
           memory: "256Mi"
+        limits:
+          cpu: "800m"
+          memory: "512Mi"
     flinkJobs:
       ordersStream:
         enabled: true
@@ -130,6 +141,11 @@ subsystems:
   s5-serving:
     trino:
       enabled: true
+      # Heap must leave room for metaspace and direct buffers inside the
+      # container limit. 1024M in 1280Mi is exactly the combination
+      # s5-serving/values.yaml calls out as an OOM risk, and the chart runs with
+      # -XX:+ExitOnOutOfMemoryError, so the first heap excursion kills the pod.
+      # 896M gives ~384MiB of headroom, which is what the chart ships.
       resources:
         requests:
           cpu: "400m"
@@ -138,7 +154,7 @@ subsystems:
           cpu: "1200m"
           memory: "1280Mi"
       jvm:
-        maxHeapSize: "1024M"
+        maxHeapSize: "896M"
 
   s6-mesh:
     kyverno:

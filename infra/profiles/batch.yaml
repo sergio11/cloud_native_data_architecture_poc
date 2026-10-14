@@ -53,7 +53,10 @@ subsystems:
           memory: "384Mi"
         limits:
           cpu: "600m"
-          memory: "512Mi"
+          # Raised from 512Mi, which is exactly the floor s2-lakehouse documents
+          # as "spends its time in GC and never reaches ready". Limits do not
+          # affect scheduling (only requests do), so this costs nothing.
+          memory: "1024Mi"
 
   s3-batch:
     sparkOperator:

@@ -1,4 +1,4 @@
-# frozen_string_literal: true
+﻿# frozen_string_literal: true
 
 # ==============================================================================
 # Modern Data Architecture POC - Master Rakefile
@@ -157,6 +157,145 @@ def label_worker_roles(cluster_name)
   else
     sh 'kubectl', 'get', 'nodes', '--show-labels' rescue nil
   end
+end
+
+# Imports one image into one kind node, from the machine's own store.
+# Returns true when the node ends up holding it under the requested name.
+def load_image_into(node, image)
+  listing, ok = capture('podman', '--connection', node[:connection], 'images',
+                        '--format', '{{.Repository}}:{{.Tag}} {{.Id}}')
+  abort "\e[31mpodman is not reachable on connection #{node[:connection]}\e[0m" unless ok
+
+  # Podman does NOT store an unqualified registry the way Docker does: a
+  # `podman build -t poc/flink-stream:0.1.0` lands as
+  # localhost/poc/flink-stream:0.1.0, so a lookup for the docker.io/ form finds
+  # nothing and the task reports "not built yet" for an image that was built
+  # seconds earlier. Compare on repository:tag with the registry prefix removed
+  # from BOTH sides, so docker.io/x, localhost/x and x all match.
+  wanted = short_image_ref(image)
+  entry = listing.lines.find { |line| short_image_ref(line.split.first.to_s) == wanted }
+  if entry.nil?
+    warn_msg("#{image} is not built yet - build it with podman build first")
+    warn_msg("  store has: #{listing.lines.map { |l| l.split.first }.reject(&:empty?).join(', ')}")
+    return false
+  end
+
+  # podman reports the image config digest, which is the same digest containerd
+  # stores as a blob, so this is a precise identity check. `ctr images list`
+  # cannot be used for it: that column is the MANIFEST digest, which changes on
+  # every re-save and is not what the pod pins.
+  store_ref = entry.split.first
+  short_id = entry.split[1][0, 12]
+
+  # Already there under the right name? Nothing to do. Both spellings are
+  # checked: the blob alone is not enough, because the kubelet looks the image
+  # up BY NAME and the name is what went missing once already.
+  node_images, listed = capture('podman', '--connection', node[:connection], 'exec',
+                                node[:name], 'ctr', '-n', 'k8s.io', 'images', 'ls', '-q')
+  if listed && node_images.lines.map(&:strip).include?(image)
+    ok_msg("#{image} already in #{node[:name]} (#{short_id}) - skipped")
+    return true
+  end
+
+  info_msg("#{image} -> #{node[:name]} (image #{short_id}, copying inside the machine)")
+  # Two phases so progress is measurable: the save grows the tar, then the
+  # import grows the node blob store. One piped command hides both and looks
+  # exactly like a hang.
+  #
+  # The tar is named after the image id and KEPT in the machine. podman save of
+  # this image costs ~5 minutes and most of it is layers the node already has,
+  # so re-saving on every retry threw that away over and over. Keyed by id, a
+  # retry after a failed import pays only the import.
+  tar = "/tmp/kind-load-#{short_id}.tar"
+
+  info_msg('  phase 1/2: podman save inside the machine')
+  # test -s first: `podman save -o` refuses to touch an existing docker-archive
+  # ("docker-archive doesn't support modifying existing images"), so a tar left
+  # behind by an interrupted run would otherwise break every subsequent run.
+  save_out, saved = machine_script("test -s #{tar} && echo CACHED || " \
+                                   "(rm -f #{tar}; podman save -o #{tar} #{store_ref})") do |_tick|
+    size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0")
+    warn_msg("  save: #{(size.to_i / 1_048_576).to_s.rjust(5)} MB written")
+  end
+  unless saved
+    err_msg("#{image}: podman save failed")
+    puts save_out
+    return false
+  end
+  final_size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0").to_i
+  if final_size.zero?
+    err_msg("#{image}: no tar produced by the save")
+    puts save_out
+    return false
+  end
+  ok_msg("  tar ready: #{final_size / 1_048_576} MB in the machine")
+
+  info_msg("  phase 2/2: ctr images import into #{node[:name]}")
+  # The tar is deliberately NOT removed: it is the cache that makes the next
+  # attempt cost only the import. `cluster:image:clean` removes it.
+  out, success = machine_script("cat #{tar} | podman exec -i #{node[:name]} " \
+                                'ctr -n k8s.io images import -') do |_tick|
+    # Bytes, not blob count: `ctr images import` stages the whole tar before it
+    # commits anything, and almost every layer is already in the node
+    # (content addressed), so the new-blob delta stays at 0 through a transfer
+    # that is actually running at full speed.
+    used, = capture('podman', '--connection', node[:connection], 'exec', node[:name],
+                    'df', '--output=used', '-B1', '/var/lib/containerd')
+    warn_msg("  import: #{used.to_s.strip.split("\n").last.to_s.strip.to_i / 1_048_576} MB used by the node store")
+  end
+
+  # Phase 3: alias the image under the docker.io/ name the charts use.
+  #
+  # podman stores an unqualified build as localhost/poc/flink:0.1.0, and
+  # `ctr images import` preserves that spelling. Kubernetes resolves a bare
+  # reference to docker.io/ FIRST: the FlinkDeployment says
+  # `image: poc/flink-stream:0.1.0`, the kubelet turns it into
+  # docker.io/poc/flink-stream:0.1.0, finds no such tag and fails with
+  #   failed to resolve reference: pull access denied ... insufficient_scope
+  # even though the image is sitting right there in the node.
+  #
+  # The tag is content-addressed, so the alias costs no bytes. Doing it here
+  # keeps the charts portable (they keep saying docker.io/poc/...) instead of
+  # hardcoding localhost/ into every image reference.
+  if store_ref != image
+    tag_out, tagged = capture('podman', '--connection', node[:connection], 'exec',
+                              node[:name], 'ctr', '-n', 'k8s.io', 'images',
+                              'tag', store_ref, image)
+    if tagged
+      ok_msg("  aliased in the node: #{store_ref} -> #{image}")
+    else
+      warn_msg("could not tag #{image} in the node: #{tag_out.to_s.lines.first}")
+    end
+  end
+
+  verify, checked = capture('podman', '--connection', node[:connection], 'exec',
+                            node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
+  present = checked && verify.include?("sha256:#{short_id}")
+  unless success && present
+    err_msg("#{image} NOT loaded into #{node[:name]}#{success ? '' : ' (import command failed)'} - #{short_id} absent")
+    puts out unless out.to_s.strip.empty?
+    return false
+  end
+  ok_msg("#{image} loaded into #{node[:name]} (#{short_id})")
+  true
+end
+
+# Reduces an image reference to repository:tag with any registry prefix removed.
+#
+# Podman resolves an unqualified registry (podman build -t poc/flink:0.1.0) to
+# localhost/poc/flink:0.1.0 and keeps the fully-qualified form only if you
+# write it yourself, so the same image can be listed under either name. The
+# default port is dropped too, since :5000/... is the other spelling.
+#
+#   docker.io/poc/flink:0.1.0  -> poc/flink:0.1.0
+#   localhost/poc/flink:0.1.0   -> poc/flink:0.1.0
+#   poc/flink:0.1.0            -> poc/flink:0.1.0
+#   docker.io/library/busybox:1.36 -> library/busybox:1.36
+def short_image_ref(ref)
+  repo, _, tag = ref.to_s.partition(':')
+  repo = repo.sub(%r{\A(localhost|docker\.io|index\.docker\.io|registry-1\.docker\.io)/}, '')
+  repo = repo.sub(%r{:\d+/}, '/')
+  tag.empty? ? repo : "#{repo}:#{tag}"
 end
 
 # Names of the kind clusters that exist right now.
@@ -450,7 +589,7 @@ namespace :cluster do
     if next_step
       warn_msg("Next step: #{next_step}")
     else
-      ok_msg('Cluster is healthy. Detail: kubectl get pods -A · helm history <release> -n platform · rake cluster:logs[<name>]')
+      ok_msg('Cluster is healthy. Detail: kubectl get pods -A Â· helm history <release> -n platform Â· rake cluster:logs[<name>]')
     end
   end
 
@@ -839,111 +978,45 @@ namespace :cluster do
   ].freeze
 
   namespace :image do
-    desc 'Copy built images into the kind node (args: images=a,b; default: all poc/*)'
+    desc 'Copy built images into EVERY kind node (args: images=a,b; default: all poc/*)'
     task :load, [:images] do |_t, args|
       banner 'IMAGE LOAD'
       probe = podman_probe
-      node = probe[:containers].first
-      if node.nil?
-        abort "\e[31mNo kind cluster container found. Run: rake cluster:setup\e[0m"
+      # EVERY node, not the first one. The scheduler spreads pods across all
+      # three kind nodes, and a local image only exists inside the containerd
+      # of the node it was imported into: loading into the control-plane alone
+      # leaves the workers with nothing, and the pod that lands on a worker
+      # fails with
+      #   failed to pull image: insufficient_scope: authorization failed
+      # which looks exactly like a missing image and is not one.
+      nodes = probe[:containers]
+      if nodes.empty?
+        abort "\e[31mNo kind cluster container found. Run: rake cluster:create\e[0m"
       end
+      info_msg("target nodes: #{nodes.map { |n| n[:name] }.join(', ')}")
 
       images = args[:images].to_s.split(',').map(&:strip).reject(&:empty?)
       images = POC_IMAGES if images.empty?
 
-      loaded = 0
+      # image => [nodes it is present in]
+      loaded_into = Hash.new { |h, k| h[k] = [] }
       images.each do |image|
-        # The machine store is the source of truth for "does this tag exist".
-        listing, ok = capture('podman', '--connection', node[:connection], 'images',
-                              '--format', '{{.Repository}}:{{.Tag}} {{.Id}}')
-        abort "\e[31mpodman is not reachable on connection #{node[:connection]}\e[0m" unless ok
-
-        entry = listing.lines.find { |line| line.start_with?("#{image} ") }
-        if entry.nil?
-          warn_msg("#{image} is not built yet - build it with podman build first")
-          next
-        end
-        # podman reports the image config digest, which is the same digest
-        # containerd stores as a blob, so this is a precise identity check.
-        # `ctr images list` cannot be used for it: that column is the MANIFEST
-        # digest, which changes on every re-save and is not what the pod pins.
-        short_id = entry.split[1][0, 12]
-
-        node_content, listed = capture('podman', '--connection', node[:connection], 'exec',
-                                       node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
-        if listed && node_content.include?("sha256:#{short_id}")
-          ok_msg("#{image} already in #{node[:name]} (#{short_id}) - skipped")
-          loaded += 1
-          next
-        end
-
-        info_msg("#{image} -> #{node[:name]} (image #{short_id}, copying inside the machine)")
-        # Two phases so progress is measurable: the save grows the tar, then the
-        # import grows the node blob store. One piped command hides both and
-        # looks exactly like a hang.
-        #
-        # The tar is named after the image id and KEPT in the machine. podman save
-        # of this image costs ~5 minutes and most of it is layers the node already
-        # has, so re-saving on every retry threw that away over and over. Keyed by
-        # id, a retry after a failed import pays only the import, and only a
-        # genuinely new build is saved again.
-        tar = "/tmp/kind-load-#{short_id}.tar"
-
-        info_msg('  phase 1/2: podman save inside the machine')
-        # test -s first: `podman save -o` refuses to touch an existing
-        # docker-archive ("docker-archive doesn't support modifying existing
-        # images"), so a tar left behind by an interrupted run would otherwise
-        # break every subsequent run until deleted by hand.
-        save_out, saved = machine_script("test -s #{tar} && echo CACHED || " \
-                                         "(rm -f #{tar}; podman save -o #{tar} #{image})") do |_tick|
-          size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0")
-          warn_msg("  save: #{(size.to_i / 1_048_576).to_s.rjust(5)} MB written")
-        end
-        unless saved
-          err_msg("#{image}: podman save failed")
-          puts save_out
-          next
-        end
-        final_size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0").to_i
-        if final_size.zero?
-          err_msg("#{image}: no tar produced by the save")
-          puts save_out
-          next
-        end
-        ok_msg("  tar ready: #{final_size / 1_048_576} MB in the machine")
-
-        info_msg('  phase 2/2: ctr images import into the kind node')
-        # The tar is deliberately NOT removed here: it is the cache that makes
-        # the next attempt cost only the import. `cluster:image:clean` removes it.
-        out, success = machine_script("cat #{tar} | podman exec -i #{node[:name]} " \
-                                      'ctr -n k8s.io images import -') do |_tick|
-          # Bytes, not blob count: `ctr images import` stages the whole tar before
-          # it commits anything, and almost every layer of this image is already
-          # in the node (content addressed), so the new-blob delta stays at 0
-          # through a transfer that is actually running at full speed.
-          used, = capture('podman', '--connection', node[:connection], 'exec', node[:name],
-                          'df', '--output=used', '-B1', '/var/lib/containerd')
-          warn_msg("  import: #{used.to_s.strip.split("\n").last.to_s.strip.to_i / 1_048_576} MB used by the node store")
-        end
-
-        verify, checked = capture('podman', '--connection', node[:connection], 'exec',
-                                  node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
-        present = checked && verify.include?("sha256:#{short_id}")
-        if success && present
-          ok_msg("#{image} loaded and present in the node (#{short_id})")
-          loaded += 1
-        else
-          err_msg("#{image} NOT loaded#{success ? '' : ' (command failed)'} - #{short_id} absent from the node store")
-          puts out unless out.strip.empty?
-          next
+        nodes.each do |node|
+          loaded_into[image] << node[:name] if load_image_into(node, image)
         end
       end
+
       puts
-      if loaded == images.size
-        ok_msg("#{loaded} image(s) available in #{node[:name]}")
-        warn_msg('existing pods keep the digest they started with: recreate them to pick up a new build') unless loaded.zero?
+      failed = loaded_into.reject { |image, where| where.size == nodes.size }
+      if failed.empty?
+        ok_msg("#{images.size} image(s) present in all #{nodes.size} node(s)")
+        warn_msg('existing pods keep the digest they started with: recreate them to pick up a new build')
       else
-        abort "\e[31m#{loaded}/#{images.size} image(s) loaded into #{node[:name]}\e[0m"
+        failed.each do |image, where|
+          missing = nodes.map { |n| n[:name] } - where
+          err_msg("#{image}: present in #{where.size}/#{nodes.size} node(s), MISSING in #{missing.join(', ')}")
+        end
+        abort "\e[31m#{failed.size}/#{images.size} image(s) incomplete across the cluster\e[0m"
       end
     end
 

@@ -34,7 +34,15 @@ subsystem: s4-stream
 - name: ICEBERG_CATALOG_URI
   value: {{ .Values.icebergCatalog.uri | quote }}
 - name: ICEBERG_WAREHOUSE
-  value: {{ .Values.icebergCatalog.warehouse | quote }}
+  # NOT the S3 location. Polaris resolves an Iceberg REST client to a catalog by
+  # NAME: the request is GET /api/catalog/v1/config?warehouse=<this value> and
+  # Polaris matches it against catalog names. Passing the S3 warehouse here
+  # (s3://warehouse/) is what made every job fail with
+  #   RESTException: Unable to find warehouse s3://warehouse/
+  # while the catalog existed with exactly that base location. The S3 location
+  # still belongs in icebergCatalog.warehouse, which is what Polaris is
+  # bootstrapped with; this value is the catalog identifier.
+  value: {{ .Values.icebergCatalog.name | quote }}
 - name: S3_ENDPOINT
   value: {{ .Values.icebergCatalog.s3Endpoint | quote }}
 - name: S3_ACCESS_KEY

@@ -354,7 +354,12 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
             `source_tier`     STRING,
             PRIMARY KEY (`window_start`, `status`) NOT ENFORCED
         )
-        PARTITIONED BY (days(`window_start`))
+        -- No PARTITIONED BY (days(`window_start`)) clause. Flink 1.18's parser
+        -- rejects a computed partitioning expression in a catalog CREATE TABLE
+        -- ("SQL parse failed. Encountered "(" at line 13, column 29", the "(" of
+        -- days(). Iceberg partitions on its own default here; if daily
+        -- partitioning is needed it has to be applied to the catalog table, not
+        -- declared in this statement.
         WITH ('format' = 'parquet', 'write.upsert.enabled' = 'true')
         """
     )
@@ -384,9 +389,14 @@ def main() -> None:
     # do not depend on the container clock.
     table_env.get_config().set("table.exec.timezone", "UTC")
     register_iceberg_catalog(table_env, config)
-    # from_data_stream carries the column names: the DataStream type information
-    # is positional (see build_source_and_windows).
-    table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed, window_schema()))
+    # from_data_stream WITHOUT a schema, and the Schema handed to
+    # create_temporary_view instead. PyFlink 1.18 derives a generic RowTypeInfo
+    # with positional fields (f0..f7), so passing named columns to
+    # from_data_stream is rejected with
+    #   ValidationException: Unable to find a field named 'window_start' ...
+    #   Currently available fields are: [f0, f1, f2, f3, f4, f5, f6, f7]
+    # Passing the Schema here names the columns positionally instead.
+    table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed), window_schema())
 
     # Terminal submission. Its total absence is what produced the original
     # "The application contains no execute() calls" failure. SELECT * relies on

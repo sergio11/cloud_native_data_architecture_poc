@@ -95,10 +95,48 @@ polaris:
 
   # Durable catalog metadata. Without it the catalog is wiped on every Polaris
   # restart and the Iceberg tables in MinIO become invisible to every engine.
+  #
+  # type: "jdbc" is what actually turns persistence on (the deployment maps it to
+  # POLARIS_PERSISTENCE_TYPE). "in-memory" is the previous, broken behaviour.
+  #
+  # PostgreSQL is not a preference: the JDBC driver in apache/polaris:1.8.0 is
+  # org.postgresql + quarkus-jdbc-postgresql and the image ships no H2 driver.
+  # This reuses the Postgres the cluster already runs (s1-ingestion -> postgres-oltp)
+  # instead of adding a pod to a 6 GB node; the credentials must match its env.
   persistence:
+    # "in-memory" for now, "relational-jdbc" is the durable target.
+    #
+    # relational-jdbc boots, connects and reads its schema (schema v6 from the
+    # polaris-relational-jdbc-1.8.0 jar, applied by polaris-db-schema-job.yaml,
+    # with ?currentSchema=public). It stops at one step: with a JDBC metastore
+    # Polaris does NOT bootstrap the realm on startup the way it does in-memory
+    # - it answers "Realm POLARIS is not bootstrapped... Please run Bootstrap
+    # command", and `java -jar quarkus-run.jar Bootstrap` is silently ignored,
+    # so it starts the server instead of bootstrapping. The command lives in the
+    # 424 MB binary distribution (polaris-bin-1.8.0.tgz); no admin-tool artifact
+    # is published to Maven Central. That download is the next step once the
+    # speed layer is verified end to end.
+    #
+    # Until then the catalog is recreated by polaris-bootstrap-job.yaml after
+    # every Polaris restart.
+    type: "in-memory"
+    driver: "org.postgresql.Driver"
+    # Reuses the PostgreSQL the cluster already runs (s1-ingestion ->
+    # postgres-oltp) instead of adding a pod to a 6 GB node. Plain literals:
+    # values.yaml is YAML, Helm does not evaluate templates inside it, and the
+    # host must follow a change of global.namespace by hand.
+    host: "postgres-oltp.platform.svc.cluster.local"
+    database: "poc_oltp"
     username: "postgres"
     password: "oltp_password_secret"
-    jdbcUrl: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp"
+    # currentSchema pins the schema explicitly: Polaris reports
+    # `relation "entities" does not exist` even though the table is in public and
+    # the connection is to the right database, which is what an unset/foreign
+    # search_path looks like from the driver's side.
+    jdbcUrl: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp?currentSchema=public"
+    # Small on purpose: the node has 6 GB shared by everything and Polaris only
+    # issues a handful of metadata queries.
+    poolMaxSize: 10
 
   config:
     realm: "default-realm"

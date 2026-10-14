@@ -1,0 +1,88 @@
+{{- if and .Values.polaris.enabled (ne .Values.polaris.persistence.type "in-memory") }}
+# ---------------------------------------------------------------------------
+# Applies the relational schema before Polaris (and the catalog bootstrap) come
+# up. Hook weight 5 puts it ahead of polaris-catalog-bootstrap (weight 10).
+#
+# Runs on the same image the cluster already has for PostgreSQL so it needs
+# psql and nothing else; it talks to the database over the Service, never to a
+# PVC, so it cannot corrupt the data directory.
+# ---------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-db-schema
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: polaris-db-schema
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: polaris-db-schema
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for PostgreSQL at {{ .Values.polaris.persistence.host }}..."
+              ATTEMPT=0
+              until PGPASSWORD="{{ .Values.polaris.persistence.password }}" \
+                    psql -h {{ .Values.polaris.persistence.host }} \
+                         -U {{ .Values.polaris.persistence.username }} \
+                         -d {{ .Values.polaris.persistence.database }} \
+                         -c 'SELECT 1' >/dev/null 2>&1; do
+                ATTEMPT=$((ATTEMPT + 1))
+                if [ "${ATTEMPT}" -gt 60 ]; then
+                  echo "ERROR: PostgreSQL not reachable after ${ATTEMPT} attempts."
+                  exit 1
+                fi
+                sleep 5
+              done
+              echo "PostgreSQL is reachable."
+      containers:
+        - name: apply-schema
+          image: postgres:16-alpine
+          env:
+            - name: PGHOST
+              value: {{ .Values.polaris.persistence.host | quote }}
+            - name: PGUSER
+              value: {{ .Values.polaris.persistence.username | quote }}
+            - name: PGPASSWORD
+              value: {{ .Values.polaris.persistence.password | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.polaris.persistence.database | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Applying the Polaris relational schema (idempotent)..."
+              # ON_ERROR_STOP so a real failure fails the hook instead of
+              # scrolling past and leaving a half-created schema behind.
+              psql -v ON_ERROR_STOP=1 -f /schema/postgres-schema.sql
+              echo "Verifying the tables Polaris needs exist..."
+              for T in version entities grant_records principal_authentication_data; do
+                psql -tAc "SELECT to_regclass('public.${T}') IS NOT NULL" | grep -q t \
+                  || { echo "ERROR: table '${T}' is still missing."; exit 1; }
+                echo "  ${T}: present"
+              done
+              echo "=== Polaris relational schema applied ==="
+          volumeMounts:
+            - name: schema
+              mountPath: /schema
+              readOnly: true
+      volumes:
+        - name: schema
+          configMap:
+            name: polaris-db-schema
+{{- end }}

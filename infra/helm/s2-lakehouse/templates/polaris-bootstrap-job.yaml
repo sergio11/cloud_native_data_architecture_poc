@@ -34,9 +34,16 @@ metadata:
     app: polaris-catalog-bootstrap
     {{- include "s2-lakehouse.labels" . | nindent 4 }}
   annotations:
-    # Unique suffix forces a new Job on every Helm upgrade so the catalog
-    # is always re-created after a Polaris restart during a redeploy.
+    # A real hook, not just a weight: hook-weight alone does nothing without
+    # helm.sh/hook, and without the hook the Job is an ordinary resource that
+    # Helm patches - and spec.template is immutable, so the second upgrade failed
+    # with "field is immutable" every time this script changed.
+    #
+    # before-hook-creation + hook-succeeded means every upgrade runs a fresh Job
+    # (it is deleted as soon as it succeeds, so it never lingers either).
+    helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   # Keep completed pods for 10 minutes so logs are readable after success.
   ttlSecondsAfterFinished: 600
@@ -138,6 +145,13 @@ spec:
               echo "Existing catalog definition:"
               curl -s "${POLARIS_BASE_URL}/api/management/v1/catalogs/${CATALOG_NAME}" -H "${AUTH}" || true
               echo ""
+              {{- if ne .Values.polaris.persistence.type "in-memory" }}
+              # NOT dropped with a persistent metastore. The catalog now survives
+              # a Polaris restart on its own, and dropping it would throw away the
+              # Iceberg table metadata on every deploy. 409 from the create below
+              # is then the correct, expected answer.
+              echo "Metastore is persistent: keeping the existing catalog as-is."
+              {{- else }}
               DROP=$(curl -s -o /dev/null -w "%{http_code}" \
                 -X DELETE "${POLARIS_BASE_URL}/api/management/v1/catalogs/${CATALOG_NAME}?cascade=true&purge=true" \
                 -H "${AUTH}")
@@ -151,6 +165,7 @@ spec:
                 # what decides whether the run is a success.
                 echo "WARN: dropping the catalog returned HTTP ${DROP}; continuing."
               fi
+              {{- end }}
 
               echo "Creating catalog '${CATALOG_NAME}'..."
               STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
@@ -183,56 +198,32 @@ spec:
               fi
 
               # -----------------------------------------------------------------
-              # Step 3b: verify the warehouse actually resolves.
+              # Step 3a: grant the job principal a role ON the catalog.
               #
-              # Polaris resolves an Iceberg REST client to a catalog BY base
-              # location, so a catalog that exists but carries another
-              # default-base-location makes every Flink/Trino job fail with
-              # "Unable to find warehouse <this one>" even though the create
-              # above answered 409 and looked healthy. This is the assertion that
-              # catches it, because a green bootstrap used to be a lie.
+              # Creating a catalog does not grant anything on it. Polaris resolves
+              # an Iceberg REST client to a catalog per principal, so a client
+              # whose service account holds no role sees nothing and GET
+              # /v1/config?warehouse=... answers 404 "Unable to find warehouse" -
+              # even though the catalog exists with exactly that base location
+              # and the very same token works on the catalog API (a different
+              # code path). Granting catalog_admin is what makes it visible.
+              # Management API: /api/management/v1/catalogs/{catalog}/catalog-roles
               # -----------------------------------------------------------------
-              echo "Verifying Polaris resolves warehouse '${WAREHOUSE_LOCATION}'..."
-              # Retried: Polaris indexes a freshly created catalog asynchronously,
-              # so a lookup issued right after the 201 can miss it. Three tries
-              # with a pause separate "not loaded yet" from "never resolvable".
-              CONFIG_STATUS=000
-              ATTEMPT=1
-              while [ "${ATTEMPT}" -le 3 ]; do
-                CONFIG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                  "${POLARIS_BASE_URL}/api/catalog/v1/config?warehouse=${WAREHOUSE_ENCODED}" \
-                  -H "${AUTH}")
-                if [ "${CONFIG_STATUS}" = "200" ]; then
-                  break
-                fi
-                echo "  attempt ${ATTEMPT}: HTTP ${CONFIG_STATUS}, waiting 10s..."
-                sleep 10
-                ATTEMPT=$((ATTEMPT + 1))
-              done
-              if [ "${CONFIG_STATUS}" = "200" ]; then
-                echo "Warehouse '${WAREHOUSE_LOCATION}' resolves to catalog '${CATALOG_NAME}'."
+              echo "Granting catalog_admin on '${CATALOG_NAME}' to service role '${POLARIS_CLIENT_ID}'..."
+              GRANT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X POST "${POLARIS_BASE_URL}/api/management/v1/catalogs/${CATALOG_NAME}/catalog-roles" \
+                -H "${AUTH}" \
+                -H "Content-Type: application/json" \
+                -d "{
+                  \"catalogRole\": { \"name\": \"catalog_admin\" },
+                  \"principal\": { \"type\": \"SERVICE_ROLE\", \"name\": \"${POLARIS_CLIENT_ID}\" }
+                }")
+              if [ "${GRANT_STATUS}" = "201" ] || [ "${GRANT_STATUS}" = "204" ]; then
+                echo "Role granted (HTTP ${GRANT_STATUS})."
+              elif [ "${GRANT_STATUS}" = "409" ]; then
+                echo "Role already present (HTTP 409)."
               else
-                # Polaris normalises base locations, so a trailing slash in the
-                # values can be exactly why the lookup misses: the catalog is
-                # stored as s3://warehouse but every client asks for
-                # s3://warehouse/. Try the trimmed form before failing, and say
-                # which one works instead of leaving it to be guessed at.
-                echo "WARN: HTTP ${CONFIG_STATUS} for '${WAREHOUSE_LOCATION}', retrying without the trailing slash..."
-                TRIMMED=$(printf '%s' "${WAREHOUSE_LOCATION}" | sed 's:/*$::')
-                TRIMMED_ENCODED=$(printf '%s' "${TRIMMED}" | sed 's|/|%2F|g; s|:|%3A|g')
-                CONFIG_TRIMMED=$(curl -s -o /dev/null -w "%{http_code}" \
-                  "${POLARIS_BASE_URL}/api/catalog/v1/config?warehouse=${TRIMMED_ENCODED}" \
-                  -H "${AUTH}")
-                if [ "${CONFIG_TRIMMED}" = "200" ]; then
-                  echo "RESOLVED: Polaris answers for '${TRIMMED}' but NOT for"
-                  echo "         '${WAREHOUSE_LOCATION}'. The trailing slash is the"
-                  echo "         bug: set polaris.config.warehouseLocation to '${TRIMMED}'"
-                  echo "         and every client must use the same value."
-                  exit 1
-                fi
-                echo "ERROR: Polaris returned HTTP ${CONFIG_STATUS} for '${WAREHOUSE_LOCATION}'"
-                echo "       and HTTP ${CONFIG_TRIMMED} for '${TRIMMED}'. No Iceberg"
-                echo "       client can use this catalog."
+                echo "ERROR: granting catalog_admin returned HTTP ${GRANT_STATUS}."
                 exit 1
               fi
 
@@ -255,6 +246,41 @@ spec:
                   exit 1
                 fi
               done
+
+              # -----------------------------------------------------------------
+              # Step 5: verify the catalog resolves the way clients will ask.
+              #
+              # Polaris identifies a catalog for an Iceberg REST client BY NAME:
+              # the call is GET /api/catalog/v1/config?warehouse=<catalog name>,
+              # NOT by the S3 base location. A bootstrap that treats the catalog
+              # POST returning 409 as success used to look completely healthy while
+              # every Flink/Trino job failed with "Unable to find warehouse
+              # s3://warehouse/" - because it never checked the lookup at all.
+              #
+              # Runs after the namespaces on purpose: a failing assertion here must
+              # not leave the catalog without them.
+              # -----------------------------------------------------------------
+              echo "Verifying Polaris resolves catalog '${CATALOG_NAME}' for REST clients..."
+              CONFIG_STATUS=000
+              ATTEMPT=1
+              while [ "${ATTEMPT}" -le 3 ]; do
+                CONFIG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+                  "${POLARIS_BASE_URL}/api/catalog/v1/config?warehouse=${CATALOG_NAME}" \
+                  -H "${AUTH}")
+                if [ "${CONFIG_STATUS}" = "200" ]; then
+                  break
+                fi
+                echo "  attempt ${ATTEMPT}: HTTP ${CONFIG_STATUS}, waiting 10s..."
+                sleep 10
+                ATTEMPT=$((ATTEMPT + 1))
+              done
+              if [ "${CONFIG_STATUS}" = "200" ]; then
+                echo "Catalog '${CATALOG_NAME}' resolves: REST clients reach the warehouse '${WAREHOUSE_LOCATION}'."
+              else
+                echo "ERROR: Polaris returned HTTP ${CONFIG_STATUS} for warehouse='${CATALOG_NAME}'."
+                echo "       No Iceberg client can use this catalog."
+                exit 1
+              fi
 
               echo "=== Polaris catalog bootstrap complete ==="
 {{- end }}

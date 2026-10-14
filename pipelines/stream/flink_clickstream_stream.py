@@ -340,7 +340,9 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
             `source_tier`    STRING,
             PRIMARY KEY (`window_start`, `event_type`) NOT ENFORCED
         )
-        PARTITIONED BY (days(`window_start`))
+        -- No PARTITIONED BY (days(`window_start`)) clause: Flink 1.18's parser
+        -- rejects a computed partitioning expression in a catalog CREATE TABLE
+        -- ("Encountered "("" at the days() call). Iceberg uses its own default.
         WITH ('format' = 'parquet', 'write.upsert.enabled' = 'true')
         """
     )
@@ -368,8 +370,10 @@ def main() -> None:
     table_env = StreamTableEnvironment.create(env)
     table_env.get_config().set("table.exec.timezone", "UTC")
     register_iceberg_catalog(table_env, config)
-    # from_data_stream carries the column names; the DataStream type info is positional.
-    table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed, window_schema()))
+    # from_data_stream WITHOUT a schema, Schema handed to create_temporary_view:
+    # PyFlink 1.18 derives positional fields (f0..f7), so named columns passed to
+    # from_data_stream are rejected ("Unable to find a field named ...").
+    table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed), window_schema())
 
     result = table_env.execute_sql(
         f"INSERT INTO `{config.catalog_name}`.`marketing`.`clickstream_windowed` SELECT * FROM {TEMP_VIEW}"

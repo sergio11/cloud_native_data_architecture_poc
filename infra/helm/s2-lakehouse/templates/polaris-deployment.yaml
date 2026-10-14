@@ -49,14 +49,55 @@ spec:
               containerPort: 8182
               protocol: TCP
           env:
-            # In-memory metastore. The relational-jdbc alternative needs a first
-            # boot that maps the Hibernate schema, which on this 6 GB cluster
-            # takes longer than any probe budget we can afford: Polaris never
-            # reached ready in 15 minutes. The trade-off is that the CATALOG is
-            # rebuilt on every Polaris restart; the Iceberg tables themselves
-            # live in MinIO and survive. `polaris-bootstrap-job.yaml` re-creates
-            # the catalog idempotently, so a restart is recoverable.
+            # Metastore. Quarkus env mapping: a double underscore is one nesting
+            # level, so POLARIS_PERSISTENCE_JDBC__CONNECTION__URL is
+            # polaris.persistence.jdbc.connection.url.
             #
+            # This used to be the in-memory metastore with a comment explaining
+            # that JDBC never came up on this cluster. That conclusion was drawn
+            # from a 15-minute timeout imposed by the liveness probe, not from the
+            # metastore: the probe killed Polaris during the first Hibernate
+            # schema mapping. The startupProbe below now allows 10 minutes, so
+            # the JDBC path is given the time it needs, and the catalog survives
+            # restarts instead of vanishing and taking the speed layer with it.
+            - name: POLARIS_PERSISTENCE_TYPE
+              value: {{ .Values.polaris.persistence.type | quote }}
+            {{- if ne .Values.polaris.persistence.type "in-memory" }}
+            # Env mapping: a DOTS in the property name becomes ONE underscore, not
+            # two. `quarkus.datasource.jdbc.url` is QUARKUS_DATASOURCE_JDBC_URL and
+            # `polaris.persistence.jdbc.connection.url` is
+            # POLARIS_PERSISTENCE_JDBC_CONNECTION_URL. A doubled underscore is only
+            # how a literal underscore inside a property name is escaped, and
+            # writing __ silently produced an unknown property that Quarkus ignored -
+            # which is why the datasource still reported "URL is not set".
+            - name: QUARKUS_DATASOURCE_JDBC_URL
+              value: {{ .Values.polaris.persistence.jdbcUrl | quote }}
+            - name: QUARKUS_DATASOURCE_USERNAME
+              value: {{ .Values.polaris.persistence.username | quote }}
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              value: {{ .Values.polaris.persistence.password | quote }}
+            - name: QUARKUS_DATASOURCE_JDBC_DRIVER
+              value: {{ .Values.polaris.persistence.driver | quote }}
+            - name: POLARIS_PERSISTENCE_JDBC_CONNECTION_URL
+              value: {{ .Values.polaris.persistence.jdbcUrl | quote }}
+            - name: POLARIS_PERSISTENCE_JDBC_CONNECTION_DRIVER
+              value: {{ .Values.polaris.persistence.driver | quote }}
+            - name: POLARIS_PERSISTENCE_JDBC_CONNECTION_USER
+              value: {{ .Values.polaris.persistence.username | quote }}
+            - name: POLARIS_PERSISTENCE_JDBC_CONNECTION_PASSWORD
+              value: {{ .Values.polaris.persistence.password | quote }}
+            - name: POLARIS_PERSISTENCE_JDBC_CONNECTION_POOL_MAX_SIZE
+              value: {{ .Values.polaris.persistence.poolMaxSize | quote }}
+            # Schema management. Without it Polaris connects fine but every query
+            # fails with `relation "entities" does not exist`. Polaris 1.8 maps
+            # the tables with Hibernate (not Flyway - no migration ever ran and
+            # the database stayed empty), so it is Hibernate's own DDL export
+            # that has to be enabled.
+            - name: POLARIS_PERSISTENCE_JDBC_SCHEMA_MANAGEMENT_TYPE
+              value: "hibernate"
+            - name: QUARKUS_HIBERNATE_ORM_DATABASE_GENERATION
+              value: "update"
+            {{- end }}
             # Fixed root credentials. Without these Polaris generates a random
             # pair on every boot and only prints it to stdout, so no Iceberg
             # client could ever be pointed at it. Format per

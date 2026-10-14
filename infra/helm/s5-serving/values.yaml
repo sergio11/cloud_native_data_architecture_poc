@@ -45,6 +45,10 @@ catalogs:
   iceberg:
     enabled: true
     restCatalogUri: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
+    # Name of the catalog inside Polaris. This is what identifies it to an Iceberg
+    # REST client (warehouse=<catalog name>), so it must match
+    # s2-lakehouse -> polaris.config.defaultCatalog, not the S3 location.
+    restCatalogName: "polaris"
     s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
     # s3.region is required by the Trino native S3 client even for MinIO.
     s3Region: "us-east-1"

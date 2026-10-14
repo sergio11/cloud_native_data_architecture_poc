@@ -33,6 +33,10 @@ data:
     connector.name=iceberg
     iceberg.catalog.type=rest
     iceberg.rest-catalog.uri={{ .Values.catalogs.iceberg.restCatalogUri }}
+    # Polaris resolves a REST client to a catalog by NAME, not by S3 location:
+    # the call is GET /api/catalog/v1/config?warehouse=<this value>. Giving the
+    # S3 warehouse here makes every query fail with "Unable to find warehouse".
+    iceberg.rest-catalog.warehouse={{ .Values.catalogs.iceberg.restCatalogName }}
     # OAuth2 required by Polaris 1.x — without a bearer token every catalog
     # call returns 401 and Trino cannot discover or query any table.
     iceberg.rest-catalog.security=OAUTH2

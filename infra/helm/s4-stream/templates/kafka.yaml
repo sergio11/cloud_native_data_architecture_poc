@@ -58,6 +58,19 @@ spec:
               containerPort: 9093
               protocol: TCP
           env:
+            # apache/kafka's bin/kafka-server-start.sh defaults to
+            #   KAFKA_HEAP_OPTS="-Xmx1G -Xms1G"
+            # when the variable is unset, and this chart caps the container at
+            # 768Mi (values.yaml kafka.resources.limits.memory). -Xms1G cannot
+            # be reserved inside that cgroup, so the broker died at boot with
+            # "Could not reserve enough space for object heap" and CrashLoopBackOff
+            # while the startupProbe masked it for 5 minutes.
+            #
+            # Sized to the container: 512m heap + 128m direct + metaspace/code
+            # cache in the remaining ~100Mi. Single broker, two topics, three
+            # partitions each, so the heap is generous for this workload.
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms384m -Xmx512m -XX:MaxDirectMemorySize=128m"
             - name: KAFKA_NODE_ID
               value: "1"
             - name: KAFKA_PROCESS_ROLES

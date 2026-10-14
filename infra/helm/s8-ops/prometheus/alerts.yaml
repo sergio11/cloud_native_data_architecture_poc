@@ -1,26 +1,42 @@
 groups:
   - name: modern_data_platform_alerts
     rules:
-      - alert: DataQualityBreach
-        expr: avg(data_quality_assertion_success_ratio) < 0.95
-        for: 2m
-        labels:
-          severity: critical
-          subsystem: s7-fabric
-        annotations:
-          summary: "Data quality threshold dropped below 95%"
-          description: "Quality assertions failed across domain silver or gold datasets. Gate blocked downstream updates."
+      # ------------------------------------------------------------------------
+      # DISABLED (rule commented out, not deleted - restore it when the metric
+      # exists). data_quality_assertion_success_ratio is not emitted by any
+      # component in this POC: the quality gates live in quality/gates/ and
+      # report through Marquez and the console, not through a Prometheus
+      # exposition endpoint. With the rule active Prometheus evaluates it
+      # against an empty series forever, which is indistinguishable from a
+      # healthy system.
+      # ------------------------------------------------------------------------
+      # - alert: DataQualityBreach
+      #   expr: avg(data_quality_assertion_success_ratio) < 0.95
+      #   for: 2m
+      #   labels:
+      #     severity: critical
+      #     subsystem: s7-fabric
+      #   annotations:
+      #     summary: "Data quality threshold dropped below 95%"
+      #     description: "Quality assertions failed across domain silver or gold datasets. Gate blocked downstream updates."
 
-      - alert: StreamLatencyHigh
-        expr: flink_taskmanager_job_latency_source_to_sink_seconds > 5
-        for: 1m
-        labels:
-          severity: warning
-          subsystem: s4-stream
-        annotations:
-          summary: "Streaming latency exceeded 5 seconds SLO (RF-09)"
-          description: "End-to-end event latency from Kafka to serving layer exceeds the agreed 5s threshold."
+      # ------------------------------------------------------------------------
+      # DISABLED for the same reason: the Flink job exports Flink's own native
+      # metrics (flink_taskmanager_*), but not this composed
+      # source-to-sink latency series, and nothing derives it.
+      # ------------------------------------------------------------------------
+      # - alert: StreamLatencyHigh
+      #   expr: flink_taskmanager_job_latency_source_to_sink_seconds > 5
+      #   for: 1m
+      #   labels:
+      #     severity: warning
+      #     subsystem: s4-stream
+      #   annotations:
+      #     summary: "Streaming latency exceeded 5 seconds SLO (RF-09)"
+      #     description: "End-to-end event latency from Kafka to serving layer exceeds the agreed 5s threshold."
 
+      # ACTIVE: kafka_consumergroup_lag is a real broker metric (ConsumerGroupLagGauge)
+      # and the kafka scrape job in templates/prometheus.yaml now collects it.
       - alert: KafkaConsumerLagCritical
         expr: sum(kafka_consumergroup_lag) by (consumergroup) > 5000
         for: 3m
@@ -31,12 +47,17 @@ groups:
           summary: "Kafka consumer group lag critical"
           description: "Consumer group {{ $labels.consumergroup }} has accumulated over 5,000 unconsumed records."
 
-      - alert: GoldTableFreshnessExpired
-        expr: (time() - lakehouse_table_last_write_timestamp{layer="gold"}) > 86400
-        for: 10m
-        labels:
-          severity: warning
-          subsystem: s2-lakehouse
-        annotations:
-          summary: "Gold tier table freshness expired"
-          description: "Table {{ $labels.table_name }} has not received updates for over 24 hours."
+      # ------------------------------------------------------------------------
+      # DISABLED: lakehouse_table_last_write_timestamp is not emitted by
+      # Polaris, Trino or Spark in this POC. Iceberg table metadata holds the
+      # real write time; nothing turns it into a metric.
+      # ------------------------------------------------------------------------
+      # - alert: GoldTableFreshnessExpired
+      #   expr: (time() - lakehouse_table_last_write_timestamp{layer="gold"}) > 86400
+      #   for: 10m
+      #   labels:
+      #     severity: warning
+      #     subsystem: s2-lakehouse
+      #   annotations:
+      #     summary: "Gold tier table freshness expired"
+      #     description: "Table {{ $labels.table_name }} has not received updates for over 24 hours."

@@ -149,7 +149,6 @@ polaris:
     poolMaxSize: 10
 
   config:
-    realm: "default-realm"
     defaultCatalog: "polaris"
     warehouseLocation: "s3://warehouse/"
     s3Endpoint: "http://minio.platform.svc.cluster.local:9000"

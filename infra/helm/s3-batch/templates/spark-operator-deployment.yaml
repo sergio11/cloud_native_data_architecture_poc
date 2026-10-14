@@ -53,12 +53,14 @@ spec:
             httpGet:
               path: /metrics
               port: 10254
+            timeoutSeconds: 10
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /metrics
               port: 10254
+            timeoutSeconds: 10
             initialDelaySeconds: 30
             periodSeconds: 20
             failureThreshold: 6

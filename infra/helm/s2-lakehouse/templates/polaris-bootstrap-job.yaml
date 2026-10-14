@@ -67,12 +67,29 @@ spec:
         app: polaris-catalog-bootstrap
     spec:
       restartPolicy: OnFailure
+      # No resources meant BestEffort QoS: under memory pressure these are the
+      # first pods evicted, and a bootstrap that dies mid-run leaves the
+      # catalog half-created.
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "250m"
+          memory: "192Mi"
       initContainers:
         # Step 1: wait until Polaris is genuinely healthy (not just port-open).
         # Uses the management port 8182 which serves /q/health/ready without
         # authentication (same endpoint as the startupProbe).
         - name: wait-for-polaris
           image: curlimages/curl:8.9.1
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
           command:
             - /bin/sh
             - -c

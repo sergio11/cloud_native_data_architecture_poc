@@ -22,6 +22,31 @@ data:
         static_configs:
           - targets:
               - "localhost:9090"
+      # The previous config scraped ONLY Prometheus itself, so every series the
+      # alert rules reference was absent and none of them could ever transition
+      # to firing - the rules were decoration. These jobs add the two targets
+      # in this POC that actually export metrics:
+      #
+      #   kafka  exports kafka_consumergroup_lag (ConsumerGroupLagGauge) on 9092
+      #   minio  exports the minio_* family on /minio/v2/metrics/cluster, which
+      #          needs MINIO_PROMETHEUS_AUTH_TYPE=public (already set)
+      #
+      # Deliberately NOT scraped, because nothing in this repo emits them:
+      #   data_quality_assertion_success_ratio
+      #   lakehouse_table_last_write_timestamp
+      #   flink_taskmanager_job_latency_source_to_sink_seconds
+      # The alert rules that reference those metrics are commented out in
+      # prometheus/alerts.yaml with the reason, rather than left to sit in a
+      # permanent "no data" state that looks like a healthy system.
+      - job_name: kafka
+        static_configs:
+          - targets:
+              - "kafka.{{ .Values.global.namespace }}.svc.cluster.local:9092"
+      - job_name: minio
+        metrics_path: /minio/v2/metrics/cluster
+        static_configs:
+          - targets:
+              - "minio.{{ .Values.global.namespace }}.svc.cluster.local:9000"
   alerts.yaml: |
     {{- .Files.Get "prometheus/alerts.yaml" | nindent 4 }}
 ---

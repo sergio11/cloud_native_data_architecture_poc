@@ -9,21 +9,48 @@ metadata:
     {{- include "s2-lakehouse.labels" . | nindent 4 }}
 spec:
   backoffLimit: 10
+  activeDeadlineSeconds: 600
   template:
     metadata:
       labels:
         app: minio-bucket-init
     spec:
       restartPolicy: OnFailure
+      # Without resources this pod is BestEffort QoS, and BestEffort pods are
+      # the FIRST thing the kubelet evicts under memory pressure. On a 6 GB
+      # node shared by Kafka, Flink and Trino that made the bucket creation -
+      # which every other component depends on - a coin flip.
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "250m"
+          memory: "192Mi"
       initContainers:
         - name: wait-for-minio
           image: busybox:1.36
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
           command:
             - /bin/sh
             - -c
             - |
               echo "Waiting for MinIO service to respond on port 9000..."
+              # Bounded: an unbounded `until nc` never exits, so the pod stays
+              # Running forever, backoffLimit never engages, and the Job looks
+              # healthy in `kubectl get jobs` while no bucket was ever created.
+              DEADLINE=$(($(date +%s) + 300))
               until nc -z -w 2 minio.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local 9000; do
+                if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+                  echo "ERROR: MinIO did not become reachable within 300 seconds."
+                  exit 1
+                fi
                 sleep 2
               done
               echo "MinIO is reachable."

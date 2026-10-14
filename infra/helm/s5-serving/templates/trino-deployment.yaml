@@ -17,6 +17,12 @@ spec:
       labels:
         app: trino
         {{- include "s5-serving.labels" . | nindent 8 }}
+      annotations:
+        # Without this, editing catalogs.iceberg.* in values.yaml updates the
+        # ConfigMap but leaves the running pod on the OLD catalog: no restart,
+        # no error, and the change appears to have been ignored. The rollout is
+        # driven by the ConfigMap content, not by the Deployment spec.
+        checksum/config: {{ include (print $.Template.BasePath "/trino-configmap.yaml") . | sha256sum }}
     spec:
       {{- with .Values.trino.nodeSelector }}
       nodeSelector:
@@ -43,6 +49,9 @@ spec:
             httpGet:
               path: /v1/info
               port: 8080
+            # Explicit because the Kubernetes default is 1s, which is shorter
+            # than a GC pause on a loaded JVM (see polaris-deployment.yaml).
+            timeoutSeconds: 10
             initialDelaySeconds: 15
             periodSeconds: 5
             failureThreshold: 60
@@ -50,6 +59,7 @@ spec:
             httpGet:
               path: /v1/info
               port: 8080
+            timeoutSeconds: 10
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
@@ -57,7 +67,7 @@ spec:
             httpGet:
               path: /v1/info
               port: 8080
-            initialDelaySeconds: 10
+            timeoutSeconds: 10
             periodSeconds: 20
             failureThreshold: 5
       volumes:

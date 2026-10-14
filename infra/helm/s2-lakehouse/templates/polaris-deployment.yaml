@@ -126,18 +126,27 @@ spec:
             httpGet:
               path: /q/health/ready
               port: 8182
+            # Without this the probe gets the Kubernetes default timeoutSeconds
+            # of 1s, which is shorter than the GC pause a loaded Quarkus JVM
+            # produces. s1-ingestion/values.yaml already learned this for
+            # PostgreSQL ("the default 1s exec timeout flaps and restarts
+            # PostgreSQL needlessly"); these HTTP probes never got the same
+            # treatment. Upstream Polaris ships 10.
+            timeoutSeconds: 10
             periodSeconds: 5
             failureThreshold: 120
           readinessProbe:
             httpGet:
               path: /q/health/ready
               port: 8182
+            timeoutSeconds: 10
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /q/health/live
               port: 8182
+            timeoutSeconds: 10
             periodSeconds: 20
             failureThreshold: 6
 {{- end }}

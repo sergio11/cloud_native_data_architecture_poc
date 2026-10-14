@@ -7,14 +7,34 @@ metadata:
   labels:
     app: trino-views-bootstrap
     {{- include "s5-serving.labels" . | nindent 4 }}
+  annotations:
+    # Same reason polaris-bootstrap-job.yaml is a hook: Job spec.template is
+    # immutable, so a second `helm upgrade` that changes this pod spec fails
+    # with "field is immutable" every time. As an ordinary resource Helm
+    # patches it; as a hook it is deleted and recreated.
+    # post-install, not pre-install: the initContainer waits for the Trino
+    # Service, which this same release creates as an ordinary resource.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 15
+  activeDeadlineSeconds: 900
   template:
     metadata:
       labels:
         app: trino-views-bootstrap
     spec:
       restartPolicy: OnFailure
+      # BestEffort QoS without these: the first pod evicted under pressure,
+      # and this Job is what creates the serving schemas everything queries.
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
       volumes:
         # Full serving SQL (mirror of pipelines/serving/unified_view.sql, see
         # trino-views-configmap.yaml): schemas + VIEW 1 (RF-11) only. Views 2-3
@@ -25,12 +45,26 @@ spec:
       initContainers:
         - name: wait-for-trino
           image: busybox:1.36
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
           command:
             - /bin/sh
             - -c
             - |
               echo "Waiting for Trino coordinator on port 8080..."
+              # Bounded: an unbounded loop never exits, so the Job stays
+              # Running forever and backoffLimit never engages.
+              DEADLINE=$(($(date +%s) + 300))
               until nc -z -w 2 trino.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local 8080; do
+                if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+                  echo "ERROR: Trino did not become reachable within 300 seconds."
+                  exit 1
+                fi
                 sleep 3
               done
               echo "Trino coordinator port is open. Waiting 15s for full initialization..."

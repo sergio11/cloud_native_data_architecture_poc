@@ -52,18 +52,23 @@ spec:
             httpGet:
               path: /healthz
               port: 8085
+            # Explicit: the Kubernetes default of 1s is shorter than a GC pause
+            # on a loaded JVM (see polaris-deployment.yaml for the full note).
+            timeoutSeconds: 10
             periodSeconds: 5
             failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /readyz
               port: 8085
+            timeoutSeconds: 10
             periodSeconds: 10
             failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8085
+            timeoutSeconds: 10
             periodSeconds: 20
             failureThreshold: 6
 {{- end }}

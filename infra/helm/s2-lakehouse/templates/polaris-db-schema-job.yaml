@@ -16,11 +16,18 @@ metadata:
     app: polaris-db-schema
     {{- include "s2-lakehouse.labels" . | nindent 4 }}
   annotations:
-    helm.sh/hook: pre-install,pre-upgrade
+    # post-install for the same reason as polaris-bootstrap-job.yaml: this Job
+    # waits for PostgreSQL, which is an ordinary resource of ANOTHER release
+    # (s1-ingestion -> postgres-oltp). A pre-install hook runs before Helm has
+    # created anything, so it waited out its 60 attempts and failed the whole
+    # s2 upgrade. The loop exits 1 rather than hanging, so installing s2 without
+    # s1 now fails loudly instead of stalling.
+    helm.sh/hook: post-install,pre-upgrade
     helm.sh/hook-weight: "5"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 6
+  activeDeadlineSeconds: 600
   template:
     metadata:
       labels:

@@ -41,13 +41,26 @@ metadata:
     #
     # before-hook-creation + hook-succeeded means every upgrade runs a fresh Job
     # (it is deleted as soon as it succeeds, so it never lingers either).
-    helm.sh/hook: pre-install,pre-upgrade
+    #
+    # post-install, NOT pre-install: the initContainer waits for
+    # polaris.platform.svc.cluster.local:8182, and on a first install that
+    # Service and its Deployment are ordinary (non-hook) resources that Helm has
+    # not created yet. As a pre-install hook the Job waited forever and the whole
+    # `helm install s2-lakehouse` hung until its timeout, taking the platform
+    # profile with it. post-install guarantees the Polaris pod exists first;
+    # pre-upgrade keeps reconciling the catalog before an upgrade rolls the pod.
+    helm.sh/hook: post-install,pre-upgrade
     helm.sh/hook-weight: "10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   # Keep completed pods for 10 minutes so logs are readable after success.
   ttlSecondsAfterFinished: 600
   backoffLimit: 20
+  # backoffLimit alone cannot rescue a hang: the initContainer below sleeps in a
+  # loop and never exits, so the pod stays Running and backoffLimit never
+  # engages. This is the hard ceiling that turns "waiting forever" into a
+  # failure Helm reports instead of an install that never finishes.
+  activeDeadlineSeconds: 900
   template:
     metadata:
       labels:
@@ -65,8 +78,18 @@ spec:
             - -c
             - |
               echo "Waiting for Polaris management port /q/health/ready..."
+              ATTEMPT=0
               until curl -sf http://polaris.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local:8182/q/health/ready; do
-                echo "Polaris not ready yet, retrying in 5s..."
+                ATTEMPT=$((ATTEMPT + 1))
+                # 120 attempts x 5s = 10 min. Same ceiling as
+                # activeDeadlineSeconds, so the reason for the failure is printed
+                # in the log rather than only "DeadlineExceeded" from kubelet.
+                if [ "${ATTEMPT}" -ge 120 ]; then
+                  echo "ERROR: Polaris still not ready after ${ATTEMPT} attempts (~10 min)."
+                  echo "       Check: kubectl logs -n {{ .Values.global.namespace | default "platform" }} deploy/polaris"
+                  exit 1
+                fi
+                echo "Polaris not ready yet (attempt ${ATTEMPT}), retrying in 5s..."
                 sleep 5
               done
               echo "Polaris is ready."

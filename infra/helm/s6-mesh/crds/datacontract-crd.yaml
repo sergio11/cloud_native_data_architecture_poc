@@ -1,0 +1,141 @@
+# ==============================================================================
+# DataContract CRD (subystem S6: Data Mesh)
+#
+# Lives in crds/, NOT templates/. Helm installs crds/ before anything else and
+# never templates it, which is what CRDs need: from templates/ they were
+# three-way-merged on every upgrade and DELETED by `helm uninstall`, taking
+# every DataContract instance in the cluster with them. s3-batch and s4-stream
+# already use crds/ for the same reason.
+#
+# The schema describes the contract documents this repo actually ships
+# (domains/<domain>/data-products/<product>/contract.yaml). Two things the
+# previous version got wrong and that cost real data:
+#
+#   1. It declared a `metadata` block inside openAPIV3Schema. The API server
+#      rejects that unconditionally:
+#        spec.versions[0].schema.openAPIV3Schema.properties[metadata]: Forbidden:
+#        must not specify anything other than name and generateName, but
+#        metadata is implicitly specified
+#      so `helm install s6-mesh` aborted before any other resource was created.
+#   2. Sub-schemas declared as a bare `type: object` (quality, sla,
+#      schema.fields items) are structural and carry NO properties, so the
+#      API server PRUNES every child field. A DataContract applied against
+#      them kept its name and lost its thresholds, assertions and fields,
+#      with no error anywhere. Every object below is now enumerated, or
+#      carries x-kubernetes-preserve-unknown-fields where the shape is
+#      genuinely open.
+# ==============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: datacontracts.dataplatform.io
+  labels:
+    app.kubernetes.io/name: s6-mesh
+    app.kubernetes.io/part-of: modern-data-architecture-poc
+spec:
+  group: dataplatform.io
+  names:
+    kind: DataContract
+    listKind: DataContractList
+    plural: datacontracts
+    singular: datacontract
+    shortNames:
+      - dc
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - description
+                - schema
+              properties:
+                description:
+                  type: string
+                compatibility_mode:
+                  type: string
+                sla:
+                  type: object
+                  properties:
+                    freshness:
+                      type: string
+                    availability:
+                      type: string
+                    response_time_ms:
+                      type: integer
+                    support_hours:
+                      type: string
+                schema:
+                  type: object
+                  properties:
+                    format:
+                      type: string
+                    ref:
+                      type: string
+                    primary_key:
+                      type: array
+                      items:
+                        type: string
+                    fields:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - type
+                        properties:
+                          name:
+                            type: string
+                          type:
+                            type: string
+                          required:
+                            type: boolean
+                          description:
+                            type: string
+                quality:
+                  type: object
+                  properties:
+                    thresholds:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                      properties:
+                        completeness:
+                          type: number
+                        uniqueness:
+                          type: number
+                        validity:
+                          type: number
+                    assertions:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          rule:
+                            type: string
+                          description:
+                            type: string
+                consumers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      contact:
+                        type: string
+                      purpose:
+                        type: string
+      # Optional: the CRs are also written straight from the domain manifests.
+      additionalPrinterColumns:
+        - name: Version
+          type: string
+          jsonPath: .metadata.annotations["dataplatform\.io/version"]
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

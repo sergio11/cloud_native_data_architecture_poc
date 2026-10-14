@@ -42,7 +42,7 @@ spec:
 # NOTE (K-B, not invented): the source description also says "mandate masking
 # policies when classified as PII or confidential", but the source file contains
 # NO rule implementing it and the DataProduct CRD
-# (templates/crds/dataproduct-crd.yaml) has NO masking field to key such a rule
+# (crds/dataproduct-crd.yaml) has NO masking field to key such a rule
 # on. Only the classification-enum rule below is expressible from the source, so
 # only it is rendered; the masking mandate stays unimplemented until the CRD and
 # governance agree on a field (e.g. spec.maskingPolicy).

@@ -1,0 +1,145 @@
+# ==============================================================================
+# DataProduct CRD (subsystem S6: Data Mesh)
+#
+# Lives in crds/, NOT templates/ - see datacontract-crd.yaml for why: from
+# templates/ the CRD is three-way-merged on every upgrade and deleted by
+# `helm uninstall`, which would wipe every DataProduct in the cluster.
+#
+# Schema describes domains/<domain>/data-products/<product>/product.yaml. The
+# previous version declared assets.items, quality and lineage as bare
+# `type: object` with no properties: those are structural schemas, so the API
+# server pruned every child. A DataProduct applied against it lost the asset
+# paths (s3://datalake/.../gold/sales/daily_metrics, sales.orders.events), the
+# quality thresholds and the lineage steps - silently, with no error. They are
+# enumerated below now.
+# ==============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dataproducts.dataplatform.io
+  labels:
+    app.kubernetes.io/name: s6-mesh
+    app.kubernetes.io/part-of: modern-data-architecture-poc
+spec:
+  group: dataplatform.io
+  names:
+    kind: DataProduct
+    listKind: DataProductList
+    plural: dataproducts
+    singular: dataproduct
+    shortNames:
+      - dp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - description
+                - classification
+              properties:
+                description:
+                  type: string
+                classification:
+                  type: string
+                  enum: ["public", "internal", "confidential", "restricted", "pii"]
+                sla:
+                  type: object
+                  properties:
+                    freshness:
+                      type: string
+                    availability:
+                      type: string
+                    latency_p99:
+                      type: string
+                    support_hours:
+                      type: string
+                    incident_response:
+                      type: string
+                assets:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - type
+                    properties:
+                      name:
+                        type: string
+                      type:
+                        type: string
+                      path:
+                        type: string
+                      format:
+                        type: string
+                      partitioned_by:
+                        type: array
+                        items:
+                          type: string
+                      description:
+                        type: string
+                      access_tier:
+                        type: string
+                quality:
+                  type: object
+                  properties:
+                    completeness:
+                      type: number
+                    uniqueness:
+                      type: number
+                    timeliness:
+                      type: number
+                    validity:
+                      type: number
+                    suite:
+                      type: string
+                contract:
+                  type: string
+                schema:
+                  type: string
+                lineage:
+                  type: object
+                  properties:
+                    source:
+                      type: string
+                    transformations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          step:
+                            type: string
+                          script:
+                            type: string
+                          schedule:
+                            type: string
+                          description:
+                            type: string
+                consumers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      contact:
+                        type: string
+                      use_case:
+                        type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+      additionalPrinterColumns:
+        - name: Classification
+          type: string
+          jsonPath: .spec.classification
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

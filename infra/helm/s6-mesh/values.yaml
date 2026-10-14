@@ -35,8 +35,10 @@ kyverno:
   # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
   nodeSelector: {}
 
-crds:
-  install: true
+# No `crds:` block on purpose. The DataContract/DataProduct definitions moved to
+# crds/, which Helm installs unconditionally and does not template, so there is
+# nothing left to switch on or off. `crds.install` used to guard a wrapper in
+# templates/crds/ that no longer exists.
 
 # SINGLE SOURCE OF TRUTH for per-domain ResourceQuota/LimitRange (rendered by
 # templates/domain-quotas.yaml). The former duplicate governance/policies/domain-quotas.yaml

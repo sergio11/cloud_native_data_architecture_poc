@@ -33,6 +33,38 @@ spec:
               value: "5001"
           resources:
             {{- toYaml .Values.marquez.resources | nindent 12 }}
+          # Marquez is a Dropwizard/Jetty JVM and was the only workload in the
+          # repo with no probes at all. Two consequences, both bad:
+          #   * nothing gated the Service endpoints, so a pod stuck in
+          #     CrashLoopBackOff kept receiving traffic and the NodePort
+          #     answered with connection resets instead of a 503;
+          #   * with no startupProbe, a liveness probe would fire during boot
+          #     and SIGTERM the JVM (exit 143) before it ever became healthy -
+          #     the exact loop already documented in
+          #     s4-stream/templates/flink-operator-deployment.yaml.
+          # So: startupProbe buys 5 minutes of boot, then liveness, then
+          # readiness takes the pod out of the endpoints.
+          startupProbe:
+            httpGet:
+              path: /api/marquez/version
+              port: 5000
+            timeoutSeconds: 10
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/marquez/version
+              port: 5000
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/marquez/version
+              port: 5000
+            timeoutSeconds: 10
+            periodSeconds: 20
+            failureThreshold: 6
 ---
 apiVersion: v1
 kind: Service

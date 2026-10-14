@@ -63,12 +63,46 @@ spec:
             - name: config
               mountPath: /etc/prometheus/rules/alerts.yaml
               subPath: alerts.yaml
+            # --storage.tsdb.path=/prometheus with no volume behind it writes to
+            # the container's writable layer, so every restart discards the
+            # TSDB and the 15d retention this chart asks for is a fiction:
+            # rate() and the GoldTableFreshnessExpired rule restart from zero
+            # every time. emptyDir keeps it for the life of the pod, which is
+            # what a POC wants without claiming durability it does not have.
+            - name: data
+              mountPath: /prometheus
+          # No probes at all before this: a wedged Prometheus stayed in the
+          # Service endpoints and the Grafana datasource simply stopped
+          # resolving. Both endpoints are documented by Prometheus itself.
+          startupProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            timeoutSeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            timeoutSeconds: 10
+            periodSeconds: 20
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.prometheus.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "s8-ops.fullname" . }}-prometheus
+        - name: data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

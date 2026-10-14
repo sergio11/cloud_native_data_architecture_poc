@@ -25,7 +25,8 @@
         {
           "expr": "vector(1)",
           "format": "time_series",
-          "legendFormat": "DEMO (RF-24)"
+          "legendFormat": "DEMO (RF-24)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ]
     },
@@ -51,7 +52,8 @@
       "targets": [
         {
           "expr": "sum(container_memory_working_set_bytes{namespace=~'platform|sales|marketing|finance|ops'}) / 1024 / 1024",
-          "legendFormat": "Total RAM"
+          "legendFormat": "Total RAM",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ]
     },
@@ -76,8 +78,9 @@
       },
       "targets": [
         {
-          "expr": "flink_taskmanager_job_latency_source_to_sink_seconds{job_name=~'.*orders.*'}.*'}",
-          "legendFormat": "Stream Latency"
+          "expr": "flink_taskmanager_job_latency_source_to_sink_seconds{job_name=~'.*orders.*'}",
+          "legendFormat": "Stream Latency",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ]
     },
@@ -102,7 +105,8 @@
       "targets": [
         {
           "expr": "avg(data_quality_assertion_success_ratio) * 100",
-          "legendFormat": "Overall Quality"
+          "legendFormat": "Overall Quality",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ]
     }

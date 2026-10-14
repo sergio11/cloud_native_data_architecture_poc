@@ -18,7 +18,23 @@ data:
         folder: Platform
         type: file
         options:
-          path: /var/lib/grafana/dashboards
+            path: /var/lib/grafana/dashboards
+  # The dashboard PROVIDER was provisioned but the DATASOURCE never was, and no
+  # panel in platform-overview.json declares a "datasource" key. Grafana
+  # therefore defaulted to a datasource that does not exist and every panel
+  # rendered "No data" - which is indistinguishable, to whoever is looking,
+  # from Prometheus genuinely having nothing to report.
+  # uid is pinned so the panels can reference it (see the dashboard JSON).
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        isDefault: true
+        editable: false
+        url: http://{{ include "s8-ops.fullname" . }}-prometheus.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.prometheus.service.port }}
   platform-overview.json: |
     {{- .Files.Get "dashboards/platform-overview.json" | nindent 4 }}
 ---
@@ -63,6 +79,33 @@ spec:
             - name: provisioning
               mountPath: /var/lib/grafana/dashboards/platform-overview.json
               subPath: platform-overview.json
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+          # Grafana had no probes, so a pod stuck on a full disk stayed in the
+          # Service endpoints and the NodePort answered nothing at all.
+          # /api/health is Grafana's own documented unauthenticated endpoint.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            timeoutSeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            timeoutSeconds: 10
+            periodSeconds: 20
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.grafana.resources | nindent 12 }}
       volumes:

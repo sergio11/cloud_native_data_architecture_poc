@@ -62,11 +62,26 @@ sparkDefaults:
 
   iceberg:
     catalogName: "polaris"
-    catalogUrl: "http://polaris.platform.svc.cluster.local:8181"
-    warehouse: "s3a://warehouse/"
+    # MUST include the /api/catalog path segment: Polaris serves the Iceberg
+    # REST API at /api/catalog/v1/*, so a bare host made the client request
+    # /v1/config and get a 404. s4-stream and s5-serving already carry it.
+    catalogUrl: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
+    # This is the CATALOG NAME, not the S3 location, and that distinction is
+    # the whole bug. An Iceberg REST client identifies its catalog through
+    # GET <uri>/v1/config?warehouse=<this value>, and Polaris resolves it by
+    # name - so "s3a://warehouse/" produced
+    #   RESTException: Unable to find warehouse s3a://warehouse/
+    # even though the catalog existed with exactly that base location.
+    # The S3 base location stays in s2-lakehouse -> polaris.config.warehouseLocation.
+    warehouse: "polaris"
     s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
+    s3Region: "us-east-1"
     accessKey: "minioadmin"
     secretKey: "minioadmin"
+    # OAuth2 credential for Polaris 1.x. Format "client_id:client_secret";
+    # must match polaris.clientId/clientSecret in s2-lakehouse/values.yaml.
+    # Without it Polaris answers 401 and no Iceberg table is reachable.
+    oauth2Credential: "poc-admin:poc-admin-secret"
 
   openLineage:
     url: "http://marquez.platform.svc.cluster.local:5000"

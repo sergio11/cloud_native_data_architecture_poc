@@ -13,9 +13,21 @@ data:
     spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}=org.apache.iceberg.spark.SparkCatalog
     spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.type=rest
     spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.uri={{ .Values.sparkDefaults.iceberg.catalogUrl }}
+    # warehouse = the Polaris CATALOG NAME. For a REST catalog this is the
+    # ?warehouse= identifier, not an S3 path; see values.yaml iceberg.warehouse.
     spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.warehouse={{ .Values.sparkDefaults.iceberg.warehouse }}
+    # OAuth2, required by Polaris 1.x. Without these the REST client calls
+    # /v1/config unauthenticated and Polaris answers 401.
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.credential={{ .Values.sparkDefaults.iceberg.oauth2Credential }}
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.oauth2-server-uri={{ .Values.sparkDefaults.iceberg.catalogUrl }}/v1/oauth/tokens
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.scope=PRINCIPAL_ROLE:ALL
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.token-refresh-enabled=true
     spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.io-impl=org.apache.iceberg.aws.s3.S3FileIO
     spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.endpoint={{ .Values.sparkDefaults.iceberg.s3Endpoint }}
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.region={{ .Values.sparkDefaults.iceberg.s3Region }}
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.access-key={{ .Values.sparkDefaults.iceberg.accessKey }}
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.secret-key={{ .Values.sparkDefaults.iceberg.secretKey }}
+    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.path-style-access=true
     spark.sql.defaultCatalog={{ .Values.sparkDefaults.iceberg.catalogName }}
 
     # S3A MinIO Storage Connector

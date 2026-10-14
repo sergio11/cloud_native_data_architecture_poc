@@ -110,6 +110,70 @@ end
 # (unlike Docker, it never says "Running").
 def container_running?(container) = container[:status].start_with?('Up')
 
+# How many kind nodes belong to <name>. Used only to report what is about to be
+# deleted; returns 0 rather than raising when the cluster is already gone.
+def probe_count(cluster_name)
+  probe = podman_probe
+  probe[:containers].count { |c| c[:name].start_with?("#{cluster_name}-") }
+end
+
+# Applies the storage/compute domain roles to the kind workers, by name.
+#
+# The roles cannot live in cluster-config.yaml: kind turns them into the
+# kubelet's --node-labels, and a kubelet that gets a kubernetes.io/ label it
+# does not recognise exits with "failed to validate kubelet flags" instead of
+# booting. See infra/kind/cluster-config.yaml for the full kubelet message.
+#
+# kind names workers <cluster>-worker, <cluster>-worker2, ... in order, so the
+# index decides the role. Missing nodes are reported, never fatal: a
+# single-node or two-node cluster is a legitimate shape.
+def label_worker_roles(cluster_name)
+  info_msg('labelling kind workers with their domain roles...')
+  roles = { 'worker' => 'storage', 'worker2' => 'compute' }
+  labelled = 0
+
+  roles.each do |suffix, role|
+    node = "#{cluster_name}-#{suffix}"
+    exists, = capture('kubectl', 'get', 'node', node)
+    unless exists
+      warn_msg("node #{node} is not in the cluster - skipping its '#{role}' role")
+      next
+    end
+
+    out, ok = capture('kubectl', 'label', 'node', node,
+                      "node-role.kubernetes.io/#{role}=true",
+                      'node-role.kubernetes.io/worker=true',
+                      '--overwrite')
+    if ok
+      ok_msg("#{node} -> #{role}")
+      labelled += 1
+    else
+      warn_msg("could not label #{node}: #{out.to_s.lines.first}")
+    end
+  end
+
+  if labelled.zero?
+    warn_msg('no worker was labelled')
+  else
+    sh 'kubectl', 'get', 'nodes', '--show-labels' rescue nil
+  end
+end
+
+# Names of the kind clusters that exist right now.
+# `kind` prints "enabling experimental podman provider" (once, when it activates
+# the podman provider) and "No kind clusters found." on the same stream as the
+# list, so the raw output has to be filtered or both of those lines are read as
+# cluster names. Returns [] when kind is missing or there is nothing to report.
+def kind_clusters
+  out, ok = capture('kind', 'get', 'clusters')
+  return [] unless ok
+
+  out.lines.map(&:strip).reject(&:empty?).reject do |line|
+    line.start_with?('enabling experimental podman provider') ||
+      line.casecmp?('No kind clusters found.')
+  end
+end
+
 # Runs a shell script INSIDE the podman machine, printing elapsed time every
 # 15 seconds. Three reasons this exists instead of a bare `sh`:
 #
@@ -488,6 +552,16 @@ namespace :cluster do
   desc 'Verify prerequisites, detect-or-create the kind cluster, namespaces, policies, platform profile'
   task :setup do
     banner 'CLUSTER SETUP'
+    Rake::Task['cluster:create'].invoke
+    Rake::Task['cluster:up'].invoke('platform')
+    puts
+    sh 'kubectl', 'get', 'pods', '-A' rescue nil
+    ok_msg('Cluster setup finished. Follow with: rake cluster:status')
+  end
+
+  desc 'Create (or reuse) the kind cluster: prereqs, nodes, namespaces, storage, Helm repos. No profile.'
+  task :create do
+    banner 'CLUSTER CREATE'
 
     # 1. Prerequisites
     info_msg('checking prerequisites (kubectl, helm, podman, kind)...')
@@ -531,6 +605,21 @@ namespace :cluster do
     # 4. Start (no-op when already running) and wait for API + nodes
     Rake::Task['cluster:start'].invoke
 
+    # 4b. Domain roles on the kind workers.
+    #
+    # Applied here, by NODE NAME, and not in infra/kind/cluster-config.yaml:
+    # kind turns a node's `labels:` into the kubelet's --node-labels flag, and
+    # the kubelet refuses to start when that carries a kubernetes.io/ label
+    # outside its allow-list ("failed to validate kubelet flags: unknown
+    # 'kubernetes.io' or 'k8s.io' labels specified with --node-labels:
+    # [node-role.kubernetes.io/storage node-role.kubernetes.io/worker]"). The
+    # worker kubelet then crash-loops and never joins.
+    #
+    # By name, not by selector: a selector on node-role.kubernetes.io/storage
+    # would match nothing, because that is the label being set in the first
+    # place.
+    label_worker_roles(ENV.fetch('CLUSTER_NAME', 'poc-data-platform'))
+
     # 5. Namespaces with domain/platform labels
     info_msg('configuring namespaces...')
     namespaces = {
@@ -543,16 +632,24 @@ namespace :cluster do
     namespaces.each do |ns, ns_desc|
       _, exists = capture('kubectl', 'get', 'namespace', ns)
       if exists
-        run! 'kubectl', 'label', 'namespace', ns,
-             'data-mesh.io/domain=' + ns, 'data-platform.io/managed=true', '--overwrite'
         info_msg("namespace #{ns} exists")
       else
         run! 'kubectl', 'create', 'namespace', ns
-        run! 'kubectl', 'label', 'namespace', ns,
-             'data-mesh.io/domain=' + ns, 'data-platform.io/managed=true',
-             'data-platform.io/description=' + ns_desc, '--overwrite'
         ok_msg("namespace #{ns} created")
       end
+      # Labels only, and only with values a label can hold: a label value must
+      # match ([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9] - no spaces, no commas.
+      # The description is prose ("Infrastructure, catalogs, message broker,
+      # object storage"), so putting it in data-platform.io/description made
+      # kubectl reject the whole command:
+      #   invalid label value: ... a valid label must consist of alphanumeric
+      #   characters, '-', '_' or '.'
+      # which aborted cluster:create before any profile was deployed. Prose
+      # belongs in an annotation.
+      run! 'kubectl', 'label', 'namespace', ns,
+           'data-mesh.io/domain=' + ns, 'data-platform.io/managed=true', '--overwrite'
+      run! 'kubectl', 'annotate', 'namespace', ns,
+           'data-platform.io/description=' + ns_desc, '--overwrite'
     end
 
     # 6. Kyverno governance policies (optional component: WARN, never abort)
@@ -595,11 +692,50 @@ namespace :cluster do
     end
     _, = capture('helm', 'repo', 'update')
 
-    # 9. Bootstrap the platform profile and report
-    Rake::Task['cluster:up'].invoke('platform')
+    ok_msg('Cluster created. Deploy a profile with: rake cluster:up[stream]')
+  end
+
+  desc 'Delete the kind cluster and all its nodes. Irreversible: every pod, PVC and Helm release goes with it.'
+  task :destroy do
+    banner 'CLUSTER DESTROY'
+
+    cluster_name = ENV.fetch('CLUSTER_NAME', 'poc-data-platform')
+    unless ENV['YES'].to_s.strip.downcase == 'true'
+      abort "\e[31mRefusing to delete the cluster '#{cluster_name}': every pod, PVC, " \
+            "Helm release and the whole kind node will be removed.\e[0m\n" \
+            "\e[33mRe-run with YES=true if that is what you want: rake cluster:destroy\e[0m"
+    end
+
+    _, kind_ok = capture('kind', 'version')
+    unless kind_ok
+      abort "\e[31mCould not run 'kind'. Is it on PATH?\e[0m"
+    end
+
+    existing = kind_clusters
+    if existing.empty?
+      ok_msg('no kind cluster exists - nothing to delete')
+      next
+    end
+    unless existing.include?(cluster_name)
+      abort "\e[31mCluster '#{cluster_name}' not found. Existing: #{existing.join(', ')}\e[0m"
+    end
+
+    info_msg("deleting cluster '#{cluster_name}' (nodes: #{probe_count(cluster_name)})...")
+    # --kubeconfig is not passed on purpose: `kind delete` only needs the node
+    # containers, and passing the kubeconfig makes it also rewrite the current
+    # context, which loses the poc-qa context the operator may still be using.
+    deleted, deleted_ok = capture('kind', 'delete', 'cluster', '--name', cluster_name)
+    unless deleted_ok
+      err_msg('kind delete failed:')
+      puts deleted
+      abort "\e[31mThe cluster was not deleted.\e[0m"
+    end
+
+    ok_msg("cluster '#{cluster_name}' deleted")
+    left = kind_clusters
+    left.empty? ? ok_msg('no kind clusters remain') : warn_msg("still present: #{left.join(', ')}")
     puts
-    sh 'kubectl', 'get', 'pods', '-A' rescue nil
-    ok_msg('Cluster setup finished. Follow with: rake cluster:status')
+    ok_msg('Recreate with: rake cluster:create')
   end
 
   desc "Deploy a startup profile with Helm (args: profile=platform|stream|batch|demo, default: stream)"

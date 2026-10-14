@@ -16,6 +16,26 @@ nodes:
   # ----------------------------------------------------------------------------
   # Control Plane Node
   # Hosts Kubernetes control components and routes ingress / NodePort mappings
+  #
+  # NOTE ON NODE LABELS: do NOT set `labels:` here. kind turns them into the
+  # kubelet's --node-labels flag, and since Kubernetes 1.36 the kubelet REFUSES
+  # to start when that flag carries a kubernetes.io/ or k8s.io/ namespace label
+  # outside a small allow-list. Both node-role.kubernetes.io/* and
+  # topology.kubernetes.io/* are rejected:
+  #
+  #   failed to validate kubelet flags: unknown 'kubernetes.io' or 'k8s.io'
+  #   labels specified with --node-labels:
+  #   [node-role.kubernetes.io/storage node-role.kubernetes.io/worker]
+  #
+  # The kubelet then crash-loops, the worker never joins the cluster, and
+  # `kind create` fails with "error execution phase kubelet-wait-bootstrap:
+  # failed while waiting for the kubelet to start". That is the origin of the
+  # restart churn and the etcd/apiserver pressure: two nodes permanently
+  # failing to boot on a 6 GB machine.
+  #
+  # The domain roles are applied AFTER the nodes are Ready, by
+  # `rake cluster:create` (label_worker_roles), which is the only point where
+  # they can be set safely.
   # ----------------------------------------------------------------------------
   - role: control-plane
     kubeadmConfigPatches:
@@ -80,10 +100,6 @@ nodes:
   # Hosts MinIO Object Store, PostgreSQL OLTP, Kafka Brokers, and Polaris Catalog
   # ----------------------------------------------------------------------------
   - role: worker
-    labels:
-      node-role.kubernetes.io/storage: "true"
-      node-role.kubernetes.io/worker: "true"
-      topology.kubernetes.io/zone: "storage"
     extraMounts:
       - hostPath: ./data/worker-storage
         containerPath: /data
@@ -94,10 +110,6 @@ nodes:
   # Hosts Spark Batch Drivers/Executors, Flink Stream Processors, Trino Engine
   # ----------------------------------------------------------------------------
   - role: worker
-    labels:
-      node-role.kubernetes.io/compute: "true"
-      node-role.kubernetes.io/worker: "true"
-      topology.kubernetes.io/zone: "compute"
     extraMounts:
       - hostPath: ./data/worker-compute
         containerPath: /data

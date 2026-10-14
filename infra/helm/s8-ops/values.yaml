@@ -23,7 +23,9 @@ grafana:
   service:
     type: NodePort
     port: 3000
-    nodePort: 30000
+    # Must match the 3000 containerPort kind forwards to the host, otherwise the
+    # Grafana URL documented at http://localhost:3000 is a dead port.
+    nodePort: 3000
   resources:
     limits:
       cpu: "300m"

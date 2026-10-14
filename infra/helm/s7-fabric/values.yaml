@@ -9,7 +9,12 @@ marquez:
     type: NodePort
     apiPort: 5000
     webPort: 3000
-    nodePortApi: 30002
+    # The NodePort belongs on the WEB port (what kind forwards to the host as
+    # 3002), not on the API port. It used to be called nodePortApi and carry
+    # 30002: the value was on the wrong port AND on the wrong number, so
+    # http://localhost:3002 refused connections. cluster-config.yaml widens
+    # service-node-port-range to 1-65535, so 3002 is legal.
+    nodePortWeb: 3002
   resources:
     limits:
       cpu: "500m"

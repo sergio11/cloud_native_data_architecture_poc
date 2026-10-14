@@ -24,10 +24,18 @@ minio:
 
   service:
     type: NodePort
+    # nodePort MUST equal the containerPort that infra/kind/cluster-config.yaml
+    # maps to the host, or nothing answers on the advertised URL: kind forwards
+    # host:9000 to node:9000, and kube-proxy on that node only intercepts the
+    # NodePort actually allocated. The 30900/30901/31818 values this used to
+    # carry were reachable only from inside the cluster, which is why
+    # http://localhost:9000 and http://localhost:8181 both refused connections.
+    # cluster-config.yaml widens service-node-port-range to 1-65535, so these
+    # are legal as NodePorts.
     apiPort: 9000
-    apiNodePort: 30900
+    apiNodePort: 9000
     consolePort: 9001
-    consoleNodePort: 30901
+    consoleNodePort: 9001
 
   persistence:
     enabled: true
@@ -83,7 +91,9 @@ polaris:
   service:
     type: NodePort
     port: 8181
-    nodePort: 31818
+    # Must match the 8181 containerPort kind forwards to the host - see the
+    # MinIO service block above for why.
+    nodePort: 8181
 
   # Realm and fixed root credentials handed to Polaris via
   # POLARIS_BOOTSTRAP_CREDENTIALS. Without them Polaris generates a random pair

@@ -17,7 +17,9 @@ trino:
   service:
     type: NodePort
     port: 8080
-    nodePort: 30088
+    # Must match the 8080 containerPort kind forwards to the host, otherwise the
+    # Trino UI documented at http://localhost:8080 is a dead port.
+    nodePort: 8080
 
   resources:
     requests:

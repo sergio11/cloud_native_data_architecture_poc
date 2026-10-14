@@ -52,7 +52,10 @@ kafkaUi:
   service:
     type: NodePort
     port: 8090
-    nodePort: 30090
+    # Must match the 8090 containerPort kind forwards to the host, otherwise
+    # http://localhost:8090 (documented in infra/kind/setup-cluster.sh) is a
+    # dead port: 30090 is only reachable from inside the cluster.
+    nodePort: 8090
 
   resources:
     requests:

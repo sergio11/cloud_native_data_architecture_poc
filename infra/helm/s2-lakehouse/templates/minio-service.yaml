@@ -13,12 +13,16 @@ spec:
     - name: s3-api
       port: {{ .Values.minio.service.apiPort }}
       targetPort: 9000
+      {{- if eq .Values.minio.service.type "NodePort" }}
       nodePort: {{ .Values.minio.service.apiNodePort }}
+      {{- end }}
       protocol: TCP
     - name: console
       port: {{ .Values.minio.service.consolePort }}
       targetPort: 9001
+      {{- if eq .Values.minio.service.type "NodePort" }}
       nodePort: {{ .Values.minio.service.consoleNodePort }}
+      {{- end }}
       protocol: TCP
   selector:
     app: minio

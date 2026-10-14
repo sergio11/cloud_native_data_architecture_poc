@@ -13,7 +13,12 @@ spec:
     - name: rest-api
       port: {{ .Values.polaris.service.port }}
       targetPort: 8181
+      {{- if eq .Values.polaris.service.type "NodePort" }}
+      # nodePort is rejected by the API server on a ClusterIP Service
+      # ("may not be used when 'type' is 'ClusterIP'"), so it is emitted only
+      # when the type is actually NodePort.
       nodePort: {{ .Values.polaris.service.nodePort }}
+      {{- end }}
       protocol: TCP
     - name: management
       port: 8182

@@ -13,7 +13,10 @@ spec:
     - name: http
       port: {{ .Values.trino.service.port }}
       targetPort: 8080
+      {{- if eq .Values.trino.service.type "NodePort" }}
+      # Only valid on a NodePort Service; the API server rejects it otherwise.
       nodePort: {{ .Values.trino.service.nodePort }}
+      {{- end }}
       protocol: TCP
   selector:
     app: trino

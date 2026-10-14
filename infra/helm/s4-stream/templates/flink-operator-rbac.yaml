@@ -1,4 +1,21 @@
 {{- if .Values.flinkOperator.enabled }}
+{{- /*
+Namespaces that need a Flink ServiceAccount: one per ENABLED job, taken from the
+job's own namespace. It used to be a single block hardcoded to
+global.computeNamespace (always "sales"), which is why the clickstream job could
+never legitimately live in marketing - the `default "marketing"` in
+flink-deployments.yaml was dead code because computeNamespace is always set, so
+the marketing job was silently deployed into the SALES domain namespace instead,
+against its own data-product definition and the s6-mesh marketing quota.
+*/}}
+{{- $flinkNamespaces := list }}
+{{- if .Values.flinkJobs.ordersStream.enabled }}
+{{- $flinkNamespaces = append $flinkNamespaces (.Values.flinkJobs.ordersStream.namespace | default .Values.global.computeNamespace) }}
+{{- end }}
+{{- if .Values.flinkJobs.clickstreamStream.enabled }}
+{{- $flinkNamespaces = append $flinkNamespaces (.Values.flinkJobs.clickstreamStream.namespace | default "marketing") }}
+{{- end }}
+{{- $flinkNamespaces = $flinkNamespaces | uniq }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -38,22 +55,23 @@ subjects:
   - kind: ServiceAccount
     name: flink-operator-sa
     namespace: {{ .Values.global.namespace | default "platform" }}
+{{- range $ns := $flinkNamespaces }}
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: flink-service-account
-  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "s4-stream.labels" . | nindent 4 }}
+    {{- include "s4-stream.labels" $ | nindent 4 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: flink-role
-  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "s4-stream.labels" . | nindent 4 }}
+    {{- include "s4-stream.labels" $ | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: ["pods", "services", "configmaps"]
@@ -66,9 +84,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: flink-role-binding
-  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "s4-stream.labels" . | nindent 4 }}
+    {{- include "s4-stream.labels" $ | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -76,5 +94,6 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: flink-service-account
-    namespace: {{ .Values.global.computeNamespace | default "sales" }}
+    namespace: {{ $ns }}
+{{- end }}
 {{- end }}

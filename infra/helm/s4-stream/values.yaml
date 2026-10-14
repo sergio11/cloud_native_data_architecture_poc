@@ -114,6 +114,10 @@ icebergCatalog:
 flinkJobs:
   ordersStream:
     enabled: true
+    # Domain namespace this job runs in. Declared per job rather than taken
+    # from global.computeNamespace, which is a single value for a single
+    # compute node and cannot express two jobs in two domains.
+    namespace: "sales"
     # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
     image: poc/flink-stream:0.1.0
     # Flink process memory must exceed JVM heap + metaspace + overhead;
@@ -136,6 +140,11 @@ flinkJobs:
     kafkaStartOffset: "latest"
   clickstreamStream:
     enabled: true
+    # marketing, not sales: this is the clickstream funnel job and
+    # domains/marketing/data-products/leads/product.yaml defines it there. It
+    # used to render into global.computeNamespace (always "sales") because the
+    # `default "marketing"` was shadowed by a key that is always present.
+    namespace: "marketing"
     # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
     image: poc/flink-stream:0.1.0
     jobManager:

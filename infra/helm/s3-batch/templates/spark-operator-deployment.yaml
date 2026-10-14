@@ -31,7 +31,13 @@ spec:
             - /usr/bin/spark-operator
             - -v=2
             - -logtostderr
-            - -namespace=
+            # Was a literal "-namespace=", which pflag parses as an EMPTY string:
+            # the operator watches ALL namespaces. It only appeared to work
+            # because the ClusterRole grants ["*"] cluster-wide. It is set to
+            # the same namespace the ScheduledSparkApplications live in
+            # (global.computeNamespace), which is what makes the RBAC below
+            # sufficient rather than accidental.
+            - -namespace={{ .Values.global.computeNamespace | default "sales" }}
             - -enable-ui-service=true
             # Metrics must be enabled explicitly in this operator version, otherwise
             # nothing listens on 10254 and the probes below kill it.

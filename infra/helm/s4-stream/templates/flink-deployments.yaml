@@ -3,7 +3,7 @@ apiVersion: flink.apache.org/v1beta1
 kind: FlinkDeployment
 metadata:
   name: flink-orders-stream
-  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  namespace: {{ .Values.flinkJobs.ordersStream.namespace | default .Values.global.computeNamespace | default "sales" }}
   labels:
     app: flink-orders-stream
     stream: orders
@@ -80,7 +80,7 @@ apiVersion: flink.apache.org/v1beta1
 kind: FlinkDeployment
 metadata:
   name: flink-clickstream-stream
-  namespace: {{ .Values.global.computeNamespace | default "marketing" }}
+  namespace: {{ .Values.flinkJobs.clickstreamStream.namespace | default "marketing" }}
   labels:
     app: flink-clickstream-stream
     stream: clickstream

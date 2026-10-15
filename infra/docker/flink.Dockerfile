@@ -78,6 +78,10 @@ ARG KAFKA_CONNECTOR_VERSION=3.1.0-1.18
 ARG KAFKA_CLIENTS_VERSION=3.4.0
 ARG ICEBERG_VERSION=1.6.1
 ARG HADOOP_SHADED_VERSION=2.8.3-10.0
+# Hadoop 3.3.x is what flink-shaded-hadoop-2-uber shades; the AWS SDK bundle
+# version is the one that hadoop-aws 3.3.x is built against.
+ARG HADOOP_AWS_VERSION=3.3.6
+ARG AWS_SDK_VERSION=1.12.367
 
 # Hadoop runtime classes. Registering the Iceberg REST catalog reaches
 # org.apache.hadoop.conf.Configuration (the catalog builds a Hadoop FileSystem for
@@ -111,6 +115,58 @@ RUN set -eux; \
     curl -fSL -o /opt/flink/lib/iceberg-flink-runtime-1.18-${ICEBERG_VERSION}.jar \
         "${MAVEN_REPO}/org/apache/iceberg/iceberg-flink-runtime-1.18/${ICEBERG_VERSION}/iceberg-flink-runtime-1.18-${ICEBERG_VERSION}.jar"
 
+# ---------------------------------------------------------------------------
+# Iceberg AWS bundle (S3FileIO)
+#
+# iceberg-flink-runtime does NOT contain org.apache.iceberg.aws.s3.S3FileIO -
+# verified with `unzip -l ... | grep iceberg/aws/s3/S3FileIO` -> 0 entries. Nor
+# does it bundle the AWS SDK. So Iceberg falls back to HadoopFileIO, which asks
+# Hadoop for a filesystem for the warehouse scheme and gets:
+#
+#   org.apache.iceberg.exceptions.RuntimeIOException: Failed to get file system
+#   for path: s3://warehouse/sales/orders_windowed/data/00001-...parquet
+#   Caused by: java.io.IOException: No FileSystem for scheme: s3
+#
+# iceberg-aws-bundle is the single self-contained jar with the AWS SDK shaded
+# in, and S3FileIO is then reachable. The table selects it explicitly via
+# 'io-impl' (the same choice s3-batch makes for Spark in
+# spark-defaults-configmap.yaml), so no Hadoop S3 stack is needed.
+#
+# Credentials are NOT configured here: they arrive through the
+# s3.access-key / s3.secret-key / s3.endpoint keys already declared in
+# flinkConfiguration.
+RUN set -eux; \
+    curl -fSL -o /opt/flink/lib/iceberg-aws-bundle-${ICEBERG_VERSION}.jar \
+        "${MAVEN_REPO}/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar"; \
+    ls -lh /opt/flink/lib/iceberg-aws-bundle-*.jar
+
+# ---------------------------------------------------------------------------
+# Hadoop AWS, so the scheme `s3` actually resolves
+#
+# With a Polaris INTERNAL catalog, io-impl is decided server-side and CANNOT be
+# set on the table:
+#   BadRequestException: Cannot set property 'io-impl' to
+#   'org.apache.iceberg.aws.s3.S3FileIO' for this catalog.
+# Polaris also returns NO s3.* properties from GET /v1/config (verified against
+# 1.8.0: only defaults/overrides/endpoints), so the client keeps Iceberg's
+# default HadoopFileIO, which then asks Hadoop for the warehouse scheme:
+#   RuntimeIOException: Failed to get file system for path:
+#   s3://warehouse/sales/orders_windowed/data/00001-...parquet
+#   Caused by: java.io.IOException: No FileSystem for scheme: s3
+#
+# hadoop-aws is the jar that registers org.apache.hadoop.fs.s3.S3FileSystem
+# (and s3a); flink-shaded-hadoop ships hadoop-common only. The endpoint, keys
+# and path-style access come from the s3.* entries already in flinkConfiguration,
+# which is what MinIO needs.
+#
+# Versions match the Hadoop that flink-shaded-hadoop-2-uber shades (3.3.x).
+RUN set -eux; \
+    curl -fSL -o /opt/flink/lib/hadoop-aws-${HADOOP_AWS_VERSION}.jar \
+        "${MAVEN_REPO}/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar"; \
+    curl -fSL -o /opt/flink/lib/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar \
+        "${MAVEN_REPO}/com/amazonaws/aws-java-sdk-bundle/${AWS_SDK_VERSION}/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar"; \
+    ls -lh /opt/flink/lib/hadoop-aws-*.jar /opt/flink/lib/aws-java-sdk-bundle-*.jar
+
 # S3 filesystem plugin for MinIO. No `|| true` here: a missing jar turns every
 # checkpoint into a job failure, and swallowing the error is how this image
 # looked healthy while broken.
@@ -119,8 +175,43 @@ RUN set -eux; \
     cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar /opt/flink/plugins/s3-fs-hadoop/; \
     ls /opt/flink/plugins/s3-fs-hadoop/*.jar
 
+# ---------------------------------------------------------------------------
+# PyFlink must be EXTRACTED, not left as pyflink.zip
+#
+# The flink:1.18 image ships PyFlink only as /opt/flink/opt/python/pyflink.zip
+# and puts it on PYTHONPATH. That is enough to import pyflink in the client, but
+# NOT enough to run a job under the Kubernetes Operator: every UDF/operator
+# stage is executed by shelling out to
+#   /opt/flink/opt/python/pyflink.zip/pyflink/bin/pyflink-udf-runner.sh
+# and a path inside a zip is not a directory, so the task dies on open():
+#
+#   java.io.IOException: Cannot run program ".../pyflink.zip/pyflink/bin/
+#   pyflink-udf-runner.sh": error=20, Not a directory
+#   ... at BeamPythonFunctionRunner.createStageBundleFactory
+#
+# The job reaches RUNNING and then every task restarts on this, which looks like
+# a flaky cluster rather than a packaging bug.
+#
+# python3.10 (already installed above) does the unzip, so no extra package and
+# no second copy of PyFlink beyond the zip itself.
+RUN python3.10 -c "import zipfile; zipfile.ZipFile('/opt/flink/opt/python/pyflink.zip').extractall('/opt/flink/opt/python/')" \
+    && chmod +x /opt/flink/opt/python/pyflink/bin/*.sh \
+    && ls -l /opt/flink/opt/python/pyflink/bin/pyflink-udf-runner.sh
+
 ENV PATH="/opt/py310/bin:${PATH}"
-ENV PYTHONPATH="/opt/flink/opt/python/pyflink.zip:/opt/flink/opt/python/py4j-0.10.9.7-src.zip:${PYTHONPATH}"
+# /opt/flink/opt/python - the PARENT of the extracted package, not
+# /opt/flink/opt/python/pyflink.
+#
+# pyflink.zip contains pyflink/ at its root, so extracting it into
+# /opt/flink/opt/python yields /opt/flink/opt/python/pyflink/{bin,common,
+# datastream,...}. Putting .../pyflink on PYTHONPATH makes those subdirectories
+# top-level modules, so `import pyflink` fails with ModuleNotFoundError - which
+# is what ProcessPythonEnvironmentManager reports when it shells out to
+# `python -c "import pyflink"`. The parent directory is what makes pyflink a
+# package again. pyflink.zip is deliberately NOT in the path any more.
+ENV PYTHONPATH="/opt/flink/opt/python:/opt/flink/opt/python/py4j-0.10.9.7-src.zip:${PYTHONPATH}"
+# Where pyflink/bin lives, which is what the UDF runner script resolves against.
+ENV PYFLINK_HOME="/opt/flink/opt/python/pyflink"
 
 # ---------------------------------------------------------------------------
 # Application code, LAST on purpose.

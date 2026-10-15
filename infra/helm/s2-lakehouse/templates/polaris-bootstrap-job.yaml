@@ -208,7 +208,16 @@ spec:
               {{- end }}
 
               echo "Creating catalog '${CATALOG_NAME}'..."
-              STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+              # NO -f here. This runs under `sh -ce`, so a curl that exits
+              # non-zero aborts the whole script before the status is ever
+              # inspected. 409 "Catalog already exists" is an EXPECTED outcome
+              # - it is the normal case when the drop above was refused
+              # ("Catalog 'polaris' cannot be dropped, it is not empty") - and
+              # the branch two lines below already treats 409 as success. With
+              # -f, that expected answer became a hard failure and this Job
+              # failed on every upgrade that followed a populated catalog.
+              # The status code is the contract here, not curl's exit code.
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
                 -X POST "${POLARIS_BASE_URL}/api/management/v1/catalogs" \
                 -H "${AUTH}" \
                 -H "Content-Type: application/json" \
@@ -273,7 +282,10 @@ spec:
               # -----------------------------------------------------------------
               for NS in sales marketing finance; do
                 echo "Creating namespace '${NS}' in catalog '${CATALOG_NAME}'..."
-                NS_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+                # Same reason as the catalog POST above: 409 is an accepted
+                # outcome handled by the branch below, and -f under `set -e`
+                # would abort before that branch is ever reached.
+                NS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
                   -X POST "${POLARIS_BASE_URL}/api/catalog/v1/${CATALOG_NAME}/namespaces" \
                   -H "${AUTH}" \
                   -H "Content-Type: application/json" \

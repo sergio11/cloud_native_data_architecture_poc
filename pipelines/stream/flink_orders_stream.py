@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,6 +46,7 @@ from pyflink.datastream.functions import (  # noqa: E402
 )
 from pyflink.datastream.window import TumblingEventTimeWindows  # noqa: E402
 from pyflink.table import StreamTableEnvironment  # noqa: E402
+from pyflink.util import type_hints  # noqa: E402
 
 from pipelines.stream.window_logic import (  # noqa: E402
     ALLOWED_LATENESS_MS,
@@ -161,6 +161,10 @@ class RevenueAccumulator:
 
     total: float = 0.0
     count: int = 0
+    #: Carried through to the result because PyFlink's ProcessWindowFunction
+    #: never sees the key: process_element(value, ctx, out) receives no key and
+    #: ctx does not expose one, so the status has to travel inside the value.
+    status: str = ""
 
 
 class _RevenueAggregate(AggregateFunction):
@@ -172,31 +176,56 @@ class _RevenueAggregate(AggregateFunction):
     def add(self, value: OrderWindowEvent, accumulator: RevenueAccumulator) -> RevenueAccumulator:
         accumulator.total += float(value.total_amount)
         accumulator.count += 1
+        accumulator.status = str(value.status)
         return accumulator
 
     def get_result(self, accumulator: RevenueAccumulator) -> Row:
-        return Row(float(accumulator.total), int(accumulator.count))
+        return Row(accumulator.status, float(accumulator.total), int(accumulator.count))
 
     def merge(self, acc_a: RevenueAccumulator, acc_b: RevenueAccumulator) -> RevenueAccumulator:
-        return RevenueAccumulator(total=acc_a.total + acc_b.total, count=acc_a.count + acc_b.count)
+        return RevenueAccumulator(
+            total=acc_a.total + acc_b.total,
+            count=acc_a.count + acc_b.count,
+            status=acc_a.status or acc_b.status,
+        )
 
 
 class _OrdersWindowFunction(ProcessWindowFunction):
-    """Converts a windowed aggregate into a published speed-layer row."""
+    """Emits one speed-layer row per window, from the aggregate that closes it.
 
-    def process(
-        self,
-        key: str,
-        context: ProcessWindowFunction.Context,
-        elements: Iterable[Row],
-    ) -> Iterable[Row]:
-        aggregates = list(elements)
-        if not aggregates:
-            return []
-        aggregate = aggregates[0]
-        row = build_orders_row(context.window().start, key, aggregate[0], int(aggregate[1]))
-        columns = orders_row_to_columns(row)
-        return [Row(*columns)]
+    PyFlink calls `process_element` (snake_case) and streams the aggregate
+    through a Collector. The Java-style `process(key, ctx, Iterable)` that this
+    used to implement is never invoked, and every task died on open with:
+
+        AttributeError: '_OrdersWindowFunction' object has no attribute
+        'process_element'
+
+    which surfaced as `TimerException: Error while waiting for
+    BeamPythonFunctionRunner flush` / "Failed to close remote bundle" - the
+    windowing looked fine and the failure arrived only when a timer fired.
+
+    Elements are buffered rather than emitted per element: a window produces a
+    single row, and there is no way to know which element is the last one. The
+    buffer is flushed in `clear_timer`, which PyFlink invokes when the window
+    closes.
+    """
+
+    def __init__(self) -> None:
+        self._pending: list[Row] = []
+
+    def open(self, runtime_context: Any) -> None:
+        self._pending = []
+
+    def process_element(self, value: Row, ctx: Any, out: type_hints.Collector) -> None:
+        # value is the aggregate: Row(status, window_revenue, window_orders)
+        self._pending.append(value)
+
+    def clear_timer(self, ctx: Any) -> None:
+        for value in self._pending:
+            status, revenue, orders = value[0], value[1], value[2]
+            row = build_orders_row(ctx.window().start, str(status), float(revenue), int(orders))
+            ctx.collect(Row(*orders_row_to_columns(row)))
+        self._pending = []
 
 
 def _assign_event_time(event: OrderWindowEvent, record_timestamp: int) -> int:

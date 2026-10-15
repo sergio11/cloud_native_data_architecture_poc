@@ -187,14 +187,24 @@ def load_image_into(node, image)
   store_ref = entry.split.first
   short_id = entry.split[1][0, 12]
 
-  # Already there under the right name? Nothing to do. Both spellings are
-  # checked: the blob alone is not enough, because the kubelet looks the image
-  # up BY NAME and the name is what went missing once already.
+  #  Already there, with THIS digest, under the right name? Nothing to do.
+  #
+  #  Both conditions are required. The name alone is not enough: a rebuild
+  #  reuses poc/flink-stream:0.1.0, so the node still holds that tag pointing at
+  #  the PREVIOUS image id and the task would skip the copy and leave the
+  #  cluster running yesterday's code.
   node_images, listed = capture('podman', '--connection', node[:connection], 'exec',
                                 node[:name], 'ctr', '-n', 'k8s.io', 'images', 'ls', '-q')
-  if listed && node_images.lines.map(&:strip).include?(image)
+  node_blobs, bl = capture('podman', '--connection', node[:connection], 'exec',
+                           node[:name], 'ctr', '-n', 'k8s.io', 'content', 'ls', '-q')
+  has_name = listed && node_images.lines.map(&:strip).include?(image)
+  has_id = bl && node_blobs.include?("sha256:#{short_id}")
+  if has_name && has_id
     ok_msg("#{image} already in #{node[:name]} (#{short_id}) - skipped")
     return true
+  end
+  if has_name && !has_id
+    info_msg("#{image} is in #{node[:name]} but at a different image id - reloading")
   end
 
   info_msg("#{image} -> #{node[:name]} (image #{short_id}, copying inside the machine)")

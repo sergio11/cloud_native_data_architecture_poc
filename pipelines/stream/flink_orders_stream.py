@@ -195,7 +195,8 @@ class _OrdersWindowFunction(ProcessWindowFunction):
             return []
         aggregate = aggregates[0]
         row = build_orders_row(context.window().start, key, aggregate[0], int(aggregate[1]))
-        return [Row(*orders_row_to_columns(row))]
+        columns = orders_row_to_columns(row)
+        return [Row(*columns)]
 
 
 def _assign_event_time(event: OrderWindowEvent, record_timestamp: int) -> int:
@@ -263,7 +264,28 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
                     Types.SQL_DATE(),  # order_date
                     Types.STRING(),  # status
                     Types.DOUBLE(),  # window_revenue
-                    Types.BIG_INT(),  # window_orders
+                    # Types.INT(), not Types.BIG_INT().
+                    #
+                    # This is the actual root cause of the column-type failure,
+                    # and it is in THIS line, not in the SQL. In PyFlink 1.18
+                    # Types.BIG_INT() maps to BigIntTypeInfo, whose logical type
+                    # is java.math.BigInteger. Declaring it here makes PyFlink
+                    # convert the Python value into a BigInteger, from_data_stream
+                    # re-derives the RowType from that, and the Table API sees
+                    #   f5: RAW('java.math.BigInteger')
+                    # which then fails BOTH ways:
+                    #   * no cast  -> "Column types of query result and sink do
+                    #     not match. Incompatible types for sink column
+                    #     'window_orders' at position 5"
+                    #   * with CAST(f5 AS BIGINT) -> "Cast function cannot
+                    #     convert value of type RAW('java.math.BigInteger') to
+                    #     type BIGINT" - the cast refuses to unwrap a RAW payload
+                    #
+                    # Types.INT() maps to IntegerTypeInfo -> SQL INTEGER, which
+                    # the planner widens to BIGINT cleanly. A 4-second window
+                    # cannot overflow a 32-bit count, and the sink column is
+                    # still declared BIGINT in the Iceberg table.
+                    Types.INT(),  # window_orders
                     Types.DOUBLE(),  # avg_order_value
                     Types.STRING(),  # source_tier
                 ]
@@ -289,7 +311,19 @@ WINDOW_COLUMNS = (
 
 
 def window_schema() -> Any:
-    """Builds the Table schema that names the windowed stream's columns."""
+    """Builds the Table schema that names the windowed stream's columns.
+
+    OBSERVED BEHAVIOUR: this schema is NOT applied. create_temporary_view()
+    accepts it without error, but the resulting view keeps the generic
+    positional RowType that from_data_stream() derived - f0..f7, with
+    f0: TIMESTAMP(9) rather than the TIMESTAMP(6) declared here. The INSERT
+    therefore has to project positionally (see main), and referencing
+    window_start/order_date fails with 'Column not found in any table'.
+
+    It is kept because it is the only written-down statement of the intended
+    column order and types, and it costs nothing. If a future PyFlink honours
+    it, the projection in main() should switch back to named columns.
+    """
     from pyflink.table import DataTypes, Schema
 
     types = [
@@ -341,9 +375,22 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
             )
             """
         )
+
+    # The job owns its table definition (see this function's docstring), so a
+    # property change must actually reach the table. CREATE TABLE IF NOT EXISTS
+    # silently KEEPS the existing definition, so adding 'io-impl' to the table
+    # below had no effect at all and the writer kept using HadoopFileIO:
+    #   RuntimeIOException: No FileSystem for scheme: s3
+    # Dropping first makes the definition below authoritative on every start.
+    # It is scoped to this one table, and the speed layer is its only writer.
+    logger.info("dropping any previous %s.orders_windowed definition", config.catalog_name)
+    table_env.execute_sql(
+        f"DROP TABLE IF EXISTS `{config.catalog_name}`.`sales`.`orders_windowed`"
+    )
+
     table_env.execute_sql(
         f"""
-        CREATE TABLE IF NOT EXISTS `{config.catalog_name}`.`sales`.`orders_windowed` (
+        CREATE TABLE `{config.catalog_name}`.`sales`.`orders_windowed` (
             `window_start`    TIMESTAMP(6),
             `window_end`      TIMESTAMP(6),
             `order_date`      DATE,
@@ -360,7 +407,32 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
         -- days(). Iceberg partitions on its own default here; if daily
         -- partitioning is needed it has to be applied to the catalog table, not
         -- declared in this statement.
-        WITH ('format' = 'parquet', 'write.upsert.enabled' = 'true')
+        --
+        -- No 'io-impl' here on purpose. Polaris INTERNAL catalogs own the
+        -- FileIO: setting it per table is rejected outright
+        --   BadRequestException: Cannot set property 'io-impl' to
+        --   'org.apache.iceberg.aws.s3.S3FileIO' for this catalog.
+        -- and GET /v1/config returns no s3.* properties either, so the client
+        -- keeps Iceberg's HadoopFileIO and resolves the warehouse scheme
+        -- through Hadoop. The image therefore ships hadoop-aws (see
+        -- infra/docker/flink.Dockerfile); endpoint, credentials and
+        -- path-style access come from the s3.* keys in flinkConfiguration.
+        WITH (
+            'format' = 'parquet',
+            'write.upsert.enabled' = 'true',
+            -- What makes the DROP above legal. Polaris issues
+            -- DROP_TABLE_WITH_PURGE by default and this principal
+            -- (catalog_admin) is not authorised for it:
+            --   ForbiddenException: Principal 'root' with activated
+            --   PrincipalRoles '[service_admin]' and activated grants via
+            --   '[service_admin, catalog_admin]' is not authorized for op
+            --   DROP_TABLE_WITH_PURGE
+            -- so every restart after the first failed. With purge disabled the
+            -- drop removes only the metadata, which is what a job recreating
+            -- its own table wants; Parquet files stay in MinIO and the table
+            -- that replaces them writes its own.
+            'table.purge-on-drop' = 'false'
+        )
         """
     )
 
@@ -399,10 +471,46 @@ def main() -> None:
     table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed), window_schema())
 
     # Terminal submission. Its total absence is what produced the original
-    # "The application contains no execute() calls" failure. SELECT * relies on
-    # the column order matching the Iceberg table, which WINDOW_COLUMNS pins.
+    # "The application contains no execute() calls" failure.
+    #
+    # POSITIONAL references, deliberately. from_data_stream() derives a generic
+    # RowType whose fields are f0..f7, and create_temporary_view(..., schema) does
+    # NOT rename them - the view really has no window_start/order_date columns:
+    #
+    #   ValidationException: SQL validation failed. From line 4, column 13 to
+    #   line 4, column 24: Column 'window_start' not found in any table
+    #
+    # So the projection addresses f0..f7, whose order and types the planner
+    # reports are:
+    #   f0 TIMESTAMP(9)  f1 TIMESTAMP(9)  f2 DATE  f3 STRING
+    #   f4 DOUBLE        f5 RAW(java.math.BigInteger)  f6 DOUBLE  f7 STRING
+    # and WINDOW_COLUMNS pins that order to the Iceberg table below.
+    #
+    # The CAST on f5 is required, not cosmetic: PyFlink maps a Python int to
+    # BigInteger (arbitrary precision), so without it the write is rejected with
+    #   ValidationException: Column types of query result and sink for
+    #   'polaris.sales.orders_windowed' do not match.
+    #   Cause: Incompatible types for sink column 'window_orders' at position 5.
+    # Declaring Types.BIG_INT() in process() does not prevent this: that is the
+    # upstream StreamRecord type, and from_data_stream re-derives the RowType
+    # from the Python values.
+    #
+    # The TIMESTAMP(6) casts on f0/f1 are explicit for symmetry; the planner
+    # would narrow them implicitly, but relying on that hides the width.
     result = table_env.execute_sql(
-        f"INSERT INTO `{config.catalog_name}`.`sales`.`orders_windowed` SELECT * FROM {TEMP_VIEW}"
+        f"""
+        INSERT INTO `{config.catalog_name}`.`sales`.`orders_windowed`
+        SELECT
+            CAST(f0 AS TIMESTAMP(6)),
+            CAST(f1 AS TIMESTAMP(6)),
+            f2,
+            f3,
+            f4,
+            CAST(f5 AS BIGINT),
+            f6,
+            f7
+        FROM {TEMP_VIEW}
+        """
     )
 
     job_client = result.get_job_client()

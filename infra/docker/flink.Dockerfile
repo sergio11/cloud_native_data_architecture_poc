@@ -78,9 +78,18 @@ ARG KAFKA_CONNECTOR_VERSION=3.1.0-1.18
 ARG KAFKA_CLIENTS_VERSION=3.4.0
 ARG ICEBERG_VERSION=1.6.1
 ARG HADOOP_SHADED_VERSION=2.8.3-10.0
-# Hadoop 3.3.x is what flink-shaded-hadoop-2-uber shades; the AWS SDK bundle
-# version is the one that hadoop-aws 3.3.x is built against.
-ARG HADOOP_AWS_VERSION=3.3.6
+# hadoop-aws MUST be 2.8.x. flink-shaded-hadoop-2-uber shades Hadoop 2.8.3, and
+# hadoop-aws 3.x needs org.apache.hadoop.fs.StreamCapabilities (Hadoop 3.2+),
+# which is not in the shaded jar:
+#   NoClassDefFoundError: org/apache/hadoop/fs/StreamCapabilities
+# 2.8.3 is also the version that still ships org.apache.hadoop.fs.s3.S3FileSystem
+# (removed in Hadoop 3.0), which is what registers the scheme `s3` that Polaris
+# hands out as the warehouse. Verified in the cluster:
+#   s3:// + hadoop-aws 3.3.6 -> NoClassDefFoundError
+#   s3:// + hadoop-aws 2.8.3 -> the scheme resolves
+ARG HADOOP_AWS_VERSION=2.8.3
+# AWS SDK bundle stays on 1.12.x: it is compiled against a much older SDK and
+# hadoop-aws 2.8.3 only uses the S3 client surface from it.
 ARG AWS_SDK_VERSION=1.12.367
 
 # Hadoop runtime classes. Registering the Iceberg REST catalog reaches
@@ -154,12 +163,17 @@ RUN set -eux; \
 #   s3://warehouse/sales/orders_windowed/data/00001-...parquet
 #   Caused by: java.io.IOException: No FileSystem for scheme: s3
 #
-# hadoop-aws is the jar that registers org.apache.hadoop.fs.s3.S3FileSystem
-# (and s3a); flink-shaded-hadoop ships hadoop-common only. The endpoint, keys
-# and path-style access come from the s3.* entries already in flinkConfiguration,
-# which is what MinIO needs.
+# hadoop-aws is the jar that registers org.apache.hadoop.fs.s3.S3FileSystem,
+# the implementation of the scheme `s3` that Polaris hands out as the warehouse;
+# flink-shaded-hadoop ships hadoop-common only.
 #
-# Versions match the Hadoop that flink-shaded-hadoop-2-uber shades (3.3.x).
+# Endpoints and credentials reach Hadoop through the fs.s3.* keys in
+# flinkConfiguration (see flink-deployments.yaml), which is what MinIO needs:
+# Hadoop 2.8's S3FileSystem reads fs.s3.awsAccessKeyId / fs.s3.awsSecretAccessKey
+# and ignores the s3.* names that S3FileIO would have used.
+#
+# Version MUST match the Hadoop that flink-shaded-hadoop-2-uber shades, which is
+# 2.8.3 - see the ARG comment above.
 RUN set -eux; \
     curl -fSL -o /opt/flink/lib/hadoop-aws-${HADOOP_AWS_VERSION}.jar \
         "${MAVEN_REPO}/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar"; \

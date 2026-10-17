@@ -26,6 +26,23 @@ spec:
     s3.path.style.access: "true"
     s3.access-key: "{{ .Values.icebergCatalog.s3AccessKey }}"
     s3.secret-key: "{{ .Values.icebergCatalog.s3SecretKey }}"
+    # The s3.* keys above are for Iceberg's S3FileIO. With a Polaris INTERNAL
+    # catalog S3FileIO is never reached: Polaris owns io-impl and rejects it
+    # ("Cannot set property 'io-impl' ... for this catalog"), and
+    # GET /v1/config carries no s3.* keys, so Iceberg keeps its default
+    # HadoopFileIO and asks HADOOP to resolve the warehouse scheme s3://.
+    #
+    # These fs.s3.* keys are the ones Hadoop 2.8's S3FileSystem actually reads,
+    # and they live in flinkConfiguration rather than in the job's SQL because
+    # that is where Flink's Table API builds the Hadoop Configuration that
+    # HadoopFileIO is handed. Measured in the cluster:
+    #   s3:// + no hadoop-aws    -> No FileSystem for scheme: s3
+    #   s3:// + hadoop-aws 3.3.6 -> NoClassDefFoundError: StreamCapabilities
+    #   s3:// + hadoop-aws 2.8.3 -> the scheme resolves
+    fs.s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
+    fs.s3.awsAccessKeyId: "{{ .Values.icebergCatalog.s3AccessKey }}"
+    fs.s3.awsSecretAccessKey: "{{ .Values.icebergCatalog.s3SecretKey }}"
+    fs.s3.path.style.access: "true"
   serviceAccount: flink-service-account
   jobManager:
     podTemplate:
@@ -99,6 +116,12 @@ spec:
     s3.path.style.access: "true"
     s3.access-key: "{{ .Values.icebergCatalog.s3AccessKey }}"
     s3.secret-key: "{{ .Values.icebergCatalog.s3SecretKey }}"
+    # Hadoop-side keys for the s3:// warehouse; see the orders job for why both
+    # sets of names are needed.
+    fs.s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
+    fs.s3.awsAccessKeyId: "{{ .Values.icebergCatalog.s3AccessKey }}"
+    fs.s3.awsSecretAccessKey: "{{ .Values.icebergCatalog.s3SecretKey }}"
+    fs.s3.path.style.access: "true"
   serviceAccount: flink-service-account
   jobManager:
     podTemplate:

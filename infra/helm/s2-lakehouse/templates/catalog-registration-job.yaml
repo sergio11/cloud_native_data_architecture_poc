@@ -1,0 +1,105 @@
+{{- if and .Values.polaris.enabled .Values.catalogRegistration.enabled }}
+{{/*
+Registers the Iceberg tables in the Polaris catalog.
+
+WHY THIS EXISTS
+
+`pipelines/serving/catalog_registration.py` is the only thing in the repo that
+creates the catalog's TABLE entries - the catalog and the namespaces come from
+polaris-bootstrap-job.yaml, but the tables are registered here. It was never
+executed by anything: no chart, no Dagster asset, no rake task referenced it.
+The consequence was that `iceberg.sales.daily_metrics` had no producer at all,
+and `unified_view.sql` references it, so `trino-views-bootstrap` failed on
+the very first statement:
+
+  CREATE OR REPLACE VIEW iceberg.serving.gold_sales_daily_metrics_live AS
+  SELECT * FROM iceberg.sales.daily_metrics;
+  -> Table 'iceberg.sales.daily_metrics' does not exist
+
+and because the Job runs its statements with `sh -ce`, the first failure
+aborted the whole file - so not even the stream views were created.
+
+The script also patches the product.yaml manifests under the repository's
+domains tree with the physical table paths, and registers the datasets in
+Marquez when MARQUEZ_URL points at it. Marquez is OPTIONAL: it lives in the
+s7-fabric subsystem, and the serving layer must not depend on the lineage
+backend being deployed too.
+
+The script runs from the image, not from a ConfigMap: the image is built from
+the repository, so the code and the manifests it patches are always the same
+revision, and a ConfigMap could not carry the domains/ tree anyway.
+
+The token is obtained from Polaris with the client credentials rather than
+being hard-coded: Polaris issues short-lived tokens, so a fixed one in a
+manifest would expire.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-catalog-registration
+  namespace: {{ .Values.global.namespace | default "platform" }}
+  labels:
+    app: polaris-catalog-registration
+    {{- include "s2-lakehouse.labels" . | nindent 4 }}
+  annotations:
+    # A Helm hook, for the same reason as polaris-catalog-bootstrap: the Job's
+    # pod template is immutable, so a second `helm upgrade` that changes it
+    # fails with "field is immutable" every time. As a hook it is deleted and
+    # recreated.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "25"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: polaris-catalog-registration
+    spec:
+      restartPolicy: OnFailure
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+      containers:
+        - name: registration
+          image: "{{ .Values.catalogRegistration.image.repository }}:{{ .Values.catalogRegistration.image.tag }}"
+          imagePullPolicy: {{ .Values.catalogRegistration.image.pullPolicy }}
+          env:
+            # The SERVER ROOT, not /api/catalog: the client appends the API
+            # paths itself ("/api/catalog/v1/namespaces", "/api/v1/namespaces").
+            - name: POLARIS_URL
+              value: "http://polaris.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local:{{ .Values.polaris.service.port }}"
+            - name: POLARIS_CLIENT_ID
+              value: {{ .Values.polaris.clientId | quote }}
+            - name: POLARIS_CLIENT_SECRET
+              value: {{ .Values.polaris.clientSecret | quote }}
+            # The catalog inside Polaris. It belongs in the path of the Iceberg
+            # REST endpoints: /api/catalog/v1/{catalog}/namespaces.
+            - name: POLARIS_CATALOG_NAME
+              value: {{ .Values.polaris.config.defaultCatalog | quote }}
+            # The warehouse the tables live under. It MUST match the catalog's
+            # allowedLocations, or Polaris refuses every table.
+            - name: POLARIS_WAREHOUSE_ROOT
+              value: {{ .Values.polaris.config.warehouseLocation | quote }}
+            # Optional: when set, the datasets and jobs are registered in
+            # Marquez too. Unset in the stream profile, because Marquez belongs
+            # to s7-fabric and the serving layer must not depend on it.
+            - name: MARQUEZ_URL
+              value: {{ .Values.catalogRegistration.marquezUrl | quote }}
+            # The manifests to patch with the physical table paths. The image
+            # carries the repository's domains/ tree at this path.
+            - name: MANIFESTS_DIR
+              value: {{ .Values.catalogRegistration.manifestsDir | quote }}
+          workingDir: /app
+          command:
+            - /bin/sh
+            - -ce
+            - |
+              echo "=== Iceberg catalog registration ==="
+              python3 pipelines/serving/catalog_registration.py
+{{- end }}

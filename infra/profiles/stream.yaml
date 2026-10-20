@@ -6,12 +6,17 @@
 # Only charts this profile deploys have a section (s1, s2, s4, s5).
 # NOTE: s8 is NOT deployed by the stream path of profile-up.sh (observability
 # for streaming stays on the demo profile until a profile explicitly wires it).
-# Target RAM Footprint: ~6.0 GB RAM
+# Target RAM Footprint: workloads ~4.2 GB + ~1.3 GB control plane on a 6 GiB VM.
+# Sum of container limits actually set here:
+#   postgres 384 + minio 384 + polaris 512 + kafka 768
+#   + flink-operator 384 + flink orders JM 768 + TM 1024  = 4224 MiB
+# plus the transient bootstrap Jobs (bucket-init, polaris-schema, polaris
+# bootstrap, kafka-topics) and the control plane, which shares the same 6 GiB.
 # ==============================================================================
 profile:
   name: "stream"
   description: "Real-time stream processing with Kafka, Apache Flink, and Observability"
-  targetRamMb: 6144
+  targetRamMb: 4224
   targetCpuCores: 4.0
 
 subsystems:
@@ -59,7 +64,10 @@ subsystems:
           cpu: "1000m"
           memory: "768Mi"
     kafkaUi:
-      enabled: true
+      # OFF: a 256Mi container for a browser tab, on the profile that has to fit
+      # a 6 GiB VM together with the control plane. Turn it on with -set once
+      # there is headroom; it is a UI, not part of the data path.
+      enabled: false
       resources:
         requests:
           cpu: "50m"
@@ -90,7 +98,15 @@ subsystems:
           cpu: 0.5
           replicas: 1
       clickstreamStream:
-        enabled: true
+        # OFF, deliberately. One Flink job is 768m + 1024m = 1792 MB of process
+        # memory, so two jobs are 3584 MB - more than half the whole podman
+        # machine. The profile below claims 6 GiB of target and also enabled
+        # both jobs, which is why the box thrashed: the sum of container LIMITS
+        # is what the JVMs size their heaps from (-Xms / MaxRAMPercentage), and
+        # kind's three nodes each advertise ~5.79 GiB allocatable even though
+        # they share one 6 GiB VM, so the scheduler overcommits and the kubelet
+        # evicts whatever is unlucky. Run clickstream as its own phase.
+        enabled: false
         jobManager:
           memory: "768m"
           cpu: 0.5

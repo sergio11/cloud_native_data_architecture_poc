@@ -183,3 +183,25 @@ lakehouseStorage:
   storageClass: "standard"
   size: "2Gi"
 
+# Registers the Iceberg TABLES in the Polaris catalog.
+#
+# `pipelines/serving/catalog_registration.py` is the only thing in the repo
+# that creates the catalog's table entries, and nothing executed it: no chart,
+# no Dagster asset, no rake task. So `iceberg.sales.daily_metrics` had no
+# producer, and `unified_view.sql` references it - which made
+# `trino-views-bootstrap` fail on its first statement and take the stream
+# views down with it.
+catalogRegistration:
+  enabled: true
+  # The image is built from the repository, so the script and the domains/
+  # manifests it patches are always the same revision.
+  image:
+    repository: docker.io/poc/ingest
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  # Optional. When set, the datasets and jobs are registered in Marquez too.
+  # Marquez lives in s7-fabric, and the serving layer must not depend on the
+  # lineage backend being deployed as well.
+  marquezUrl: ""
+  # The manifests to patch with the physical table paths.
+  manifestsDir: "/app/domains"

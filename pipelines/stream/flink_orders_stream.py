@@ -42,12 +42,25 @@ from pyflink.datastream.connectors.kafka import (  # noqa: E402
 from pyflink.datastream.functions import (  # noqa: E402
     AggregateFunction,
     FlatMapFunction,
-    ProcessWindowFunction,
+    ProcessFunction,
 )
 from pyflink.datastream.window import TumblingEventTimeWindows  # noqa: E402
 from pyflink.table import StreamTableEnvironment  # noqa: E402
-from pyflink.util import type_hints  # noqa: E402
 
+# There is deliberately NO `from pyflink.util import type_hints` here. PyFlink
+# 1.18 has no `pyflink.util.type_hints` and no `pyflink.common.type_hints`
+# either - both were verified inside the image:
+#   >>> import pyflink.common.type_hints
+#   ModuleNotFoundError: No module named 'pyflink.common.type_hints'
+#   >>> import pyflink.datastream.functions as f
+#   >>> [n for n in dir(f) if 'Collector' in n]
+#   []
+# so the import failed at module load, before any topology was built, and the
+# JobManager died with only:
+#   ImportError: cannot import name 'type_hints' from 'pyflink.util'
+#   Python process exits with code: 1
+# The window function below returns the rows it wants to emit; DataStream
+# .process() passes no Collector to annotate.
 from pipelines.stream.window_logic import (  # noqa: E402
     ALLOWED_LATENESS_MS,
     MAX_OUT_OF_ORDERNESS_MS,
@@ -56,6 +69,7 @@ from pipelines.stream.window_logic import (  # noqa: E402
     build_orders_row,
     orders_row_to_columns,
     parse_order_event,
+    window_start_ms,
 )
 
 logging.basicConfig(
@@ -155,82 +169,99 @@ class _ParseOrderEvent(FlatMapFunction):
         return [] if event is None else [event]
 
 
-@dataclass
-class RevenueAccumulator:
-    """Running revenue sum and order count for one window."""
-
-    total: float = 0.0
-    count: int = 0
-    #: Carried through to the result because PyFlink's ProcessWindowFunction
-    #: never sees the key: process_element(value, ctx, out) receives no key and
-    #: ctx does not expose one, so the status has to travel inside the value.
-    status: str = ""
+#: The aggregate accumulator: (total_revenue, order_count, status, max_event_ms).
+#:
+#: A plain TUPLE, and not a dataclass, on purpose. Flink sends the accumulator
+#: to the TaskManager with standard pickle, and the Beam runner executes the
+#: operator module under the name __main__ - so a class defined in this module
+#: is pickled by reference to __main__, where the TaskManager cannot find it:
+#:
+#:     _pickle.PicklingError: Can't pickle <class '__main__.RevenueAccumulator'>:
+#:     attribute lookup RevenueAccumulator on __main__ failed
+#:
+#: The TaskManager then fails the task while INITIALIZING and the job restarts
+#: in a loop, with "Not all required tasks are currently running" on the
+#: checkpoints as the only symptom. A tuple of primitives pickles with no
+#: module lookup at all, so it cannot fail that way.
+#:
+#: The indices are literal because a tuple is read positionally here; the
+#: names below are the documentation.
+#:   0 total_revenue   1 order_count   2 status   3 max_event_ms
+Accumulator = tuple[float, int, str, int]
 
 
 class _RevenueAggregate(AggregateFunction):
-    """Accumulates revenue sum and order count inside a tumbling window."""
+    """Accumulates revenue sum, order count and latest event time per window."""
 
-    def create_accumulator(self) -> RevenueAccumulator:
-        return RevenueAccumulator()
+    def create_accumulator(self) -> Accumulator:
+        return (0.0, 0, "", 0)
 
-    def add(self, value: OrderWindowEvent, accumulator: RevenueAccumulator) -> RevenueAccumulator:
-        accumulator.total += float(value.total_amount)
-        accumulator.count += 1
-        accumulator.status = str(value.status)
-        return accumulator
+    def add(self, value: OrderWindowEvent, accumulator: Accumulator) -> Accumulator:
+        return (
+            accumulator[0] + float(value.total_amount),
+            accumulator[1] + 1,
+            str(value.status),
+            max(accumulator[3], int(value.event_time_ms)),
+        )
 
-    def get_result(self, accumulator: RevenueAccumulator) -> Row:
-        return Row(accumulator.status, float(accumulator.total), int(accumulator.count))
+    def get_result(self, accumulator: Accumulator) -> Row:
+        return Row(
+            accumulator[2],
+            float(accumulator[0]),
+            int(accumulator[1]),
+            int(accumulator[3]),
+        )
 
-    def merge(self, acc_a: RevenueAccumulator, acc_b: RevenueAccumulator) -> RevenueAccumulator:
-        return RevenueAccumulator(
-            total=acc_a.total + acc_b.total,
-            count=acc_a.count + acc_b.count,
-            status=acc_a.status or acc_b.status,
+    def merge(self, acc_a: Accumulator, acc_b: Accumulator) -> Accumulator:
+        return (
+            acc_a[0] + acc_b[0],
+            acc_a[1] + acc_b[1],
+            acc_a[2] or acc_b[2],
+            max(acc_a[3], acc_b[3]),
         )
 
 
-class _OrdersWindowFunction(ProcessWindowFunction):
-    """Emits one speed-layer row per window, from the aggregate that closes it.
+class _OrdersWindowFunction(ProcessFunction):
+    """Turns one aggregate result into the speed-layer row for its window.
 
-    PyFlink calls `process_element` (snake_case) and streams the aggregate
-    through a Collector. The Java-style `process(key, ctx, Iterable)` that this
-    used to implement is never invoked, and every task died on open with:
+    The contract is the one PyFlink 1.18 actually invokes, read from the
+    image's own source rather than assumed:
 
-        AttributeError: '_OrdersWindowFunction' object has no attribute
-        'process_element'
+        # pyflink/datastream/data_stream.py:641
+        def process(self, func: ProcessFunction, output_type: TypeInformation = None) -> 'DataStream'
 
-    which surfaced as `TimerException: Error while waiting for
-    BeamPythonFunctionRunner flush` / "Failed to close remote bundle" - the
-    windowing looked fine and the failure arrived only when a timer fired.
+        # pyflink/fn_execution/datastream/process/operations.py, PROCESS branch
+        process_element = user_defined_func.process_element
+        results = process_element(value[2], ctx)
 
-    Elements are buffered rather than emitted per element: a window produces a
-    single row, and there is no way to know which element is the last one. The
-    buffer is flushed in `clear_timer`, which PyFlink invokes when the window
-    closes.
+    So ``process_element`` takes (value, ctx) - TWO arguments, no Collector -
+    and RETURNS the values to emit. ``ProcessWindowFunction.process(key, ctx,
+    elements)`` is a different API on a different code path and is never called
+    here, which is why every window silently produced nothing.
+
+    The aggregate already ran the tumbling window, so this operator sees one
+    element per window and needs no window bookkeeping of its own.
     """
 
-    def __init__(self) -> None:
-        self._pending: list[Row] = []
-
-    def open(self, runtime_context: Any) -> None:
-        self._pending = []
-
-    def process_element(self, value: Row, ctx: Any, out: type_hints.Collector) -> None:
-        # value is the aggregate: Row(status, window_revenue, window_orders)
-        self._pending.append(value)
-
-    def clear_timer(self, ctx: Any) -> None:
-        for value in self._pending:
-            status, revenue, orders = value[0], value[1], value[2]
-            row = build_orders_row(ctx.window().start, str(status), float(revenue), int(orders))
-            ctx.collect(Row(*orders_row_to_columns(row)))
-        self._pending = []
+    def process_element(self, value: Row, ctx: Any) -> list[Row]:
+        status, revenue, orders, max_event_ms = value[0], value[1], value[2], value[3]
+        window_start = window_start_ms(max_event_ms)
+        row = build_orders_row(window_start, str(status), float(revenue), int(orders))
+        return [Row(*orders_row_to_columns(row))]
 
 
-def _assign_event_time(event: OrderWindowEvent, record_timestamp: int) -> int:
-    """Timestamp assigner: the event time carried by the payload, never wall clock."""
-    return int(event.event_time_ms)
+class _AssignEventTime:
+    """Timestamp assigner: the event time carried by the payload, never wall clock.
+
+    A class, not a bare function, because PyFlink 1.18 reads
+    ``timestamp_assigner.extract_timestamp`` in
+    ``pyflink/datastream/data_stream.py:683`` and does not fall back to calling
+    the object. Measured in-cluster:
+      AttributeError: 'function' object has no attribute 'extract_timestamp'
+    """
+
+    def extract_timestamp(self, event: OrderWindowEvent, record_timestamp: int) -> int:
+        return int(event.event_time_ms)
 
 
 def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig) -> DataStream[Row]:
@@ -255,7 +286,7 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
 
     watermarks = (
         WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_millis(MAX_OUT_OF_ORDERNESS_MS))
-        .with_timestamp_assigner(_assign_event_time)
+        .with_timestamp_assigner(_AssignEventTime())
         .with_idleness(Duration.of_millis(MAX_OUT_OF_ORDERNESS_MS * 4))
     )
 
@@ -279,7 +310,12 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
     return (
         events.key_by(lambda event: event.status)
         .window(TumblingEventTimeWindows.of(Time.milliseconds(WINDOW_SIZE_MS)))
-        .allowed_lateness(Time.milliseconds(ALLOWED_LATENESS_MS))
+        # allowed_lateness takes MILLISECONDS as an int, unlike .window() which
+        # takes a Time. Passing Time.milliseconds(...) here crashes the window
+        # operator the first time a window is evaluated:
+        #   window_operator.py:514  time = window.max_timestamp() + self.allowed_lateness
+        #   TypeError: unsupported operand type(s) for +: 'int' and 'Time'
+        .allowed_lateness(ALLOWED_LATENESS_MS)
         .aggregate(_RevenueAggregate())
         .process(
             _OrdersWindowFunction(),
@@ -412,14 +448,34 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
     #   RuntimeIOException: No FileSystem for scheme: s3
     # Dropping first makes the definition below authoritative on every start.
     # It is scoped to this one table, and the speed layer is its only writer.
+    #
+    # The drop is TOLERANT because Polaris refuses it for this principal:
+    #   TableException: Could not execute DropTable in path `polaris`.`sales`.`orders_windowed`
+    #   ForbiddenException: Principal 'root' ... is not authorized for op
+    #   DROP_TABLE_WITH_PURGE
+    # and the job died at startup, before a single row was written. The
+    # 'table.purge-on-drop' = 'false' property below is what makes a drop
+    # legal, but it is a property of the TABLE, so it only helps once the
+    # table has been created with it - and a table left behind by a previous
+    # incarnation may not have it.
+    #
+    # So: try to drop, and if Polaris says no, keep the existing definition and
+    # carry on. The table is written by this job alone, so its definition
+    # cannot drift between two writers.
     logger.info("dropping any previous %s.orders_windowed definition", config.catalog_name)
-    table_env.execute_sql(
-        f"DROP TABLE IF EXISTS `{config.catalog_name}`.`sales`.`orders_windowed`"
-    )
+    try:
+        table_env.execute_sql(f"DROP TABLE IF EXISTS `{config.catalog_name}`.`sales`.`orders_windowed`")
+    except Exception as exc:  # noqa: BLE001 - Polaris refusing the drop is expected
+        logger.warning(
+            "Polaris refused to drop the previous %s.orders_windowed definition (%s); "
+            "keeping it and continuing with CREATE TABLE IF NOT EXISTS.",
+            config.catalog_name,
+            str(exc)[:200],
+        )
 
     table_env.execute_sql(
         f"""
-        CREATE TABLE `{config.catalog_name}`.`sales`.`orders_windowed` (
+        CREATE TABLE IF NOT EXISTS `{config.catalog_name}`.`sales`.`orders_windowed` (
             `window_start`    TIMESTAMP(6),
             `window_end`      TIMESTAMP(6),
             `order_date`      DATE,

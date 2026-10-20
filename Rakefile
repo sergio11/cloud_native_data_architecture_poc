@@ -1,4 +1,4 @@
-﻿# frozen_string_literal: true
+# frozen_string_literal: true
 
 # ==============================================================================
 # Modern Data Architecture POC - Master Rakefile
@@ -599,7 +599,7 @@ namespace :cluster do
     if next_step
       warn_msg("Next step: #{next_step}")
     else
-      ok_msg('Cluster is healthy. Detail: kubectl get pods -A Â· helm history <release> -n platform Â· rake cluster:logs[<name>]')
+      ok_msg('Cluster is healthy. Detail: kubectl get pods -A · helm history <release> -n platform · rake cluster:logs[<name>]')
     end
   end
 
@@ -696,6 +696,117 @@ namespace :cluster do
       matches.each { |m| puts "      - #{m[:ns]}/#{m[:name]}" }
       abort "\e[33mBe more specific: rake cluster:logs[<longer substring>]\e[0m"
     end
+  end
+
+  desc 'Collect a full failure report for the cluster, or one pod: describe, events, current and PREVIOUS container logs'
+  task :diagnose, [:name] do |_t, args|
+    target = args[:name].to_s
+
+    # `kubectl logs` on a restarted container is EMPTY: the terminated container's
+    # log lives only in the kubelet's last-termination buffer, reachable with
+    # --previous, and it is overwritten by the NEXT restart. Chasing a crash-loop
+    # with `cluster:logs` therefore always shows the newest, least informative
+    # attempt. This task grabs every window at once, into a file that survives.
+    banner 'CLUSTER DIAGNOSE'
+    stamp = Time.now.strftime('%Y%m%d-%H%M%S')
+    out_dir = File.join('data', 'diagnostics')
+    mkdir_p out_dir
+    report = File.join(out_dir, "diagnose-#{stamp}.txt")
+
+    pods_out, ok = capture('kubectl', 'get', 'pods', '-A', '--no-headers')
+    abort "\e[31mCannot list pods: #{pods_out.lines.first}\e[0m" unless ok
+
+    pods = pods_out.lines.filter_map do |line|
+      cols = line.split(/\s+/)
+      next nil if cols.size < 5
+
+      ready = cols[2].to_s.split('/', 2)
+      {
+        ns: cols[0], name: cols[1],
+        status: cols[3],
+        restarts: cols[4].to_i,
+        not_ready: ready[1] && ready[0].to_i < ready[1].to_i
+      }
+    end
+
+    unhealthy = pods.reject { |p| p[:status].match?(/\A(Running|Succeeded|Completed)\z/) }
+                    .reject { |p| p[:restarts].zero? && !p[:not_ready] }
+    if target != ''
+      unhealthy = pods.select { |p| p[:name].include?(target) }
+      if unhealthy.empty?
+        abort "\e[31mNo pod matches '#{target}'. List them with: kubectl get pods -A\e[0m"
+      end
+    end
+
+    File.open(report, 'w') do |f|
+      f.puts "POC cluster diagnostic  #{Time.now}"
+      f.puts '=' * 78
+      f.puts "\n## Pods (#{pods.size} total, #{unhealthy.size} needing attention)\n"
+      f.puts format('%-22s %-38s %-24s %s', 'NAMESPACE', 'NAME', 'STATUS', 'RESTARTS')
+      pods.sort_by { |p| [p[:status] == 'Running' ? 1 : 0, p[:ns], p[:name]] }.each do |p|
+        f.puts format('%-22s %-38s %-24s %d', p[:ns], p[:name], p[:status], p[:restarts])
+      end
+
+      # Jobs are where this platform actually fails (bootstrap/hook Jobs), and
+      # a failed Job's pod is often already gone: its state lives in .status.
+      jobs_out, jobs_ok = capture('kubectl', 'get', 'jobs', '-A', '--no-headers')
+      if jobs_ok && !jobs_out.strip.empty?
+        f.puts "\n## Jobs\n"
+        f.puts format('%-22s %-38s %-8s %-8s %-6s %s', 'NAMESPACE', 'NAME', 'COMPLETIONS', 'FAILED', 'ACTIVE', 'AGE')
+        jobs_out.lines.each do |line|
+          cols = line.split(/\s+/)
+          next if cols.size < 6
+
+          f.puts format('%-22s %-38s %-8s %-8s %-6s %s', cols[0], cols[1], cols[2], cols[3], cols[4], cols[5])
+        end
+      end
+
+      # Custom resources: the Flink/Spark operators report job-level failures
+      # here, not on any pod, so a pod-only sweep misses them entirely.
+      { 'flinkdeployments' => 'FlinkDeployments',
+        'scheduledsparkapplications' => 'ScheduledSparkApplications',
+        'sparkapplications' => 'SparkApplications' }.each do |plural, title|
+        cr_out, cr_ok = capture('kubectl', 'get', plural, '-A', '--no-headers')
+        next unless cr_ok && !cr_out.strip.empty?
+
+        f.puts "\n## #{title}\n#{cr_out}"
+      end
+
+      focus = unhealthy.empty? ? pods : unhealthy
+      focus.each do |p|
+        ident = "#{p[:ns]}/#{p[:name]}"
+        f.puts "\n#{'=' * 78}\n## #{ident}  [#{p[:status]}, #{p[:restarts]} restarts]\n#{'=' * 78}"
+
+        %w[describe].each do |what|
+          out, = capture('kubectl', what, '-n', p[:ns], p[:name])
+          f.puts "\n--- kubectl #{what} ---\n#{out}"
+        end
+        events, = capture('kubectl', 'get', 'events', '-n', p[:ns],
+                           '--field-selector', "involvedObject.name=#{p[:name]}",
+                           '--sort-by', 'lastTimestamp')
+        f.puts "\n--- events ---\n#{events}"
+
+        containers_out, c_ok = capture('kubectl', 'get', 'pod', '-n', p[:ns], p[:name],
+                                       '-o', 'jsonpath={.spec.initContainers[*].name}{"\\n"}{.spec.containers[*].name}')
+        containers = c_ok ? containers_out.split : []
+        containers.each do |c|
+          # --previous is the only source for a container that already died.
+          prev, = capture('kubectl', 'logs', '-n', p[:ns], p[:name], '-c', c, '--previous', '--tail=200')
+          cur, = capture('kubectl', 'logs', '-n', p[:ns], p[:name], '-c', c, '--tail=200')
+          f.puts "\n--- logs #{c} (PREVIOUS container) ---\n#{prev}" unless prev.strip.empty?
+          f.puts "\n--- logs #{c} (current) ---\n#{cur}"
+        end
+      end
+    end
+
+    if unhealthy.empty?
+      ok_msg('every pod is Running/Completed with zero restarts')
+    else
+      warn_msg("#{unhealthy.size} pod(s) need attention:")
+      unhealthy.each { |p| warn_msg("  #{p[:ns]}/#{p[:name]}  [#{p[:status]}, #{p[:restarts]} restarts]") }
+    end
+    ok_msg("report written to #{report}")
+    puts "        read it with:  rake cluster:logs[<pod>]  or open the file above"
   end
 
   desc 'Verify prerequisites, detect-or-create the kind cluster, namespaces, policies, platform profile'
@@ -1053,6 +1164,17 @@ namespace :cluster do
   end
 end
 
+# The Trino image, read from the chart so the demo and the deployment cannot
+# drift apart. A hardcoded tag here is how the serving layer ended up running
+# a Trino that could not talk to Polaris at all.
+def trino_image
+  doc = YAML.load_file(File.join('infra', 'helm', 's5-serving', 'values.yaml'))
+  image = doc.dig('trino', 'image')
+  "#{image['repository']}:#{image['tag']}"
+rescue StandardError
+  'trinodb/trino:455'
+end
+
 namespace :stream do
   desc 'Deploy Kafka + Flink Operator + the speed-layer jobs via Helm'
   task :deploy do
@@ -1080,6 +1202,103 @@ namespace :stream do
     puts "\e[33m[S4] Publishing events to Kafka for 60 s at 20 events/s...\e[0m"
     sh 'python data-generator/event_producer.py --bootstrap-servers localhost:9092 --rate 20 --duration 60'
   end
+
+  desc 'Prove the speed layer in ONE pod: window operators -> Iceberg -> Parquet (no Kafka/JM/TM)'
+  task :probe do
+    banner 'SPEED LAYER PROBE'
+    script = File.join('infra', 'diagnostics', 'window_write_probe.py')
+    job_file = File.join('infra', 'diagnostics', 'window-write-probe.job.yaml')
+    abort "\e[31mMissing #{script}\e[0m" unless File.exist?(script)
+    abort "\e[31mMissing #{job_file}\e[0m" unless File.exist?(job_file)
+
+    _, api_ok = capture('kubectl', 'cluster-info')
+    unless api_ok
+      abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m"
+    end
+    # MinIO + Polaris must be up: the probe writes through them.
+    up, = capture('kubectl', 'get', 'pods', '-n', 'platform',
+                  '-o', 'jsonpath={.items[*].metadata.name}')
+    %w[minio polaris].each do |component|
+      next if up.to_s.match?(/\A#{component}-\d/) || up.to_s.match?(/#{component}-[a-z0-9]+-/)
+
+      abort "\e[31m#{component} is not running in namespace platform.\e[0m\n" \
+            "\e[33mDeploy it first: rake cluster:up[stream]\e[0m"
+    end
+
+    # The script goes in through a ConfigMap so it can be corrected without
+    # paying the image rebuild + per-node load cycle (~20 min here).
+    run! 'kubectl', 'delete', 'job', 'flink-window-probe', '-n', 'platform',
+         '--ignore-not-found'
+    run! 'kubectl', 'delete', 'configmap', 'flink-window-probe', '-n', 'platform',
+         '--ignore-not-found'
+    run! 'kubectl', 'create', 'configmap', 'flink-window-probe', '-n', 'platform',
+         "--from-file=window_write_probe.py=#{script}"
+
+    run! 'kubectl', 'apply', '-f', job_file
+    info_msg('probe running; this is a full local Flink cluster in one pod, allow ~3 min...')
+
+    deadline = Time.now + (12 * 60)
+    phase = ''
+    loop do
+      complete, = capture('kubectl', 'get', 'job', 'flink-window-probe', '-n', 'platform',
+                          '-o', 'jsonpath={.status.conditions[?(@.type=="Complete")].status}')
+      if complete.to_s.strip == 'True'
+        phase = 'complete'
+        break
+      end
+      failed, = capture('kubectl', 'get', 'job', 'flink-window-probe', '-n', 'platform',
+                        '-o', 'jsonpath={.status.failed}')
+      if failed.to_s.strip.to_i.positive?
+        phase = 'failed'
+        break
+      end
+      if Time.now > deadline
+        phase = 'timeout'
+        break
+      end
+      sleep 10
+    end
+
+    puts
+    logs, = capture('kubectl', 'logs', '-n', 'platform', 'job/flink-window-probe')
+    puts logs unless logs.to_s.strip.empty?
+    puts
+
+    passes = logs.to_s.scan(/PASS\s+(.*)/).flatten
+    fails = logs.to_s.scan(/FAIL\s+(.*)/).flatten
+    ok_msg("#{passes.size} comprobacion(es) superadas") unless passes.empty?
+    fails.each { |f| err_msg("comprobacion fallida: #{f}") }
+
+    # Independent of the Job's own verdict: did Parquet actually land? Asked of
+    # the MinIO pod, not the probe pod - the probe's container has exited by now,
+    # so exec would fail with "container not found" no matter what it wrote.
+    minio_pod, = capture('kubectl', 'get', 'pods', '-n', 'platform',
+                         '-o', 'jsonpath={.items[?(@.metadata.labels.app=="minio")].metadata.name}')
+    minio_pod = minio_pod.to_s.strip
+    if minio_pod.empty?
+      err_msg('no se ha encontrado el pod de MinIO para contar los parquet')
+    else
+      data, = capture('kubectl', 'exec', '-n', 'platform', minio_pod, '--',
+                      'sh', '-c',
+                      "find /data/warehouse/sales/probe_orders_windowed/data -name '*.parquet' | wc -l")
+      count = data.to_s.strip
+      if count =~ /\A\d+\z/ && count.to_i.positive?
+        ok_msg("MinIO contiene #{count} fichero(s) parquet en sales.probe_orders_windowed")
+      else
+        err_msg("no se ha encontrado ningun parquet en el warehouse (#{data.to_s.lines.first})")
+      end
+    end
+
+    case phase
+    when 'complete'
+      fails.empty? ? ok_msg('PROBE OK') : abort("\e[31mPROBE FALLIDO: #{fails.join('; ')}\e[0m")
+    when 'failed'
+      abort "\e[31mPROBE: el Job fallo (exit != 0). Lee el log de arriba.\e[0m"
+    else
+      abort "\e[31mPROBE: no termino en 12 min. Logs: kubectl logs -n platform job/flink-window-probe\e[0m"
+    end
+    puts "\e[32mLa speed layer escribe Parquet. NO cubre Kafka, el FlinkDeployment ni los checkpoints.\e[0m"
+  end
 end
 
 desc 'RF-24 end-to-end demo on the cluster: code verification -> demo profile -> events -> Flink -> Trino'
@@ -1101,13 +1320,13 @@ task :demo do
   sleep 15
 
   puts '==> Querying the speed layer through Trino (batch + stream, RF-11)'
-  run! 'kubectl', 'run', 'trino-cli', '--rm', '-i', '--restart=Never', '--image=trinodb/trino:444',
+  run! 'kubectl', 'run', 'trino-cli', '--rm', '-i', '--restart=Never', '--image=' + trino_image,
        '--command', '--', 'trino', '--server', 'http://trino.platform.svc.cluster.local:8080',
        '--execute',
        'SELECT status, count(*) AS windows, sum(window_orders) AS orders, sum(window_revenue) AS revenue FROM stream.sales.orders_windowed GROUP BY status ORDER BY status'
 
   puts '==> Querying the unified serving view (RF-11)'
-  run! 'kubectl', 'run', 'trino-unified', '--rm', '-i', '--restart=Never', '--image=trinodb/trino:444',
+  run! 'kubectl', 'run', 'trino-unified', '--rm', '-i', '--restart=Never', '--image=' + trino_image,
        '--command', '--', 'trino', '--server', 'http://trino.platform.svc.cluster.local:8080',
        '--execute',
        'SELECT order_date, status, total_orders, total_revenue, source_tier FROM iceberg.serving.sales_unified_revenue ORDER BY order_date DESC LIMIT 20'

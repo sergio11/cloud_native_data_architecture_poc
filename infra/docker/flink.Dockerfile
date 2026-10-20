@@ -91,6 +91,24 @@ ARG HADOOP_AWS_VERSION=2.8.3
 # AWS SDK bundle stays on 1.12.x: it is compiled against a much older SDK and
 # hadoop-aws 2.8.3 only uses the S3 client surface from it.
 ARG AWS_SDK_VERSION=1.12.367
+# Unshaded Guava, and it is NOT optional.
+#
+# state.checkpoints.dir is s3a://, which resolves to
+# org.apache.hadoop.fs.s3a.S3AFileSystem from hadoop-aws 2.8.3. That class uses
+# com.google.common.util.concurrent.ListeningExecutorService, and
+# flink-shaded-hadoop-2-uber RELOCATES its Guava to org.apache.flink.shaded.guava31,
+# so the original name is absent and the class cannot even be loaded:
+#   NoClassDefFoundError: com/google/common/util/concurrent/ListeningExecutorService
+# There is no configuration that fixes a missing dependency; the class has to be
+# on the classpath under its real name.
+#
+# 28.2-jre rather than the 11.0.2 that hadoop-common 2.8 pins: Guava 11 reaches
+# for sun.misc.Cleaner in FinalizableReferenceQueue, which does not exist on
+# Java 11 (the JVM this image runs), so it would fail the same way. 28.2-jre is
+# the last line before the package split, is Java 11 safe, and still provides
+# the S3A surface. Verified with `rake stream:probe`, which exercises s3a:// and
+# fails loudly if this regresses.
+ARG GUAVA_VERSION=28.2-jre
 
 # Hadoop runtime classes. Registering the Iceberg REST catalog reaches
 # org.apache.hadoop.conf.Configuration (the catalog builds a Hadoop FileSystem for
@@ -180,6 +198,11 @@ RUN set -eux; \
     curl -fSL -o /opt/flink/lib/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar \
         "${MAVEN_REPO}/com/amazonaws/aws-java-sdk-bundle/${AWS_SDK_VERSION}/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar"; \
     ls -lh /opt/flink/lib/hadoop-aws-*.jar /opt/flink/lib/aws-java-sdk-bundle-*.jar
+
+RUN set -eux; \
+    curl -fSL -o /opt/flink/lib/guava-${GUAVA_VERSION}.jar \
+        "${MAVEN_REPO}/com/google/guava/guava/${GUAVA_VERSION}/guava-${GUAVA_VERSION}.jar"; \
+    ls -lh /opt/flink/lib/guava-*.jar
 
 # S3 filesystem plugin for MinIO. No `|| true` here: a missing jar turns every
 # checkpoint into a job failure, and swallowing the error is how this image

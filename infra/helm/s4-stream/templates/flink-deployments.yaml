@@ -12,8 +12,44 @@ spec:
   image: {{ .Values.flinkJobs.ordersStream.image }}
   flinkVersion: v1_18
   flinkConfiguration:
-    taskmanager.numberOfTaskSlots: "2"
+    # ONE slot, and that is forced arithmetic, not a preference.
+    #
+    # parallelism.default is decided by the Operator, not by the job: with
+    # taskManager.replicas set it derives replicas * slots and ignores the job's
+    # own parallelism ("Job parallelism setting is ignored as TaskManager
+    # replicas are set"). The job needs 3 * parallelism + 1 slots, because
+    # keyBy(status) and the window boundary break the operator chain into slot
+    # sharing groups (source / window / writer, plus the IcebergFilesCommitter
+    # in one of its own). With the derived parallelism the job asks for more
+    # slots than the cluster has, and the only symptom is the checkpoint:
+    #
+    #   Failed to trigger checkpoint ... is not being executed at the moment.
+    #   Failure reason: Not all required tasks are currently running.
+    #
+    # replicas 1 * slots 1 = parallelism 1, and at parallelism 1 the whole
+    # pipeline fits in the single slot. Raising the slot count would raise the
+    # parallelism with it and make the shortage worse, not better.
+    taskmanager.numberOfTaskSlots: "1"
+    parallelism.default: "1"
     state.backend: rocksdb
+    # s3a:// is the ONLY scheme that works here, and it needs unshaded Guava in
+    # the image (infra/docker/flink.Dockerfile). Both alternatives were measured
+    # on a cluster with `rake stream:probe`:
+    #
+    #   s3a:// without Guava -> NoClassDefFoundError:
+    #       com/google/common/util/concurrent/ListeningExecutorService
+    #       because flink-shaded-hadoop-2-uber relocates Guava to
+    #       org.apache.flink.shaded.guava31
+    #
+    #   s3:// -> org.apache.hadoop.fs.s3.S3FileSystem (hadoop-aws 2.8.3, jets3t)
+    #       resolves the scheme but IGNORES fs.s3.endpoint and talks to real AWS:
+    #       403 InvalidAccessKeyId "The AWS Access Key Id you provided does not
+    #       exist in our records" for AWSAccessKeyId minioadmin
+    #       So s3:// is not just unsupported, it silently leaves the cluster.
+    #
+    # fs.s3a.* below is read by S3AFileSystem; the fs.s3.* keys above belong to
+    # the legacy s3 filesystem and are what the warehouse path uses through
+    # Iceberg's S3FileIO, which reads AWS_ACCESS_KEY_ID from the environment.
     state.checkpoints.dir: "s3a://checkpoints/flink-orders"
     state.savepoints.dir: "s3a://checkpoints/flink-orders-savepoints"
     # No high-availability.* here on purpose. With a single JobManager replica
@@ -43,7 +79,28 @@ spec:
     fs.s3.awsAccessKeyId: "{{ .Values.icebergCatalog.s3AccessKey }}"
     fs.s3.awsSecretAccessKey: "{{ .Values.icebergCatalog.s3SecretKey }}"
     fs.s3.path.style.access: "true"
+    # s3a:// checkpoint storage needs its OWN key namespace:
+    # S3AFileSystem reads fs.s3a.* and nothing else, so the fs.s3.* keys above
+    # do not reach it. Without these the scheme resolves and the first
+    # checkpoint dies on credentials.
+    #
+    # flink_orders_stream.py calls env.enable_checkpointing(30_000,
+    # CheckpointingMode.EXACTLY_ONCE) and never sets
+    # checkpointing.tolerable-failed-checkpoints, whose Flink default is 0: the
+    # FIRST failed checkpoint fails the job. That is why the speed layer died
+    # ~30 s after reaching RUNNING.
+    #
+    # SimpleAWSCredentialsProvider is named rather than left to the default
+    # chain, which would look for an instance profile or container credentials
+    # that do not exist in kind and fail differently.
+    fs.s3a.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
+    fs.s3a.access.key: "{{ .Values.icebergCatalog.s3AccessKey }}"
+    fs.s3a.secret.key: "{{ .Values.icebergCatalog.s3SecretKey }}"
+    fs.s3a.path.style.access: "true"
+    fs.s3a.aws.credentials.provider: "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
   serviceAccount: flink-service-account
+  logConfiguration:
+    {{- toYaml .Values.flinkLogConfiguration | nindent 4 }}
   jobManager:
     podTemplate:
       spec:
@@ -106,10 +163,28 @@ spec:
   image: {{ .Values.flinkJobs.clickstreamStream.image }}
   flinkVersion: v1_18
   flinkConfiguration:
-    taskmanager.numberOfTaskSlots: "2"
+    # ONE slot, and that is forced arithmetic, not a preference.
+    #
+    # parallelism.default is decided by the Operator, not by the job: with
+    # taskManager.replicas set it derives replicas * slots and ignores the job's
+    # own parallelism ("Job parallelism setting is ignored as TaskManager
+    # replicas are set"). The job needs 3 * parallelism + 1 slots, because
+    # keyBy(status) and the window boundary break the operator chain into slot
+    # sharing groups (source / window / writer, plus the IcebergFilesCommitter
+    # in one of its own). With the derived parallelism the job asks for more
+    # slots than the cluster has, and the only symptom is the checkpoint:
+    #
+    #   Failed to trigger checkpoint ... is not being executed at the moment.
+    #   Failure reason: Not all required tasks are currently running.
+    #
+    # replicas 1 * slots 1 = parallelism 1, and at parallelism 1 the whole
+    # pipeline fits in the single slot. Raising the slot count would raise the
+    # parallelism with it and make the shortage worse, not better.
+    taskmanager.numberOfTaskSlots: "1"
+    parallelism.default: "1"
     state.backend: rocksdb
-    state.checkpoints.dir: "s3a://checkpoints/flink-clickstream"
-    state.savepoints.dir: "s3a://checkpoints/flink-clickstream-savepoints"
+    state.checkpoints.dir: "s3://checkpoints/flink-clickstream"
+    state.savepoints.dir: "s3://checkpoints/flink-clickstream-savepoints"
     # See the orders job: no HA services with a single JobManager replica.
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
@@ -122,7 +197,10 @@ spec:
     fs.s3.awsAccessKeyId: "{{ .Values.icebergCatalog.s3AccessKey }}"
     fs.s3.awsSecretAccessKey: "{{ .Values.icebergCatalog.s3SecretKey }}"
     fs.s3.path.style.access: "true"
+    # No fs.s3a.* keys: see the orders job for why they would be inert.
   serviceAccount: flink-service-account
+  logConfiguration:
+    {{- toYaml .Values.flinkLogConfiguration | nindent 4 }}
   jobManager:
     podTemplate:
       spec:

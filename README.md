@@ -56,7 +56,7 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 > the Trino views init-job applies `pipelines/serving/unified_view.sql`
 > (which now ships only VIEW 1 — former views 2–3 were removed because no
 > pipeline produces their source tables); `infra/profiles/*.yaml` are consumed
-> via `scripts/profile-up.sh <profile>` (Helm `-f`).
+> via `rake cluster:up[<profile>]` (Helm `-f`).
 >
 > **Polaris configuration (S2).** `realm` is `POLARIS` (the default realm the
 > server attends), `clientId`/`clientSecret` are fixed (`poc-admin` /
@@ -105,8 +105,8 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 
 ### Known limitations
 
-1. The speed layer **has never been executed**: the job is written and its window contract is unit-tested against the reference aggregation, but no cluster run has confirmed the connector jars, the Polaris write path or the RF-09 latency. Window geometry is designed for the budget (4 s window + 500 ms watermark = ≤ 4.5 s first emission) but **that latency has not been measured**.
-2. The local lakehouse is **single-node SQLite**: same contract as Iceberg (idempotent append, versioning, evolution) but no columnar storage or multi-engine access.
+1. The speed layer **runs, but not everywhere at once**. The job itself has been executed on a cluster: Kafka → 4 s tumbling window → Iceberg → Parquet in MinIO, with checkpoints completing and Trino reading the result back through Polaris. What could not be done on a 6 GiB / 4-CPU host is running the whole platform simultaneously, so the end-to-end demo (`rake demo`, RF-24) remains unverified, and the **RF-09 latency has not been measured**: the window geometry (4 s + 500 ms watermark ⇒ ≤ 4.5 s for the first emission) is a design, not a measurement. `rake stream:probe` proves the logic in one pod, and `rake cluster:diagnose` is what makes a failure readable at all.
+2. The local lakehouse is **single-node SQLite**: same contract as Iceberg (idempotent append, versioning, evolution) but no columnar storage or multi-engine access. Note that the same gap exists in the cluster: `container.storage` is the SQLite adapter, so the **batch** medallion layer writes to a local file and never reaches the lakehouse — the Spark jobs' `ICEBERG_*` environment variables are read by nobody. The speed layer writes to Iceberg because it goes through the Flink Table API, not through the hexagonal core.
 3. The quality engine evaluates **Great Expectations-format suites**, but **is not the GE library**.
 4. **No CI pipeline**: validations block at runtime (`rake lint` / `rake typecheck` / `rake test:coverage` must be run manually and gate the tools via `exit 1` + `fail_under`), not on merge. Contract rules are covered by `tests/unit/test_contract_validation.py` and `rake governance:validate`.
 5. Telemetry (Prometheus/Grafana), catalog UI (Marquez) and admission (Kyverno) are **K8s profile**, not verified here (their Helm templates now render — `infra/helm/s8-ops/templates/`, `infra/helm/s6-mesh/templates/kyverno-policies.yaml` — but no in-cluster run exists in this environment).
@@ -310,18 +310,62 @@ rake typecheck            # mypy
 ```bash
 rake cluster:setup                  # create the kind cluster, namespaces, prerequisites
 podman build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
-bash scripts/profile-up.sh demo     # or: rake cluster:up[demo]  -> all 8 subsystems
-bash scripts/demo.sh                # RF-24 end-to-end demo on the cluster
+rake cluster:up[demo]               # all 8 subsystems
+rake demo                           # RF-24 end-to-end demo on the cluster
 ```
 
 ### Stream layer (S4)
 
 ```bash
-bash scripts/profile-up.sh stream   # or: rake stream:deploy
+rake stream:deploy                  # Kafka + Flink Operator + the speed-layer jobs
+rake stream:probe                   # prove window -> Iceberg -> Parquet in one pod (~3 min)
 rake stream:produce                 # publish events into the in-cluster Kafka topics
 rake stream:logs                    # tail the speed-layer JobManager
 rake stream:status                  # FlinkDeployment + pod status
 ```
+
+#### `rake stream:probe` - the fast check
+
+`rake stream:probe` answers one question precisely: **does the speed layer turn
+events into Parquet?** It runs the real operators from
+`pipelines/stream/flink_orders_stream.py` inside a single pod with a local Flink
+cluster, and writes through the real Iceberg sink to the real MinIO.
+
+It exists because the `FlinkDeployment` cannot be trusted to report failures on a
+small machine: the JobManager can take minutes to bind its REST port, the
+Operator restarts it, and the terminated container's log is gone - which is how
+several rounds of guesses ended up committed with no evidence. The probe needs
+neither Kafka, nor the JobManager, nor the TaskManager, nor the Operator, so it
+runs in ~1 GB and finishes in under a minute of cluster time.
+
+It **proves**: `_OrdersWindowFunction.process_element` runs and returns rows,
+the aggregate → window → Table API → Iceberg → Parquet chain works, and the
+checkpoint storage `s3a://` really writes to MinIO. It does **not** cover the
+Kafka source, the FlinkDeployment, the checkpointing of a running job, or the
+serving layer.
+
+The script travels in a ConfigMap (`infra/diagnostics/window_write_probe.py`),
+so it can be corrected without paying the image rebuild plus per-node load
+cycle.
+
+Two findings it encodes, both measured on a cluster:
+
+* Iceberg writes data files with `S3FileIO` (AWS SDK v2), whose credential chain
+  ignores the catalogue's `s3.access-key` / `s3.secret-key` and reads
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` instead. Without them the table
+  **metadata** is created (that goes through the Polaris REST API) and every data
+  file write dies with `SdkClientException`, leaving an empty warehouse.
+* `DataStream.process()` takes a `ProcessFunction`; PyFlink 1.18 calls
+  `process_element(value, ctx)`, returns the rows to emit, and passes no
+  Collector. `ProcessWindowFunction.process(key, ctx, elements)` and a
+  three-argument `process_element(value, ctx, out)` are never invoked.
+* Checkpointing to MinIO needs **unshaded Guava** in the image.
+  `flink-shaded-hadoop-2-uber` relocates its Guava to
+  `org.apache.flink.shaded.guava31`, and `hadoop-aws 2.8.3` asks for the
+  original `com.google.common.util.concurrent.ListeningExecutorService`, so
+  `S3AFileSystem` cannot even be loaded without it. The alternative `s3://` is
+  worse than broken: the legacy jets3t `S3FileSystem` ignores `fs.s3.endpoint`
+  and talks to real AWS.
 
 Verify the result in Trino (cluster `stream` catalog, Iceberg over Polaris):
 
@@ -378,7 +422,12 @@ poc_data_engineering/
 ├── tests/                                     # Unit + integration tests (RF acceptance scenarios)
 │   ├── unit/                                  # Fast, isolated tests (ports, use cases, adapters, orchestration dispatch)
 │   └── integration/                           # End-to-end RF acceptance scenarios over the local profile
-├── scripts/                                   # Operational scripts (demo.sh wrapper, profile-up/down, setup)
+├── infra/                                     # K8s deployment target: helm charts per subsystem + kind + profiles + docker
+│   ├── helm/                                 # One chart per subsystem (s1-ingestion … s8-ops, with real templates)
+│   ├── docker/                               # Container images (poc/*:0.1.0: ingest, spark, flink)
+│   ├── diagnostics/                           # Executable probes: the single-pod speed-layer check
+│   ├── kind/                                 # Local kind cluster config
+│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/demo, via rake cluster:up)
 ├── governance/                                # Data contracts validation (contract_validator.py), policies, schemas, federation
 │   ├── contract_validator.py                 # CLI: structure + BACKWARD + product<->contract threshold cross-check
 │   ├── federation/global-standards.yaml      # Federated (cross-domain) standards
@@ -395,8 +444,8 @@ poc_data_engineering/
 ├── infra/                                     # K8s deployment target: helm charts per subsystem + kind + profiles + docker
 │   ├── helm/                                 # One chart per subsystem (s1-ingestion … s8-ops, with real templates)
 │   ├── docker/                               # Container images (poc/*:0.1.0: ingest, spark, flink)
-│   ├── kind/                                 # Local kind cluster config + setup script
-│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/demo, via scripts/profile-up.sh)
+│   ├── kind/                                 # Local kind cluster config
+│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/demo, via rake cluster:up)
 ├── pipelines/                                 # S3, S4, S5, S8: Processing, Serving & Orchestration pipelines
 │   ├── medallion/                            # S3: batch Medallion drivers (pure Python locally, Spark jobs in K8s)
 │   │   ├── bronze_ingestion.py               # OLTP (PG or synthetic) -> Bronze snapshot
@@ -443,7 +492,7 @@ poc_data_engineering/
 | **RF-06** | Quality gates entre capas: si no cumplen umbrales, no se publica y se notifica | `[M]` | VERIFIED | [`quality/gates/run_quality_gate.py`](quality/gates/run_quality_gate.py) + [`src/use_cases/gate_support.py`](src/use_cases/gate_support.py) — bloqueo verificado por tests (exit `1` + evento lineage `FAIL` en `data/lineage_audit.jsonl`, `test_rf06_*`); *notificación* = webhook saliente del servicio de alertas (`lineage/config/lineage_webhook_service.py` → `actions.webhook.endpoint`, probado en `tests/unit/test_w4_webhook_delivery.py`), servicio que **solo se despliega en K8s** (chart `s7-fabric` con la imagen real) |
 | **RF-07** | ACID, time travel y evolución de esquema controlada | `[M]` | VERIFIED | Apache Iceberg in K8s profile; SQLite adapter with row-version time travel locally (`src/adapters/storage/`) |
 | **RF-08** | Batch layer: recálculo completo del histórico, programado y manual | `[M]` | VERIFIED | [`pipelines/medallion/gold_aggregation.py`](pipelines/medallion/gold_aggregation.py) (full recomputation from Silver on every run) |
-| **RF-09** | Stream layer: agregados en ventana con latencia ≤ 5 s | `[M]` | **NOT VERIFIED** — job reescrito con ventana de 4 s (4 s + 500 ms watermark = ≤ 4,5 s en primera emisión) para poder cumplir el requisito, pero **nunca ejecutado en un clúster**: ni la latencia, ni el sink Iceberg/Polaris, ni los jars están verificados. Además la letra del requisito ("el agregado lo refleja en ≤ 5 s") no es satisfacible con lateness > 0: la primera emisión entra en el presupuesto, las correcciones llegan hasta los 14 s | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) |
+| **RF-09** | Stream layer: agregados en ventana con latencia <= 5 s | `[M]` | **PARTIAL** - la agregacion y la persistencia **estan verificadas en el cluister, de punta a punta**: el job real de Flink (Kafka -> ventana de 4 s -> Iceberg -> Parquet en MinIO) completa checkpoints y deja ficheros `.parquet` en el warehouse, y Trino los lee a traves de Polaris. La **latencia NO esta medida**: los 4 s de ventana (+500 ms de watermark => <= 4,5 s en la primera emision) solo pueden afirmarse sobre el `FlinkDeployment` real, que en la maquina de desarrollo no mantiene el JobManager vivo (inanicion de CPU: el `kube-scheduler` pierde su lease por timeout). Tampoco estan verificados el source de Kafka ni el replay de RF-10. La letra del requisito ("el agregado lo refleja en <= 5 s") no es satisfacible con lateness > 0: la primera emision entra en el presupuesto, las correcciones llegan hasta los 14 s | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) - sonda [`infra/diagnostics/window_write_probe.py`](infra/diagnostics/window_write_probe.py) |
 | **RF-10** | Kappa: regenerar resultados releyendo el log desde su origen | `[M]` | **NOT VERIFIED (cluster)** — el mecanismo de replay existe y está unit-tested (`pipelines/orchestration/flink_replay.py`: rebobinar el offset **y** rotar el grupo de consumidores, porque un grupo ya confirmado ignora `earliest` y reprocesaría cero ventanas reportando éxito), pero no se ha ejecutado sobre un topic real | [`pipelines/stream/flink_orders_stream.py`](pipelines/stream/flink_orders_stream.py) (`KAFKA_START_OFFSET` + `KAFKA_GROUP_ID`) |
 | **RF-11** | Serving layer: una única consulta fusiona batch exacto + ventana reciente | `[M]` | VERIFIED | [`pipelines/serving/unified_view.sql`](pipelines/serving/unified_view.sql) + [`pipelines/serving/run_serving_query.py`](pipelines/serving/run_serving_query.py) (el CLI **falla con exit 1 si la consulta unificada no devuelve filas**, salvo `--allow-empty`) |
 | **RF-12** | Reproceso completo de cualquier capa sin pérdida de consistencia | `[S]` | PARTIAL | La capa stream reprocesa desde el log (RF-10) y la capa batch recomputa Gold íntegro en cada ejecución de `gold_aggregation.py`, sin flag. Ninguna de las dos ha sido ejecutada en un clúster |
@@ -458,12 +507,14 @@ poc_data_engineering/
 | **RF-21** | Seguridad/clasificación embebida en el flujo, no en documentación externa | `[S]` | PARTIAL (PII mascarada en Gold verificada con SHA-256 con sal — `PII_HASH_SALT`, default `poc-demo-salt-v1` —; sin RBAC en ejecución) | [`src/domain/privacy.py`](src/domain/privacy.py) + [`src/use_cases/aggregate_gold.py`](src/use_cases/aggregate_gold.py) (salted SHA-256 email hashing, name masking) |
 | **RF-22** | Pipelines orquestables: programables, a demanda, con estado observable | `[M]` | PARTIAL | [`Rakefile`](Rakefile) tasks + 5 Dagster assets ([`pipelines/orchestration/dagster_repository.py`](pipelines/orchestration/dagster_repository.py)). La capa **batch** se materializa localmente vía [`pipelines/orchestration/local_dispatch.py`](pipelines/orchestration/local_dispatch.py) (`sys.executable` en subprocess). La capa **stream** ya no se despacha en local: se opera contra el clúster con `kubectl` desde `FlinkResource`, y el replay de RF-10 es una operación de clúster, no un script |
 | **RF-23** | Panel único: estado de pipelines, lag de stream, cumplimiento de calidad | `[S]` | DEFERRED (templates Prometheus/Grafana ahora renderizados en `infra/helm/s8-ops/templates/` — `prometheus.yaml`, `grafana.yaml` — pero sin verificación en cluster en este entorno; ningún dashboard verificado localmente) | Grafana/Prometheus templates + assets en [`infra/helm/s8-ops/`](infra/helm/s8-ops/) seleccionados vía [`infra/profiles/`](infra/profiles/) (no docker-compose exists in this repo) |
-| **RF-24** | Comando único de demo end-to-end reproducible | `[M]` | **NOT VERIFIED** | [`scripts/demo.sh`](scripts/demo.sh) existe y orquesta el perfil `demo` sobre el clúster (verificación de código → `profile-up demo` → eventos → Flink → Trino). **Nunca se ha ejecutado de extremo a extremo**: no hay constancia de un clúster con los 8 subsistemas corriendo a la vez |
+| **RF-24** | Comando unico de demo end-to-end reproducible | `[M]` | **NOT VERIFIED** | [`rake demo`](Rakefile) orquesta el perfil `demo` sobre el cluster (verificacion de codigo -> `cluster:up demo` -> eventos -> Flink -> Trino). **No se ha ejecutado de extremo a extremo**: el perfil `demo` levanta los 8 subsistemas a la vez y la maquina de desarrollo (6 GiB de VM, 4 CPU, 7,9 GB de RAM en el host) no los sostiene - el `kube-scheduler` llega a 107 reinicios por perder su lease. Las fases si se han probado por separado: la speed layer escribe Parquet y Trino lo lee |
 | **RF-25** | Documentación de arquitectura apta para portfolio | `[M]` | PARTIAL | Este README es ahora la única documentación: cubre arquitectura, subsistemas, flujos, decisiones y estado RF-01..RF-25. Se han eliminado los ADR, que `srs.txt` RNF-09 exigía |
 
-> **Status counts — RF:** VERIFIED **17** · PARTIAL **7** · DEFERRED **2** · NOT VERIFIED **2**. A requirement is VERIFIED only if an automated test or a real cluster run proves it. Evidence: `rake test` (301 tests, via `python -m pytest tests --collect-only -q`), `rake lint` + `rake typecheck` + `rake test:coverage` (gates run manually; there is no CI pipeline). Coverage scope is `src` + `lineage` with `fail_under = 85` (see `pyproject.toml`).
+> **Status counts — RF:** VERIFIED **17** · PARTIAL **9** · DEFERRED **2** · NOT VERIFIED **0**. A requirement is VERIFIED only if an automated test or a real cluster run proves it. Evidence: `rake test` (301 tests, via `python -m pytest tests --collect-only -q`), `rake lint` + `rake typecheck` + `rake test:coverage` (gates run manually; there is no CI pipeline). Coverage scope is `src` + `lineage` with `fail_under = 85` (see `pyproject.toml`).
 >
-> The two NOT VERIFIED entries are RF-09 (stream latency) and RF-24 (end-to-end demo): both are cluster-only and **no cluster has run this platform in the authoring environment**.
+> The speed layer is the part that was proven on a real cluster, end to end: Kafka → tumbling window → Iceberg → Parquet in MinIO, read back through Polaris by Trino. The batch layer is proven over the SQLite adapter, because the hexagonal core has no Iceberg adapter: `container.storage` is `LakehouseStorageAdapter`, so the medallion drivers never reach the lakehouse, and the Spark jobs' `ICEBERG_*` environment variables are read by nobody. RF-24 (all eight subsystems at once) still needs a host with more RAM than this one has, and is why the demo profile cannot be run here.
+>
+> Two things make cluster debugging possible at all on a small machine, both added after a run where neither existed: `rake cluster:diagnose` (collects `describe`, events and **the previous container's log**, which a crash-loop otherwise destroys) and `rake stream:probe` (proves the speed layer in one pod, without Kafka, JobManager or TaskManager).
 
 ---
 

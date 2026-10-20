@@ -57,7 +57,18 @@ DEFAULT_RETRY_COUNT = 3
 DEFAULT_RETRY_DELAY_S = 2.0
 HTTP_TIMEOUT = 30
 
-WAREHOUSE_ROOT = "s3://datalake/warehouse"
+# Root of the warehouse the tables are registered under. It MUST match the
+# catalog's allowedLocations, or Polaris refuses every table with
+#
+#   Invalid locations '[s3://datalake/warehouse/gold/sales/daily_metrics, ...]'
+#   for identifier 'sales.daily_metrics': ... is not in the list of allowed
+#   locations: [s3://warehouse/sales]
+#
+# It was hardcoded to s3://datalake/warehouse while the catalog is bootstrapped
+# with s3://warehouse/, so no table could ever be registered. It is read from
+# the environment so the chart is the single source of truth, and the default
+# matches the chart's polaris.config.warehouseLocation.
+WAREHOUSE_ROOT = os.getenv("POLARIS_WAREHOUSE_ROOT", "s3://warehouse/").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +89,25 @@ WAREHOUSE_ROOT = "s3://datalake/warehouse"
 #     source system, name = schema.table).  Concatenating both parts
 #     reconstructs the logical id, so lineage references are never invented.
 def _logical_location(logical: str) -> str:
-    """Map a logical id to its warehouse location (derived, never hand-written)."""
-    return f"{WAREHOUSE_ROOT}/{logical.replace('.', '/')}"
+    """Map a logical id to its warehouse location (derived, never hand-written).
+
+    The location is ``<warehouse root>/<namespace>/<table>`` - the tier is NOT
+    part of it. Polaris derives the location of a table in a namespace from the
+    namespace's own allowed location, and it refuses anything outside it:
+
+      Invalid locations '[s3://warehouse/gold/sales/daily_metrics, ...]' for
+      identifier 'sales.daily_metrics': ... is not in the list of allowed
+      locations: [s3://warehouse/sales]
+
+    The allowed location of a namespace is the catalog's base location plus the
+    namespace name, so the table has to sit directly under it. The tier lives
+    in the logical id and in the product manifests, not in the physical path.
+    """
+    parts = logical.split(".")
+    if len(parts) != 3:
+        raise ValueError(f"logical table id must be '<tier>.<domain>.<table>': {logical!r}")
+    _tier, domain, name = parts
+    return f"{WAREHOUSE_ROOT}/{domain}/{name}"
 
 
 def _table(
@@ -436,6 +464,9 @@ class PolarisClient:
     Args:
         base_url: Polaris base URL, e.g. ``http://polaris:8181``.
         token: Bearer token for authentication.
+        catalog_name: Name of the catalog inside Polaris, e.g. ``polaris``. It
+            belongs in the path of the Iceberg REST endpoints
+            (``/api/catalog/v1/{catalog}/namespaces``).
         retry_count: Number of retry attempts on failure.
         retry_delay: Seconds to wait between retries.
     """
@@ -444,11 +475,13 @@ class PolarisClient:
         self,
         base_url: str,
         token: str,
+        catalog_name: str = "polaris",
         retry_count: int = DEFAULT_RETRY_COUNT,
         retry_delay: float = DEFAULT_RETRY_DELAY_S,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self.catalog_name = catalog_name
         self.retry_count = retry_count
         self.retry_delay = retry_delay
         self.session = requests.Session()
@@ -488,6 +521,16 @@ class PolarisClient:
                     # Already exists — treat as success (idempotent)
                     logger.debug("Resource already exists at %s (409); skipping.", url)
                     return exc.response  # type: ignore[return-value]
+                # The BODY is the only thing that says WHY a 4xx happened.
+                # Polaris explains itself there - "location is not allowed",
+                # "Malformed request: ...", the offending field - and without
+                # it the log only says "400", which is not diagnosable.
+                body = ""
+                if exc.response is not None:
+                    try:
+                        body = exc.response.text[:300]
+                    except Exception:  # noqa: BLE001 - the body is best-effort
+                        body = "<unreadable>"
                 logger.warning(
                     "HTTP %s on %s %s (attempt %d/%d): %s",
                     status,
@@ -495,7 +538,7 @@ class PolarisClient:
                     url,
                     attempt,
                     self.retry_count,
-                    exc,
+                    body or exc,
                 )
                 last_exc = exc
             except requests.RequestException as exc:
@@ -514,6 +557,12 @@ class PolarisClient:
     def register_namespace(self, namespace: str) -> None:
         """Create a namespace (database) in Polaris if it does not exist.
 
+        The catalog name belongs in the PATH. Polaris 1.8 exposes the Iceberg
+        REST namespace endpoint as
+        ``/api/catalog/v1/{catalog}/namespaces`` - the same route the
+        polaris-bootstrap Job uses - and answers 404 on
+        ``/api/catalog/v1/namespaces``, which is what this call used to send.
+
         Args:
             namespace: Namespace name (e.g. ``sales``).
         """
@@ -521,7 +570,7 @@ class PolarisClient:
             "namespace": [namespace],
             "properties": {"owner": "data-platform", "managed-by": "catalog_registration.py"},
         }
-        self._request("POST", "/api/catalog/v1/namespaces", json=payload)
+        self._request("POST", f"/api/catalog/v1/{self.catalog_name}/namespaces", json=payload)
         logger.info("Namespace registered: %s", namespace)
 
     def register_table(
@@ -552,6 +601,13 @@ class PolarisClient:
             "name": table_name,
             "location": location,
             "schema": {
+                # "type": "struct" is REQUIRED by the Iceberg REST catalog
+                # spec and Polaris answers 400 without it:
+                #   {"error":{"message":"HTTP 400 Bad Request","code":400}}
+                # with a body that says nothing about the cause. Measured
+                # against the running Polaris: the same payload with the field
+                # answers 200 and creates the table.
+                "type": "struct",
                 "schema-id": 0,
                 "identifier-field-ids": [],
                 "fields": iceberg_fields,
@@ -563,7 +619,7 @@ class PolarisClient:
         }
         self._request(
             "POST",
-            f"/api/catalog/v1/namespaces/{namespace}/tables",
+            f"/api/catalog/v1/{self.catalog_name}/namespaces/{namespace}/tables",
             json=payload,
         )
         logger.info("Table registered: %s.%s → %s", namespace, table_name, location)
@@ -577,7 +633,7 @@ class PolarisClient:
         Returns:
             List of table name strings.
         """
-        resp = self._request("GET", f"/api/catalog/v1/namespaces/{namespace}/tables")
+        resp = self._request("GET", f"/api/catalog/v1/{self.catalog_name}/namespaces/{namespace}/tables")
         data = resp.json()
         identifiers = data.get("identifiers", [])
         names = [ident.get("name", "") for ident in identifiers]
@@ -1075,8 +1131,54 @@ class ManifestUpdater:
 # ===========================================================================
 
 
+def _fetch_polaris_token(base_url: str, client_id: str, client_secret: str) -> str:
+    """Obtain an OAuth2 bearer token from the Polaris token endpoint.
+
+    The endpoint is ``/api/catalog/v1/oauth/tokens`` and it answers the
+    client_credentials grant. The scope is not optional: Polaris rejects the
+    request with ``invalid_scope: The scope is invalid`` when it is missing or
+    when it is anything other than ``PRINCIPAL_ROLE:ALL`` - which is also the
+    scope the Flink job asks for.
+
+    Args:
+        base_url: Polaris base URL, e.g. ``http://polaris:8181``.
+        client_id: OAuth2 client id.
+        client_secret: OAuth2 client secret.
+
+    Returns:
+        The bearer token.
+
+    Raises:
+        SystemExit: If the endpoint does not return a token.
+    """
+    url = f"{base_url.rstrip('/')}/api/catalog/v1/oauth/tokens"
+    payload = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": "PRINCIPAL_ROLE:ALL",
+    }
+    try:
+        response = requests.post(url, data=payload, timeout=30)
+        response.raise_for_status()
+        token = str(response.json().get("access_token", ""))
+    except requests.RequestException as exc:
+        logger.error("Could not obtain an OAuth2 token from %s: %s", url, exc)
+        sys.exit(1)
+    if not token:
+        logger.error("Polaris returned no access_token from %s", url)
+        sys.exit(1)
+    logger.info("Obtained a Polaris OAuth2 token.")
+    return token
+
+
 def _build_polaris_client() -> PolarisClient:
     """Construct PolarisClient from environment variables.
+
+    The bearer token can be given directly (POLARIS_TOKEN) or obtained from the
+    client credentials (POLARIS_CLIENT_ID / POLARIS_CLIENT_SECRET), which is
+    what the in-cluster Job does: Polaris issues short-lived tokens, so a
+    hard-coded one in a manifest would expire.
 
     Returns:
         Initialised PolarisClient.
@@ -1085,29 +1187,46 @@ def _build_polaris_client() -> PolarisClient:
         SystemExit: If required env vars are missing.
     """
     polaris_url = os.getenv("POLARIS_URL", "").strip()
-    polaris_token = os.getenv("POLARIS_TOKEN", "").strip()
     if not polaris_url:
         logger.error("POLARIS_URL environment variable is required.")
         sys.exit(1)
+
+    polaris_token = os.getenv("POLARIS_TOKEN", "").strip()
     if not polaris_token:
-        logger.error("POLARIS_TOKEN environment variable is required.")
-        sys.exit(1)
-    return PolarisClient(base_url=polaris_url, token=polaris_token)
+        client_id = os.getenv("POLARIS_CLIENT_ID", "").strip()
+        client_secret = os.getenv("POLARIS_CLIENT_SECRET", "").strip()
+        if not client_id or not client_secret:
+            logger.error(
+                "Either POLARIS_TOKEN or both POLARIS_CLIENT_ID and POLARIS_CLIENT_SECRET are required."
+            )
+            sys.exit(1)
+        polaris_token = _fetch_polaris_token(polaris_url, client_id, client_secret)
+
+    catalog_name = os.getenv("POLARIS_CATALOG_NAME", "").strip() or "polaris"
+    return PolarisClient(base_url=polaris_url, token=polaris_token, catalog_name=catalog_name)
 
 
-def _build_marquez_client() -> MarquezClient:
+def _build_marquez_client() -> MarquezClient | None:
     """Construct MarquezClient from environment variables.
 
     Returns:
-        Initialised MarquezClient.
+        Initialised MarquezClient, or None when MARQUEZ_URL is not set.
 
-    Raises:
-        SystemExit: If required env vars are missing.
+    The lineage registration is OPTIONAL, like the manifest update. Marquez
+    lives in the s7-fabric subsystem, and the catalog registration is what
+    makes the Iceberg tables visible to the serving layer - it must not depend
+    on a lineage backend being deployed too, or the serving layer would be
+    blocked by an unrelated subsystem.
+
+    Returns None when MARQUEZ_URL is absent, and the Marquez steps are then
+    skipped. When it IS set, a failure to reach Marquez is still counted as a
+    failure, because a misconfigured Marquez is a real defect and not a
+    missing optional.
     """
     marquez_url = os.getenv("MARQUEZ_URL", "").strip()
     if not marquez_url:
-        logger.error("MARQUEZ_URL environment variable is required.")
-        sys.exit(1)
+        logger.info("MARQUEZ_URL not set; skipping the Marquez lineage registration.")
+        return None
     return MarquezClient(base_url=marquez_url)
 
 
@@ -1346,7 +1465,7 @@ def _print_summary(polaris_client: PolarisClient) -> int:
 
 def run_registration(
     polaris_client: PolarisClient,
-    marquez_client: MarquezClient,
+    marquez_client: MarquezClient | None,
     manifest_updater: ManifestUpdater | None = None,
 ) -> dict[str, int]:
     """Run every registration step and return the per-step failure counts.
@@ -1356,7 +1475,7 @@ def run_registration(
 
     Args:
         polaris_client: Polaris client.
-        marquez_client: Marquez client.
+        marquez_client: Marquez client, or None to skip the lineage steps.
         manifest_updater: Optional manifest updater (skipped when ``None``).
 
     Returns:
@@ -1365,10 +1484,27 @@ def run_registration(
     failures: dict[str, int] = {
         "polaris_namespaces": _register_polaris_namespaces(polaris_client),
         "polaris_tables": _register_polaris_tables(polaris_client),
-        "marquez_namespaces": _register_marquez_namespaces(marquez_client),
-        "marquez_datasets": _register_marquez_datasets(marquez_client),
-        "marquez_jobs": _register_marquez_jobs(marquez_client),
     }
+    if marquez_client is None:
+        # No Marquez deployed: the Iceberg registration above is what the
+        # serving layer depends on, and it must not be blocked by the absence
+        # of the lineage subsystem.
+        logger.info("Skipping the Marquez registration (MARQUEZ_URL not configured).")
+        failures.update(
+            {
+                "marquez_namespaces": 0,
+                "marquez_datasets": 0,
+                "marquez_jobs": 0,
+            }
+        )
+    else:
+        failures.update(
+            {
+                "marquez_namespaces": _register_marquez_namespaces(marquez_client),
+                "marquez_datasets": _register_marquez_datasets(marquez_client),
+                "marquez_jobs": _register_marquez_jobs(marquez_client),
+            }
+        )
     if manifest_updater is not None:
         _update_manifests(manifest_updater)
     else:

@@ -1,0 +1,105 @@
+# ==============================================================================
+# Speed-layer probe Job (rake stream:probe)
+#
+# One pod, one local Flink cluster, no Kafka / JobManager / TaskManager /
+# Operator. It exists because the FlinkDeployment cannot be trusted to report a
+# failure on a small machine: the JobManager takes minutes to bind its REST
+# port, the Operator restarts it, and the terminated container's log is gone.
+#
+# The script arrives through a ConfigMap (created by the rake task) rather than
+# being baked into the image, so the probe can be corrected without paying the
+# ~20 minute image rebuild + load cycle.
+#
+# Do not apply this by hand out of sequence: the ConfigMap must exist first.
+# Use: rake stream:probe
+# ==============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flink-window-probe
+  namespace: platform
+  labels:
+    app: flink-window-probe
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: flink-window-probe
+    spec:
+      restartPolicy: Never
+      # Pinned on purpose: the probe must run where the image was loaded, so the
+      # result cannot be confused with a missing-image pull failure.
+      nodeSelector:
+        kubernetes.io/hostname: poc-data-platform-worker
+      volumes:
+        - name: script
+          configMap:
+            name: flink-window-probe
+      containers:
+        - name: probe
+          image: docker.io/poc/flink-stream:0.1.0
+          # Never: the image is loaded into the kind nodes by
+          # `rake cluster:image:load`, there is no registry to pull from.
+          imagePullPolicy: Never
+          env:
+            - name: PYTHONPATH
+              value: /opt/flink/opt/python:/opt/flink/opt/python/py4j-0.10.9.7-src.zip
+            - name: POC_REPO_ROOT
+              value: /opt/flink
+            - name: ICEBERG_CATALOG_NAME
+              value: polaris
+            - name: ICEBERG_CATALOG_URI
+              value: http://polaris.platform.svc.cluster.local:8181/api/catalog
+            # The catalog IDENTIFIER, not the S3 location: Polaris resolves a
+            # REST client by NAME through GET /api/catalog/v1/config?warehouse=.
+            - name: ICEBERG_WAREHOUSE
+              value: polaris
+            - name: S3_ENDPOINT
+              value: http://minio.platform.svc.cluster.local:9000
+            - name: S3_ACCESS_KEY
+              value: minioadmin
+            - name: S3_SECRET_KEY
+              value: minioadmin
+            - name: POLARIS_OAUTH2_CREDENTIAL
+              value: poc-admin:poc-admin-secret
+            # The decisive three. Iceberg writes data files with S3FileIO (AWS
+            # SDK v2), whose credential chain ignores the catalogue's
+            # s3.access-key / s3.secret-key and reads these instead. Without
+            # them the table METADATA is created (that goes through the Polaris
+            # REST API) and every data file write dies with
+            #   SdkClientException: Unable to load credentials from any of the
+            #   providers in the chain
+            - name: AWS_ACCESS_KEY_ID
+              value: minioadmin
+            - name: AWS_SECRET_ACCESS_KEY
+              value: minioadmin
+            - name: AWS_REGION
+              value: us-east-1
+          volumeMounts:
+            - name: script
+              mountPath: /probe
+              readOnly: true
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -o pipefail
+              cd /opt/flink
+              # The checkpoint check needs org.apache.hadoop.fs.s3a.S3AFileSystem
+              # from hadoop-aws 2.8.3, which asks for the ORIGINAL
+              # com.google.common.* that flink-shaded-hadoop relocates to
+              # org.apache.flink.shaded.guava31. The image carries unshaded
+              # Guava for exactly this; if this pod is running an OLDER image
+              # the class cannot be loaded and the check says so. Fetching it
+              # here as well keeps the probe usable against any image.
+              if ! ls /opt/flink/lib/guava-*.jar >/dev/null 2>&1; then
+                echo "Guava ausente en la imagen; se descarga para la prueba"
+                curl -fsSL -o /opt/flink/lib/guava-28.2-jre.jar \
+                  https://repo1.maven.org/maven2/com/google/guava/guava/28.2-jre/guava-28.2-jre.jar \
+                  && ls -lh /opt/flink/lib/guava-*.jar \
+                  || echo "AVISO: no se pudo obtener Guava; s3a:// no sera comprobable"
+              fi
+              /opt/py310/bin/python /probe/window_write_probe.py 2>&1 | tee /tmp/probe.log
+              echo "PROBE_EXIT=${PIPESTATUS[0]}"

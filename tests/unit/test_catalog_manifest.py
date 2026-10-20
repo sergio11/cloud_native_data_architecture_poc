@@ -303,14 +303,14 @@ def test_update_manifests_uses_real_asset_names(tmp_path: Path, caplog) -> None:
     assert orders["spec"]["assets"] == [
         {
             "name": "gold_orders",
-            "path": "s3://datalake/warehouse/gold/sales/daily_metrics",
+            "path": "s3://warehouse/sales/daily_metrics",
             "type": "iceberg_table",
         }
     ]
     assert customers["spec"]["assets"] == [
         {
             "name": "gold_customers",
-            "path": "s3://datalake/warehouse/gold/sales/customers",
+            "path": "s3://warehouse/sales/customers",
             "type": "iceberg_table",
         }
     ]
@@ -355,7 +355,13 @@ def test_registry_identifiers_match_pipeline_reality() -> None:
     # Logical ids are the single source of truth; locations are derived, not hand-written.
     assert {t["logical"] for t in GOLD_TABLES + STREAM_TABLES} == KNOWN_PRODUCED_TABLES
     for table in GOLD_TABLES + STREAM_TABLES:
-        assert table["location"] == ("s3://datalake/warehouse/" + table["logical"].replace(".", "/"))
+        # <warehouse root>/<namespace>/<table>. The TIER is not part of the
+        # physical path: Polaris derives a table's location from the location
+        # allowed for its NAMESPACE, and refuses anything outside it with
+        #   Invalid locations '[s3://warehouse/gold/sales/daily_metrics, ...]'
+        #   ... is not in the list of allowed locations: [s3://warehouse/sales]
+        _tier, domain, name = table["logical"].split(".")
+        assert table["location"] == f"s3://warehouse/{domain}/{name}"
 
     assert not any(t["namespace"] in {"marketing", "finance"} for t in GOLD_TABLES)
 

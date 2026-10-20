@@ -20,6 +20,7 @@ COPY domains/ /app/domains/
 COPY governance/ /app/governance/
 COPY quality/ /app/quality/
 
-RUN pip install --no-cache-dir pyyaml requests click rich psycopg2-binary
+RUN pip install --no-cache-dir pyyaml requests click rich psycopg2-binary \
+    "pyiceberg[pyarrow]==0.12.0"
 
 CMD ["python", "pipelines/medallion/bronze_ingestion.py", "--entity", "all"]

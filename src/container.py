@@ -13,6 +13,8 @@ from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter
 from src.adapters.quality.expectation_engine import ExpectationEngineAdapter
 from src.adapters.serving.sql_serving import SqlServingAdapter
 from src.adapters.source.oltp_source import OltpSourceAdapter
+from src.adapters.storage.iceberg_catalog import _iceberg_catalog
+from src.adapters.storage.iceberg_storage import IcebergLakehouseStorageAdapter
 from src.adapters.storage.lakehouse_storage import LakehouseStorageAdapter
 from src.adapters.streaming.event_stream import EventStreamAdapter
 from src.domain.privacy import DEFAULT_PII_HASH_SALT
@@ -61,11 +63,22 @@ class Container:
         repo_root: str = ".",
         event_db_path: str | None = None,
         lineage_audit_path: str | None = None,
+        lakehouse_backend: str | None = None,
     ) -> None:
         effective_db_path = db_path if db_path is not None else os.getenv("LAKEHOUSE_DB_PATH", "data/lakehouse.db")
         self._db_path = effective_db_path
         self._marquez_url = marquez_url or os.getenv("MARQUEZ_URL")
         self._repo_root = repo_root
+        # Which implementation of the lakehouse port to use. "sqlite" is the
+        # default and is what the local profile and the unit tests use;
+        # "iceberg" is the cluster's real lakehouse and is selected by the
+        # environment, so the application core never learns which one it is
+        # talking to.
+        self._lakehouse_backend = (
+            (lakehouse_backend if lakehouse_backend is not None else os.getenv("LAKEHOUSE_BACKEND", "sqlite"))
+            .strip()
+            .lower()
+        )
         # Hermetic defaults: sibling files of the lakehouse DB, so a Container
         # pointed at tmp_path never writes under the repository's data/ dir.
         # For the default db_path these resolve to the historical data/ paths.
@@ -79,6 +92,10 @@ class Container:
     # drivers depend on abstractions; only these constructors name concretes.
     @functools.cached_property
     def storage(self) -> LakehouseStoragePort:
+        if self._lakehouse_backend == "iceberg":
+            return IcebergLakehouseStorageAdapter(catalog=_iceberg_catalog())
+        if self._lakehouse_backend != "sqlite":
+            raise ValueError(f"Unknown LAKEHOUSE_BACKEND '{self._lakehouse_backend}'. Expected 'sqlite' or 'iceberg'.")
         return LakehouseStorageAdapter(db_path=self._db_path)
 
     @functools.cached_property

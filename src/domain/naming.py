@@ -64,6 +64,51 @@ def stream_table() -> str:
     return "stream.sales.orders_windowed"
 
 
+#: Tiers whose tables are PUBLISHED products: the serving layer and the product
+#: manifests address them by their bare name, so their Iceberg identifier must
+#: not carry the tier.
+PUBLISHED_TIERS: frozenset[str] = frozenset({"gold", "stream"})
+
+
+def iceberg_identifier(logical: str) -> tuple[str, str]:
+    """Maps a logical table name to its Iceberg (namespace, table) identifier.
+
+    The logical vocabulary is ``<tier>.<domain>.<table>``; Iceberg splits that
+    into a namespace and a table name, and the split is NOT mechanical.
+
+    Published tiers (:data:`PUBLISHED_TIERS`) drop the tier, because the
+    serving layer and the product manifests reference them by that name:
+    ``gold.sales.daily_metrics`` is ``sales.daily_metrics`` and
+    ``stream.sales.orders_windowed`` is ``sales.orders_windowed``.
+
+    Internal tiers keep it, because otherwise Bronze and Silver would collide on
+    the same name inside the same domain:
+    ``bronze.sales.orders`` is ``sales.bronze_orders`` and
+    ``silver.sales.orders`` is ``sales.silver_orders``.
+
+    The physical location follows the same rule, ``<warehouse>/<namespace>/
+    <table>``: Polaris derives a table's location from the location allowed for
+    its NAMESPACE and refuses anything outside it, so the tier must not be part
+    of the path either.
+
+    Args:
+        logical: ``<tier>.<domain>.<table>`` id.
+
+    Returns:
+        The ``(namespace, table)`` pair.
+
+    Raises:
+        ValueError: If the id is not three dotted parts.
+    """
+    parts = logical.split(".")
+    if len(parts) != 3:
+        raise ValueError(f"logical table id must be '<tier>.<domain>.<table>': {logical!r}")
+    tier, domain, name = parts
+    if tier in PUBLISHED_TIERS:
+        return domain, name
+    return domain, f"{tier}_{name}"
+
+
 def contract_entity_for_table(table_name: str) -> str:
     """Returns the data-product entity whose contract governs ``table_name``.
 

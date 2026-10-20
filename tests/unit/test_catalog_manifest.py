@@ -401,8 +401,7 @@ def test_registry_matches_unified_view_selects() -> None:
     # Only keep iceberg.* references (the single catalog used after consolidation).
     iceberg_refs = {r for r in raw_refs if r.startswith("iceberg.")}
     assert iceberg_refs, (
-        "unified_view.sql must read at least one iceberg.<namespace>.<table> "
-        "reference. Got raw_refs=" + str(raw_refs)
+        "unified_view.sql must read at least one iceberg.<namespace>.<table> reference. Got raw_refs=" + str(raw_refs)
     )
 
     # Map iceberg.sales.orders_windowed → stream.sales.orders_windowed etc.
@@ -423,8 +422,7 @@ def test_registry_matches_unified_view_selects() -> None:
     registered = {t["logical"] for t in GOLD_TABLES + STREAM_TABLES}
 
     assert logical_refs <= registered, (
-        f"unified_view.sql reads {sorted(logical_refs - registered)} "
-        f"which are not in the registered table registry"
+        f"unified_view.sql reads {sorted(logical_refs - registered)} which are not in the registered table registry"
     )
     assert "stream.sales.orders_windowed" in logical_refs, (
         "unified_view.sql must join the speed-layer table orders_windowed"

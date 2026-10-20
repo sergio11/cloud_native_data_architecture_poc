@@ -27,10 +27,14 @@ COPY quality/ /opt/spark/work-dir/quality/
 
 # Minimal runtime deps of the medallion drivers (yaml/requests/click +
 # psycopg2-binary so bronze can read PostgreSQL instead of synthetic fallback).
+# pyiceberg is the Iceberg client the medallion's storage adapter uses when
+# LAKEHOUSE_BACKEND=iceberg, so the batch layer writes to the real lakehouse
+# instead of the local SQLite file.
 # `--break-system-packages` only exists on newer pips, so try plain first.
 RUN python3 -m pip install --no-cache-dir pyyaml requests click psycopg2-binary \
+        "pyiceberg[pyarrow]==0.12.0" \
     || python3 -m pip install --no-cache-dir --break-system-packages \
-       pyyaml requests click psycopg2-binary
+       pyyaml requests click psycopg2-binary "pyiceberg[pyarrow]==0.12.0"
 
 # spark-submit resolves the interpreter as `python` by default.
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python

@@ -80,6 +80,12 @@ module = ["yaml", "jsonschema"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# PyIceberg and pyarrow are only needed by the Iceberg lakehouse adapter, which
+# runs inside the cluster images. The local profile and the unit tests use the
+# SQLite adapter, so neither is installed in the development environment.
+module = ["pyiceberg.*", "pyarrow.*"]
+ignore_missing_imports = true
+[[tool.mypy.overrides]]
 # PyFlink ships no type information and only exists inside the Flink job image
 # (infra/docker/flink.Dockerfile). Scoped rather than global so a typo'd
 # INTERNAL import still fails. This override is also why the job modules do not

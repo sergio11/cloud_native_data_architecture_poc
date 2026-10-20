@@ -74,6 +74,14 @@ sparkDefaults:
     # even though the catalog existed with exactly that base location.
     # The S3 base location stays in s2-lakehouse -> polaris.config.warehouseLocation.
     warehouse: "polaris"
+    # The scope Polaris demands on the token request. The Iceberg client's own
+    # default is "catalog" and Polaris rejects it with
+    #   invalid_scope: The scope is invalid
+    oauth2Scope: "PRINCIPAL_ROLE:ALL"
+    # Which implementation of the lakehouse port the medallion persists
+    # through: "iceberg" writes the tier tables to the real lakehouse (Polaris
+    # catalog, MinIO data files), "sqlite" keeps them in a local file.
+    lakehouseBackend: "iceberg"
     s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
     s3Region: "us-east-1"
     accessKey: "minioadmin"

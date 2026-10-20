@@ -344,6 +344,31 @@ checkpoint storage `s3a://` really writes to MinIO. It does **not** cover the
 Kafka source, the FlinkDeployment, the checkpointing of a running job, or the
 serving layer.
 
+#### `rake lakehouse:probe` - the batch layer against the real lakehouse
+
+The medallion layer had a second implementation of the lakehouse port waiting
+for it: `IcebergLakehouseStorageAdapter`, which writes Iceberg tables into
+Polaris with the data files in MinIO, instead of a local SQLite file. The
+container picks it with `LAKEHOUSE_BACKEND=iceberg`.
+
+`rake lakehouse:probe` proves it **by writing**: it creates a table in the
+catalogue, appends rows, checks that a second identical write appends nothing
+(RF-01 content-hash idempotency), reads the rows back and lists the snapshots
+(RF-07 time travel). It runs the repository's own composition root, so what it
+exercises is the wiring the medallion drivers use.
+
+Two things it had to discover, both of which fail silently otherwise:
+
+* the Iceberg client sends `X-Iceberg-Access-Delegation: vended-credentials`
+  on every request, and Polaris reads that as "this client wants to write
+  directly", which it enforces with a privilege the `catalog_admin` role does not
+  carry:
+  `ForbiddenException: ... is not authorized for op CREATE_TABLE_DIRECT_WITH_WRITE_DELEGATION`.
+  The identical request without the header is accepted.
+* the OAuth2 scope is not optional. The Iceberg client's own default is
+  `catalog`, and Polaris rejects it with `invalid_scope: The scope is invalid`.
+  It wants `PRINCIPAL_ROLE:ALL`, the same scope the Flink job asks for.
+
 The script travels in a ConfigMap (`infra/diagnostics/window_write_probe.py`),
 so it can be corrected without paying the image rebuild plus per-node load
 cycle.

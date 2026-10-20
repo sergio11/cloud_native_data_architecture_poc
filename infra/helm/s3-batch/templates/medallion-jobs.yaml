@@ -62,6 +62,14 @@ spec:
           value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
         - name: POLARIS_OAUTH2_CREDENTIAL
           value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
+        - name: POLARIS_OAUTH2_SCOPE
+          value: {{ .Values.sparkDefaults.iceberg.oauth2Scope | quote }}
+        # Which implementation of the lakehouse port the medallion persists
+        # through. "iceberg" writes the tier tables to the real lakehouse
+        # (Polaris catalog + MinIO data files); "sqlite" keeps them in the local
+        # file the unit tests use.
+        - name: LAKEHOUSE_BACKEND
+          value: {{ .Values.sparkDefaults.iceberg.lakehouseBackend | quote }}
     executor:
       cores: {{ .Values.sparkDefaults.executor.cores }}
       instances: {{ .Values.sparkDefaults.executor.instances }}
@@ -122,6 +130,14 @@ spec:
           value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
         - name: POLARIS_OAUTH2_CREDENTIAL
           value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
+        - name: POLARIS_OAUTH2_SCOPE
+          value: {{ .Values.sparkDefaults.iceberg.oauth2Scope | quote }}
+        # Which implementation of the lakehouse port the medallion persists
+        # through. "iceberg" writes the tier tables to the real lakehouse
+        # (Polaris catalog + MinIO data files); "sqlite" keeps them in the local
+        # file the unit tests use.
+        - name: LAKEHOUSE_BACKEND
+          value: {{ .Values.sparkDefaults.iceberg.lakehouseBackend | quote }}
     executor:
       cores: {{ .Values.sparkDefaults.executor.cores }}
       instances: {{ .Values.sparkDefaults.executor.instances }}
@@ -182,6 +198,14 @@ spec:
           value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
         - name: POLARIS_OAUTH2_CREDENTIAL
           value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
+        - name: POLARIS_OAUTH2_SCOPE
+          value: {{ .Values.sparkDefaults.iceberg.oauth2Scope | quote }}
+        # Which implementation of the lakehouse port the medallion persists
+        # through. "iceberg" writes the tier tables to the real lakehouse
+        # (Polaris catalog + MinIO data files); "sqlite" keeps them in the local
+        # file the unit tests use.
+        - name: LAKEHOUSE_BACKEND
+          value: {{ .Values.sparkDefaults.iceberg.lakehouseBackend | quote }}
     executor:
       cores: {{ .Values.sparkDefaults.executor.cores }}
       instances: {{ .Values.sparkDefaults.executor.instances }}

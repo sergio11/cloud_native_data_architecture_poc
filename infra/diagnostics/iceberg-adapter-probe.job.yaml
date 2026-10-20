@@ -1,0 +1,80 @@
+# ==============================================================================
+# Iceberg lakehouse probe Job (rake lakehouse:probe)
+#
+# One pod, one Iceberg write, against the running Polaris + MinIO. It proves
+# that the batch layer can reach the real lakehouse instead of the local
+# SQLite file, and it does so by WRITING: a table in the catalogue and a
+# Parquet file in MinIO.
+#
+# The script travels in a ConfigMap so it can be corrected without paying the
+# image rebuild and per-node load cycle.
+#
+# The pod runs the repository's own composition root with
+# LAKEHOUSE_BACKEND=iceberg, so what is exercised is the wiring the medallion
+# drivers use, not the adapter in isolation.
+# ==============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: iceberg-adapter-probe
+  namespace: platform
+  labels:
+    app: iceberg-adapter-probe
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: iceberg-adapter-probe
+    spec:
+      restartPolicy: Never
+      # Pinned on purpose: the probe must run where the image was loaded, so a
+      # missing image cannot be mistaken for a failure of the probe.
+      nodeSelector:
+        kubernetes.io/hostname: poc-data-platform-worker
+      volumes:
+        - name: script
+          configMap:
+            name: iceberg-adapter-probe
+      containers:
+        - name: probe
+          image: docker.io/poc/ingest:0.1.0
+          imagePullPolicy: Never
+          workingDir: /app
+          env:
+            - name: POC_REPO_ROOT
+              value: /app
+            # The lakehouse port resolves to the Iceberg implementation.
+            - name: LAKEHOUSE_BACKEND
+              value: iceberg
+            - name: ICEBERG_CATALOG_URI
+              value: http://polaris.platform.svc.cluster.local:8181/api/catalog
+            - name: ICEBERG_CATALOG_NAME
+              value: polaris
+            - name: POLARIS_OAUTH2_CREDENTIAL
+              value: poc-admin:poc-admin-secret
+            # Without this scope the Iceberg client sends its own default,
+            # "catalog", and Polaris rejects it with
+            #   invalid_scope: The scope is invalid
+            - name: POLARIS_OAUTH2_SCOPE
+              value: PRINCIPAL_ROLE:ALL
+            - name: MINIO_ENDPOINT
+              value: http://minio.platform.svc.cluster.local:9000
+            - name: MINIO_ACCESS_KEY
+              value: minioadmin
+            - name: MINIO_SECRET_KEY
+              value: minioadmin
+            - name: MINIO_REGION
+              value: us-east-1
+          volumeMounts:
+            - name: script
+              mountPath: /probe
+              readOnly: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -x
+              python3 /probe/iceberg_adapter_probe.py
+              echo "PROBE_EXIT=$?"

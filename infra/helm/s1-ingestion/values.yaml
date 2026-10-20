@@ -97,6 +97,19 @@ ingestionRunner:
     # MARQUEZ_URL; the previous OPENLINEAGE_URL was read by nothing, so lineage
     # was never published to Marquez.
     MARQUEZ_URL: "http://marquez.platform.svc.cluster.local:5000"
+    # The lakehouse port has two implementations and the environment picks one.
+    # "iceberg" writes the Bronze tables to the real lakehouse (Polaris catalog,
+    # MinIO data files) through the Iceberg adapter; "sqlite" keeps them in a
+    # local file. The same four variables name the same things as in s3-batch.
+    LAKEHOUSE_BACKEND: "iceberg"
+    ICEBERG_CATALOG_URL: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
+    ICEBERG_CATALOG_NAME: "polaris"
+    ICEBERG_WAREHOUSE: "polaris"
+    POLARIS_OAUTH2_CREDENTIAL: "poc-admin:poc-admin-secret"
+    POLARIS_OAUTH2_SCOPE: "PRINCIPAL_ROLE:ALL"
+    MINIO_ENDPOINT: "http://minio.platform.svc.cluster.local:9000"
+    MINIO_ACCESS_KEY: "minioadmin"
+    MINIO_SECRET_KEY: "minioadmin"
     # Trino, for the serving adapter (src/adapters/serving/sql_serving.py:119-122).
     TRINO_HOST: "trino.platform.svc.cluster.local"
     TRINO_PORT: "8080"

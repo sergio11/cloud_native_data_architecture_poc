@@ -1301,6 +1301,99 @@ namespace :stream do
   end
 end
 
+namespace :lakehouse do
+  desc 'Prove the Iceberg lakehouse adapter in ONE pod: Polaris catalog -> MinIO -> Parquet'
+  task :probe do
+    banner 'ICEBERG LAKEHOUSE PROBE'
+    script = File.join('infra', 'diagnostics', 'iceberg_adapter_probe.py')
+    job_file = File.join('infra', 'diagnostics', 'iceberg-adapter-probe.job.yaml')
+    abort "\e[31mMissing #{script}\e[0m" unless File.exist?(script)
+    abort "\e[31mMissing #{job_file}\e[0m" unless File.exist?(job_file)
+
+    _, api_ok = capture('kubectl', 'cluster-info')
+    unless api_ok
+      abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m"
+    end
+    up, = capture('kubectl', 'get', 'pods', '-n', 'platform',
+                  '-o', 'jsonpath={.items[*].metadata.name}')
+    %w[minio polaris].each do |component|
+      next if up.to_s.match?(/\A#{component}-\d/) || up.to_s.match?(/#{component}-[a-z0-9]+-/)
+
+      abort "\e[31m#{component} is not running in namespace platform.\e[0m\n" \
+            "\e[33mDeploy it first: rake cluster:up[stream]\e[0m"
+    end
+
+    run! 'kubectl', 'delete', 'job', 'iceberg-adapter-probe', '-n', 'platform',
+         '--ignore-not-found'
+    run! 'kubectl', 'delete', 'configmap', 'iceberg-adapter-probe', '-n', 'platform',
+         '--ignore-not-found'
+    run! 'kubectl', 'create', 'configmap', 'iceberg-adapter-probe', '-n', 'platform',
+         "--from-file=iceberg_adapter_probe.py=#{script}"
+
+    run! 'kubectl', 'apply', '-f', job_file
+    info_msg('probe running; it writes a real Iceberg table, allow ~2 min...')
+
+    deadline = Time.now + (12 * 60)
+    phase = ''
+    loop do
+      complete, = capture('kubectl', 'get', 'job', 'iceberg-adapter-probe', '-n', 'platform',
+                          '-o', 'jsonpath={.status.conditions[?(@.type=="Complete")].status}')
+      if complete.to_s.strip == 'True'
+        phase = 'complete'
+        break
+      end
+      failed, = capture('kubectl', 'get', 'job', 'iceberg-adapter-probe', '-n', 'platform',
+                        '-o', 'jsonpath={.status.failed}')
+      if failed.to_s.strip.to_i.positive?
+        phase = 'failed'
+        break
+      end
+      if Time.now > deadline
+        phase = 'timeout'
+        break
+      end
+      sleep 10
+    end
+
+    puts
+    logs, = capture('kubectl', 'logs', '-n', 'platform', 'job/iceberg-adapter-probe')
+    puts logs unless logs.to_s.strip.empty?
+    puts
+
+    # Independent of the Job's own verdict: did Parquet actually land? Asked of
+    # the MinIO pod, because the probe's container has exited by now.
+    minio_pod, = capture('kubectl', 'get', 'pods', '-n', 'platform',
+                         '-o', 'jsonpath={.items[?(@.metadata.labels.app=="minio")].metadata.name}')
+    minio_pod = minio_pod.to_s.strip
+    if minio_pod.empty?
+      err_msg('no se ha encontrado el pod de MinIO para contar los parquet')
+    else
+      data, = capture('kubectl', 'exec', '-n', 'platform', minio_pod, '--',
+                      'sh', '-c',
+                      "find /data/warehouse/sales/probe_metrics/data -name '*.parquet' | wc -l")
+      count = data.to_s.strip
+      if count =~ /\A\d+\z/ && count.to_i.positive?
+        ok_msg("MinIO contiene #{count} fichero(s) parquet en sales.probe_metrics")
+      else
+        err_msg("no se ha encontrado ningun parquet en el warehouse (#{data.to_s.lines.first})")
+      end
+    end
+
+    case phase
+    when 'complete'
+      if logs.to_s.include?('RESULTADO: OK')
+        ok_msg('PROBE OK: el adaptador Iceberg escribe y lee en el lakehouse real')
+      else
+        abort "\e[31mPROBE FALLIDO: el Job termino sin 'RESULTADO: OK'.\e[0m"
+      end
+    when 'failed'
+      abort "\e[31mPROBE: el Job fallo (exit != 0). Lee el log de arriba.\e[0m"
+    else
+      abort "\e[31mPROBE: no termino en 12 min. Logs: kubectl logs -n platform job/iceberg-adapter-probe\e[0m"
+    end
+  end
+end
+
 desc 'RF-24 end-to-end demo on the cluster: code verification -> demo profile -> events -> Flink -> Trino'
 task :demo do
   puts '==> Verifying code (the only local step)'

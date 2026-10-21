@@ -27,16 +27,27 @@ from typing import Any
 DEFAULT_OAUTH2_SCOPE = "PRINCIPAL_ROLE:ALL"
 
 
-def _require(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise ValueError(f"{name} is required for the Iceberg lakehouse backend.")
-    return value
+def _require(name: str, *aliases: str) -> str:
+    """Returns the first non-empty environment variable among name + aliases.
+
+    The alias exists because the two spellings were mixed in the charts:
+    `ICEBERG_CATALOG_URL` (s1-ingestion, s3-batch) and `ICEBERG_CATALOG_URI`
+    (the Flink jobs, the diagnostic probes and this module). The mismatch was
+    silent until a real run: the medallion died with "ICEBERG_CATALOG_URI is
+    required" while the chart was setting the other name. The canonical name
+    is the URI one; the URL spelling is accepted so no deployment has to be
+    changed to keep working.
+    """
+    for candidate in (name, *aliases):
+        value = os.getenv(candidate, "").strip()
+        if value:
+            return value
+    raise ValueError(f"{name} is required for the Iceberg lakehouse backend.")
 
 
 def iceberg_catalog_properties() -> dict[str, Any]:
     """The property set the PyIceberg REST catalog is built with."""
-    catalog_uri = _require("ICEBERG_CATALOG_URI")
+    catalog_uri = _require("ICEBERG_CATALOG_URI", "ICEBERG_CATALOG_URL")
     catalog_name = os.getenv("ICEBERG_CATALOG_NAME", "").strip() or os.getenv("ICEBERG_WAREHOUSE", "").strip()
     if not catalog_name:
         raise ValueError("ICEBERG_CATALOG_NAME (or ICEBERG_WAREHOUSE) is required for the Iceberg backend.")

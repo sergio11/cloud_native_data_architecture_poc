@@ -149,7 +149,7 @@ class IcebergLakehouseStorageAdapter:
 
         table = self._ensure_table(table_name, namespace, table_id, rows)
         sequence = self._next_sequence(table)
-        payload = self._to_arrow(rows, row_hashes, sequence)
+        payload = self._to_arrow(table, rows, row_hashes, sequence)
 
         if mode == "append":
             table.append(payload)
@@ -318,7 +318,16 @@ class IcebergLakehouseStorageAdapter:
 
     @staticmethod
     def _ensure_columns(table: Any, rows: list[dict[str, Any]]) -> None:
-        """Adds the business columns a new batch introduced (RF-07 evolution)."""
+        """Adds the business columns a new batch introduced (RF-07 evolution).
+
+        The INTERNAL columns are added too when the table does not have them.
+        A table created outside this adapter - the catalog registration job
+        creates the published tables in Polaris so the catalogue lists them -
+        carries the business schema only, and the payload ALWAYS has the two
+        internal columns, so the write died with
+        `ValueError: PyArrow table contains more columns: _content_hash,
+        _row_seq` instead of evolving the table.
+        """
         import pyarrow as pa
 
         existing = {field.name for field in table.schema().fields}
@@ -327,8 +336,12 @@ class IcebergLakehouseStorageAdapter:
                 for key in row:
                     if key in existing or key in INTERNAL_COLUMNS:
                         continue
-                    update.add_column(key, _arrow_type(rows, key), nullable=True)
+                    update.add_column(key, _iceberg_type(_arrow_type(rows, key)))
                     existing.add(key)
+            for name, type_name in (("_content_hash", "string"), ("_row_seq", "long")):
+                if name not in existing:
+                    update.add_column(name, _iceberg_type_name_to_type(type_name))
+                    existing.add(name)
             if existing - {field.name for field in table.schema().fields}:
                 update.commit()
             else:
@@ -346,20 +359,63 @@ class IcebergLakehouseStorageAdapter:
         return (max(values) + 1) if values else 1
 
     @staticmethod
-    def _to_arrow(rows: list[dict[str, Any]], hashes: list[str], sequence: int) -> Any:
-        """Builds the arrow table to append, with the internal columns filled."""
+    def _to_arrow(table: Any, rows: list[dict[str, Any]], hashes: list[str], sequence: int) -> Any:
+        """Builds the arrow table to write, with the internal columns filled.
+
+        The SCHEMA OF THE TABLE wins, not the types inferred from the rows:
+        a table that the catalog registration created carries the declared
+        types of the product (a `date` for `order_date`, a `long` for the
+        counters), and Iceberg refuses a write whose types differ
+        ("cannot change column type: date to string"). So the arrow schema is
+        the table's schema and the values are cast to it.
+
+        When the table does not exist yet it was just created by this
+        adapter, and its schema IS the inferred one.
+        """
         import pyarrow as pa
 
-        schema = IcebergLakehouseStorageAdapter._arrow_schema(rows)
+        fields = IcebergLakehouseStorageAdapter._table_fields(table, rows)
+        if not fields:
+            fields = _schema_fields(IcebergLakehouseStorageAdapter._arrow_schema(rows))
+
         columns: dict[str, list[Any]] = {}
-        for field in schema:
+        for field in fields:
             if field.name == "_content_hash":
                 columns[field.name] = list(hashes)
             elif field.name == "_row_seq":
                 columns[field.name] = [sequence + index for index in range(len(rows))]
             else:
-                columns[field.name] = [_arrow_value(row.get(field.name), field.type) for row in rows]
-        return pa.Table.from_pydict(columns, schema=schema)
+                columns[field.name] = [
+                    _arrow_value(row.get(field.name), field.type) for row in rows
+                ]
+        return pa.Table.from_pydict(columns, schema=pa.schema(list(fields)))
+
+    @staticmethod
+    def _table_fields(table: Any, rows: list[dict[str, Any]]) -> list[Any]:
+        """The arrow fields of an Iceberg table, in the table's own order."""
+        import pyarrow as pa
+
+        try:
+            fields = []
+            for field in _schema_fields(table.schema()):
+                if field.name in INTERNAL_COLUMNS:
+                    arrow_type = pa.string() if field.name == "_content_hash" else pa.int64()
+                else:
+                    iceberg_type = getattr(field, "field_type", None)
+                    if iceberg_type is None:
+                        # A double (or a table without a typed schema): infer it.
+                        arrow_type = _arrow_type(rows, field.name)
+                    else:
+                        arrow_type = _iceberg_to_arrow_type(iceberg_type)
+                # A required Iceberg column needs a required arrow field: the
+                # two have to agree, or the write is refused ("required date"
+                # vs "optional date").
+                required = bool(getattr(field, "required", False))
+                fields.append(pa.field(field.name, arrow_type, nullable=not required))
+            return fields
+        except Exception:  # noqa: BLE001 - a double without a real schema
+            return []
+
 
     @staticmethod
     def _sorted_by_sequence(arrow_table: Any) -> Any:
@@ -415,6 +471,99 @@ def _arrow_type(rows: list[dict[str, Any]], name: str) -> Any:
     if has_integer:
         return pa.int64()
     return pa.string()
+
+
+#: The PyIceberg class of each Iceberg type name.
+_ICEBERG_TYPE_CLASSES = {
+    "string": "StringType",
+    "boolean": "BooleanType",
+    "double": "DoubleType",
+    "long": "LongType",
+}
+
+
+def _schema_fields(schema: Any) -> list[Any]:
+    """The fields of a schema, as a list.
+
+    In pyarrow `Schema.fields` is a property; the double used by the unit
+    tests exposes it as a method, so both are accepted.
+    """
+    fields = getattr(schema, "fields", [])
+    return list(fields() if callable(fields) else fields)
+
+
+def _iceberg_type_name_to_type(name: str) -> Any:
+    """The Iceberg type object of an Iceberg type name."""
+    try:
+        from pyiceberg import types as iceberg_types
+    except ImportError:
+        return name
+    return getattr(iceberg_types, _ICEBERG_TYPE_CLASSES[name])()
+
+
+def _iceberg_type(arrow_type: Any) -> Any:
+    """The Iceberg type of an arrow type.
+
+    PyIceberg's UpdateSchema.add_column takes an IcebergType, not the NAME
+    of one: a plain "string" fails with "Cannot visit non-type: string".
+    The import is lazy because the development environment does not have
+    PyIceberg installed (the unit tests exercise the adapter with a double
+    of the catalogue), and there the name is enough.
+    """
+    import pyarrow as pa
+
+    name = "string"
+    if pa.types.is_boolean(arrow_type):
+        name = "boolean"
+    elif pa.types.is_floating(arrow_type):
+        name = "double"
+    elif pa.types.is_integer(arrow_type):
+        name = "long"
+
+    try:
+        from pyiceberg import types as iceberg_types
+    except ImportError:
+        return name
+    return getattr(iceberg_types, _ICEBERG_TYPE_CLASSES[name])()
+
+
+def _iceberg_to_arrow_type(field_type: Any) -> Any:
+    """The arrow type that matches an Iceberg type."""
+    import pyarrow as pa
+
+    try:
+        from pyiceberg import types as iceberg_types
+    except ImportError:
+        return pa.string()
+
+    if isinstance(field_type, iceberg_types.BooleanType):
+        return pa.bool_()
+    if isinstance(field_type, iceberg_types.IntegerType):
+        return pa.int32()
+    if isinstance(field_type, iceberg_types.LongType):
+        return pa.int64()
+    if isinstance(field_type, (iceberg_types.FloatType, iceberg_types.DoubleType)):
+        return pa.float64()
+    if isinstance(field_type, iceberg_types.DateType):
+        return pa.date32()
+    if isinstance(field_type, iceberg_types.TimestampType):
+        return pa.timestamp("us")
+    if isinstance(field_type, iceberg_types.DecimalType):
+        return pa.decimal128(field_type.precision, field_type.scale)
+    return pa.string()
+
+
+def _iceberg_type_name(arrow_type: Any) -> str:
+    """The Iceberg type NAME of an arrow type."""
+    import pyarrow as pa
+
+    if pa.types.is_boolean(arrow_type):
+        return "boolean"
+    if pa.types.is_floating(arrow_type):
+        return "double"
+    if pa.types.is_integer(arrow_type):
+        return "long"
+    return "string"
 
 
 def _arrow_value(value: Any, arrow_type: Any) -> Any:

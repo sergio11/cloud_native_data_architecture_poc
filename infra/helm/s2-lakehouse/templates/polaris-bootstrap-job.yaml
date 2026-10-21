@@ -47,11 +47,24 @@ metadata:
     # Service and its Deployment are ordinary (non-hook) resources that Helm has
     # not created yet. As a pre-install hook the Job waited forever and the whole
     # `helm install s2-lakehouse` hung until its timeout, taking the platform
-    # profile with it. post-install guarantees the Polaris pod exists first;
-    # pre-upgrade keeps reconciling the catalog before an upgrade rolls the pod.
-    helm.sh/hook: post-install,pre-upgrade
+    # profile with it. post-install guarantees the Polaris pod exists first.
+    #
+    # post-install AND post-upgrade, never pre-upgrade: the catalogue lives in
+    # the Polaris POD's memory, so a bootstrap that runs BEFORE the upgrade is
+    # creating the catalogue in the pod that the upgrade is about to replace.
+    # After a pod roll the catalogue is simply gone, and the registration job
+    # (weight 25, so it runs after this one) would fail with "catalog not
+    # found". Running it after the upgrade re-creates the catalogue in the
+    # pod that is actually serving.
+    helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    # The default hook timeout is 5 minutes. On a 6 GiB box this job takes 6 to
+    # 11 minutes (the whole cluster is swapping while it runs), and the upgrade
+    # failed with "pre-upgrade hooks failed: resource Job/... not ready: status:
+    # InProgress" until the timeout was raised.
+    helm.sh/hook-timeout: 20m
+
 spec:
   # Keep completed pods for 10 minutes so logs are readable after success.
   ttlSecondsAfterFinished: 600

@@ -38,10 +38,23 @@ sparkDefaults:
     tag: "0.1.0"
     pullPolicy: IfNotPresent
 
+  # What the medallion tiers process. The Spark Operator (v1beta2) cannot
+  # pass arguments to the main file (`args` is not in the CRD schema), so the
+  # entity travels in the environment: the scripts read MEDALLION_ENTITY, and
+  # "all" means every entity of the tier.
+  entity: "all"
+
   driver:
     cores: 1
     coreLimit: "1000m"
     memory: "512m"
+    # Off-heap memory of the driver container: the JVM outside its heap plus
+    # the Python worker that runs next to it. The pod limit is
+    # memory + memoryOverhead, so this is the room the driver actually has
+    # besides the heap. Set it explicitly: Spark's default factor for a
+    # Kubernetes non-JVM (Python) job is 0.40, and with the heap alone
+    # filling the container the first allocation gets the pod OOM-killed.
+    memoryOverhead: "384m"
     labels:
       version: "3.5.1"
       role: driver
@@ -51,7 +64,8 @@ sparkDefaults:
     cores: 1
     coreLimit: "1000m"
     instances: 1
-    memory: "640m"
+    memory: "512m"
+    memoryOverhead: "384m"
     labels:
       version: "3.5.1"
       role: executor
@@ -108,7 +122,13 @@ sparkDefaults:
 
 jobs:
   bronzeIngestion:
-    enabled: true
+    # OFF by default. Bronze is ingested by the s1 CronJob
+    # (medallion-bronze-ingestion-cron, image poc/ingest:0.1.0) and NOT by
+    # Spark: with both enabled the same Iceberg table had two writers, one
+    # every 15 minutes and one at 02:00, which is a commit conflict waiting to
+    # happen. One path per profile. Flip this to true to move bronze back to
+    # Spark (and ingestionRunner.enabled to false in s1).
+    enabled: false
     schedule: "0 2 * * *"
   silverTransform:
     enabled: true

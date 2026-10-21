@@ -31,7 +31,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Silver Layer Cleaning & Quality Gate Pipeline (Hexagonal)")
     parser.add_argument(
         "--entity",
-        default="orders",
+        # The Spark Operator (v1beta2) cannot pass arguments to the main
+        # file, so the entity travels in the environment (the chart sets
+        # MEDALLION_ENTITY). The default is "all" because a tier that only
+        # cleanses "orders" leaves the Gold tier without customers to
+        # publish, and the Gold quality gate then blocks the whole run.
+        default=os.environ.get("MEDALLION_ENTITY", "all"),
         choices=["orders", "customers", "all"],
         help="Entity to cleanse and promote to Silver tier",
     )

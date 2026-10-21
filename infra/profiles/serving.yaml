@@ -1,0 +1,80 @@
+# ==============================================================================
+# Modern Data Architecture POC - Startup Profile: Serving
+# File: infra/profiles/serving.yaml
+# CONTRACT (K-B): each `subsystems.<chart>` is a verbatim Helm values fragment
+# for infra/helm/<chart> (keys verified 1:1 against each chart's values.yaml).
+#
+# This is the phase that answers RF-11: Trino reads the batch gold table AND
+# the stream speed table through the single `iceberg` catalog (Polaris REST +
+# MinIO) and the unified view merges them without double counting.
+#
+# It is a SEPARATE profile from batch/stream on purpose: 6 GiB cannot hold
+# the Spark tier (1.8 GiB of limits) and Trino (1.2 GiB) and Flink (1.8 GiB)
+# at the same time. The data is in the lakehouse, not in a pod, so the phases
+# run one after another and the unified view still sees both branches.
+#
+# s1 and s2 are (re)installed here because the profile contract lists every
+# chart it owns, and `helm upgrade --install` is idempotent: the PVCs and the
+# lakehouse content survive.
+#
+# Target RAM Footprint (container LIMITS):
+#   postgres 384 + minio 384 + polaris 1024 + trino 1280 = 3072 MiB
+#   plus the kind control plane, which shares the same 6 GiB.
+# ==============================================================================
+profile:
+  name: "serving"
+  description: "Trino serving layer over the Iceberg lakehouse (unified batch + stream view, RF-11)"
+  targetRamMb: 3072
+  targetCpuCores: 2.5
+
+subsystems:
+  s1-ingestion:
+    postgresql:
+      enabled: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "192Mi"
+        limits:
+          cpu: "400m"
+          memory: "384Mi"
+    ingestionRunner:
+      enabled: false
+
+  s2-lakehouse:
+    minio:
+      enabled: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "192Mi"
+        limits:
+          cpu: "400m"
+          memory: "384Mi"
+    polaris:
+      enabled: true
+      resources:
+        requests:
+          cpu: "150m"
+          memory: "384Mi"
+        limits:
+          cpu: "600m"
+          memory: "1024Mi"
+
+  s5-serving:
+    trino:
+      enabled: true
+      # Heap must leave room for metaspace and direct buffers inside the
+      # container limit. 1024M in 1280Mi is exactly the combination
+      # s5-serving/values.yaml calls out as an OOM risk, and the chart runs with
+      # -XX:+ExitOnOutOfMemoryError, so the first heap excursion kills the pod.
+      # 896M gives ~384MiB of headroom, which is what the chart ships.
+      resources:
+        requests:
+          cpu: "400m"
+          memory: "896Mi"
+        limits:
+          cpu: "1200m"
+          memory: "1280Mi"
+      jvm:
+        maxHeapSize: "896M"

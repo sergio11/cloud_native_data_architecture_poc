@@ -1,52 +1,34 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: spark-platform-defaults
-  namespace: {{ .Values.global.namespace | default "platform" }}
-  labels:
-    app: spark-batch
-    {{- include "s3-batch.labels" . | nindent 4 }}
-data:
-  spark-defaults.conf: |
-    # Spark Iceberg Runtime
-    spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}=org.apache.iceberg.spark.SparkCatalog
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.type=rest
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.uri={{ .Values.sparkDefaults.iceberg.catalogUrl }}
-    # warehouse = the Polaris CATALOG NAME. For a REST catalog this is the
-    # ?warehouse= identifier, not an S3 path; see values.yaml iceberg.warehouse.
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.warehouse={{ .Values.sparkDefaults.iceberg.warehouse }}
-    # OAuth2, required by Polaris 1.x. Without these the REST client calls
-    # /v1/config unauthenticated and Polaris answers 401.
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.credential={{ .Values.sparkDefaults.iceberg.oauth2Credential }}
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.oauth2-server-uri={{ .Values.sparkDefaults.iceberg.catalogUrl }}/v1/oauth/tokens
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.scope=PRINCIPAL_ROLE:ALL
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.token-refresh-enabled=true
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.io-impl=org.apache.iceberg.aws.s3.S3FileIO
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.endpoint={{ .Values.sparkDefaults.iceberg.s3Endpoint }}
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.region={{ .Values.sparkDefaults.iceberg.s3Region }}
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.access-key={{ .Values.sparkDefaults.iceberg.accessKey }}
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.secret-key={{ .Values.sparkDefaults.iceberg.secretKey }}
-    spark.sql.catalog.{{ .Values.sparkDefaults.iceberg.catalogName }}.s3.path-style-access=true
-    spark.sql.defaultCatalog={{ .Values.sparkDefaults.iceberg.catalogName }}
+{{- /*
+RETIRED (2026-10-21) - this template renders NOTHING on purpose.
 
-    # S3A MinIO Storage Connector
-    spark.hadoop.fs.s3a.endpoint={{ .Values.sparkDefaults.iceberg.s3Endpoint }}
-    spark.hadoop.fs.s3a.access.key={{ .Values.sparkDefaults.iceberg.accessKey }}
-    spark.hadoop.fs.s3a.secret.key={{ .Values.sparkDefaults.iceberg.secretKey }}
-    spark.hadoop.fs.s3a.path.style.access=true
-    spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
-    spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+It used to create a ConfigMap called `spark-platform-defaults` with a
+`spark-defaults.conf` key, and it was never mounted in any pod: the three
+ScheduledSparkApplications had no `sparkConfigMap:` and no `volumes:`, so
+the file was dead configuration. Mounting it as it was written would have
+BROKEN the medallion, because it asked for two JARs that are not in the
+image:
 
-    # OpenLineage Tracing & Lineage
-    spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener
-    spark.openlineage.transport.type=http
-    spark.openlineage.transport.url={{ .Values.sparkDefaults.openLineage.url }}
-    spark.openlineage.transport.endpoint=/api/v1/lineage
-    spark.openlineage.namespace={{ .Values.sparkDefaults.openLineage.namespace }}
+  spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+  spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener
 
-    # Memory and Parallelism Optimizations
-    spark.sql.adaptive.enabled=true
-    spark.sql.adaptive.coalescePartitions.enabled=true
-    spark.sql.shuffle.partitions=10
-    spark.default.parallelism=10
+`apache/spark:3.5.1` (and the pyspark wheel) ship neither the Iceberg Spark
+runtime nor the OpenLineage Spark agent, and poc/spark-medallion does not
+install them. Spark loads the session extension when the session is created,
+so the driver would die with ClassNotFoundException before running a line of
+the pipeline.
+
+And both entries were unnecessary anyway:
+  * the catalog is opened by PyIceberg (the medallion storage adapter reads
+    ICEBERG_CATALOG_URL / ICEBERG_CATALOG_NAME), so Spark never opens a
+    catalog of its own;
+  * the medallion drivers do not create a SparkSession (the core is
+    Spark-free), so an OpenLineage Spark listener would report an empty
+    Spark job. The lineage that the platform exposes is published by the
+    core itself through MarquezLineageAdapter
+    (src/adapters/lineage/marquez_lineage.py), which knows the real inputs
+    and outputs of every tier.
+
+If a future pipeline really needs Spark-native lineage or the Iceberg Spark
+catalog, the JARs have to be added to the image first (and the file mounted
+through `sparkConfigMap:`), not the other way round.
+*/ -}}

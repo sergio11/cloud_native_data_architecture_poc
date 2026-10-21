@@ -20,6 +20,8 @@ require 'rake'
 require 'open3'
 require 'tempfile'
 require 'yaml'
+require 'json'
+require 'socket'
 
 # Interleave our output with the child processes' (kubectl/helm write
 # unbuffered; without this the sections appear out of order when piped).
@@ -216,7 +218,13 @@ def load_image_into(node, image)
   # this image costs ~5 minutes and most of it is layers the node already has,
   # so re-saving on every retry threw that away over and over. Keyed by id, a
   # retry after a failed import pays only the import.
-  tar = "/tmp/kind-load-#{short_id}.tar"
+  #
+  # /var/tmp, NOT /tmp: in the podman machine /tmp is a tmpfs, so a tar there
+  # is RAM. Writing a 1 GB image tar into a 2.9 GB tmpfs took the whole box
+  # down (the machine stopped answering the API server) - and the tars pile up,
+  # because they are kept as a cache. On the root filesystem they cost disk,
+  # of which there is plenty.
+  tar = "/var/tmp/kind-load-#{short_id}.tar"
 
   info_msg('  phase 1/2: podman save inside the machine')
   # test -s first: `podman save -o` refuses to touch an existing docker-archive
@@ -308,6 +316,43 @@ def short_image_ref(ref)
   tag.empty? ? repo : "#{repo}:#{tag}"
 end
 
+# The short id (12 chars) of an image in the machine's own store, or nil.
+def local_image_id(image)
+  listing, ok = capture('podman', 'images', '--format', '{{.Repository}}:{{.Tag}} {{.Id}}')
+  return nil unless ok
+
+  wanted = short_image_ref(image)
+  entry = listing.lines.find { |line| short_image_ref(line.split.first.to_s) == wanted }
+  entry&.split&.[](1)&.[](0, 12)
+end
+
+# Removes the cached tar of an image from the machine.
+def drop_image_tar(image)
+  short_id = local_image_id(image)
+  return if short_id.nil?
+
+  _, ok = capture('podman', 'machine', 'ssh', 'sudo', '-n', 'sh', '-c',
+                  "'rm -f /var/tmp/kind-load-#{short_id}.tar'")
+  ok ? info_msg("dropped the cached tar of #{image}") : warn_msg("could not drop the tar of #{image}")
+end
+
+# Removes the untagged images of a node (the PREVIOUS versions of the images
+# that were reloaded) and the content they referenced.
+#
+# NOT `crictl rmi --prune`: that removes every image no RUNNING container
+# uses, including the one that was just loaded and is about to be used by a
+# pod that has not started yet (the pod then fails with "pull access denied"
+# for an image that is sitting in the node).
+def prune_node_images(node)
+  script = 'crictl images -o json | python3 -c "import json,sys; ' \
+           'd=json.load(sys.stdin); ' \
+           'print(\' \'.join(i[\'id\'] for i in d[\'images\'] if not i.get(\'repoTags\')))" ' \
+           '| xargs -r crictl rmi'
+  _, ok = capture('podman', '--connection', node[:connection], 'exec', node[:name],
+                  'sh', '-c', script)
+  ok ? info_msg("pruned the untagged images of #{node[:name]}") : warn_msg("could not prune #{node[:name]}")
+end
+
 # Names of the kind clusters that exist right now.
 # `kind` prints "enabling experimental podman provider" (once, when it activates
 # the podman provider) and "No kind clusters found." on the same stream as the
@@ -389,16 +434,33 @@ def api_up?
   ok
 end
 
+# Is something listening on host:port? Used to wait for a port-forward.
+def port_open?(host, port)
+  socket = TCPSocket.new(host, port)
+  socket.close
+  true
+rescue StandardError
+  false
+end
+
 # kind serves a self-signed certificate on 127.0.0.1; every manual command in
 # this repo uses this flag, so all Helm invocations go through the same constant.
 HELM_KUBE_ARGS = ['--kube-insecure-skip-tls-verify'].freeze
 
 # The Helm releases each startup profile installs (release name == chart dir,
 # namespace platform). Mirrors the contract documented in infra/profiles/*.yaml.
+#
+# One profile = one phase of the platform, and the profiles are EXCLUSIVE
+# (RC-02: 8 GB of RAM cannot hold the whole stack at once, so the heavy
+# engines run one after the other). Trino is the serving phase on its own:
+# Spark (1.8 GiB of limits), Flink (1.8 GiB) and Trino (1.3 GiB) do not fit
+# together, and they do not need to: the data they exchange lives in the
+# lakehouse (MinIO + Iceberg), not in a pod.
 PROFILE_CHARTS = {
   'platform' => %w[s1-ingestion s2-lakehouse s7-fabric],
-  'stream'   => %w[s1-ingestion s2-lakehouse s4-stream s5-serving],
-  'batch'    => %w[s1-ingestion s2-lakehouse s3-batch s5-serving],
+  'stream'   => %w[s1-ingestion s2-lakehouse s4-stream],
+  'batch'    => %w[s1-ingestion s2-lakehouse s3-batch],
+  'serving'  => %w[s1-ingestion s2-lakehouse s5-serving],
   'demo'     => %w[s1-ingestion s2-lakehouse s3-batch s4-stream s5-serving
                    s6-mesh s7-fabric s8-ops]
 }.freeze
@@ -506,6 +568,70 @@ namespace :governance do
     puts "\e[33m[Governance] Validating Data Products & Contracts (Data Mesh / ODCS)...\e[0m"
     sh 'python governance/contract_validator.py --repo-root .'
     puts "\e[32mData contracts verified.\e[0m"
+  end
+
+  desc 'Prove the admission control in the cluster: a DataProduct without owner is rejected'
+  task :verify do
+    banner 'ADMISSION CONTROL'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    controller, ok = capture('kubectl', 'get', 'pods', '-n', 'kyverno', '--no-headers')
+    unless ok
+      abort "\e[31mThe Kyverno namespace does not exist. Deploy the governance phase first:\e[0m\n" \
+            "\e[33m  rake demo:phases[governance]\e[0m"
+    end
+    if controller.to_s.strip.empty?
+      abort "\e[31mNo Kyverno pod in the kyverno namespace. The controller is what enforces the policies.\e[0m"
+    end
+    puts controller
+
+    # The DataProduct the cluster must REJECT: it has no owner, and the
+    # `require-data-product-owner` ClusterPolicy (Enforce) demands one.
+    without_owner = <<~YAML
+      apiVersion: dataplatform.io/v1alpha1
+      kind: DataProduct
+      metadata:
+        name: pwned-without-owner
+        namespace: sales
+      spec:
+        description: "A data product with no accountable owner"
+        classification: internal
+    YAML
+
+    with_owner = <<~YAML
+      apiVersion: dataplatform.io/v1alpha1
+      kind: DataProduct
+      metadata:
+        name: allowed-with-owner
+        namespace: sales
+        owner: data-platform@example.com
+      spec:
+        description: "A data product with an accountable owner"
+        classification: internal
+    YAML
+
+    rejected, reject_ok = capture('kubectl', 'apply', '-f', '-', stdin: without_owner)
+    accepted, accept_ok = capture('kubectl', 'apply', '-f', '-', stdin: with_owner)
+
+    puts "\n--- without owner (must be rejected) ---"
+    puts rejected
+    puts "\n--- with owner (must be accepted) ---"
+    puts accepted
+
+    problems = []
+    problems << 'a DataProduct WITHOUT owner was ACCEPTED: the policy is not enforcing' if reject_ok
+    problems << 'a DataProduct WITH owner was rejected: the policy is too strict' unless accept_ok
+    if reject_ok && !rejected.to_s.include?('admission webhook')
+      problems << "the rejection did not come from an admission webhook: #{rejected.to_s.lines.first}"
+    end
+
+    if problems.empty?
+      ok_msg('ADMISSION CONTROL OK: the policy is enforced in the cluster')
+    else
+      problems.each { |problem| err_msg(problem) }
+      abort "\e[31mAdmission control is not working as declared.\e[0m"
+    end
   end
 end
 
@@ -998,7 +1124,7 @@ namespace :cluster do
     ok_msg('Recreate with: rake cluster:create')
   end
 
-  desc "Deploy a startup profile with Helm (args: profile=platform|stream|batch|demo, default: stream)"
+  desc "Deploy a startup profile with Helm (args: profile=platform|stream|batch|serving|demo, default: stream)"
   task :up, [:profile] do |_t, args|
     profile = args[:profile] || 'stream'
     profile_file = File.join('infra', 'profiles', "#{profile}.yaml")
@@ -1055,7 +1181,63 @@ namespace :cluster do
     ok_msg("Profile '#{profile}' applied successfully! (#{deployed} chart(s) deployed)")
   end
 
-  desc "Tear a startup profile down (args: profile=platform|stream|batch|demo, default: stream)"
+  desc 'Seed the OLTP database with the synthetic demo dataset (args: records=105)'
+  task :seed, [:records] do |_t, args|
+    banner 'OLTP SEED'
+    records = (args[:records] || 105).to_i
+
+    # The schema is created by the postgres init script, but the DATA is not:
+    # the chart has no seeding step, so without this the medallion reads an
+    # empty OLTP source and reports EMPTY for every entity (which is what it
+    # did before this task existed).
+    #
+    # The seeder runs on the HOST, because it needs Faker and numpy and the
+    # Postgres service is a ClusterIP: it reaches the database through a
+    # port-forward that this task opens and closes.
+    values = YAML.load_file(File.join('infra', 'helm', 's1-ingestion', 'values.yaml'))
+    env = values.dig('ingestionRunner', 'env') || {}
+    password = env['PGPASSWORD']
+    database = env['PGDATABASE'] || 'poc_oltp'
+    user = env['PGUSER'] || 'postgres'
+    abort "\e[31mno PGPASSWORD in infra/helm/s1-ingestion/values.yaml\e[0m" if password.nil?
+
+    %w[faker numpy psycopg2 click].each do |mod|
+      _, ok = capture('python', '-c', "import #{mod}")
+      unless ok
+        abort "\e[31mThe host python is missing '#{mod}'. The seeder needs: " \
+              "pip install faker numpy psycopg2-binary click\e[0m"
+      end
+    end
+
+    port_forward = Process.spawn('kubectl', 'port-forward', '-n', 'platform',
+                                 'svc/postgres-oltp', '5432:5432',
+                                 out: File::NULL, err: File::NULL)
+    begin
+      ready = false
+      30.times do
+        if port_open?('127.0.0.1', 5432)
+          ready = true
+          break
+        end
+        sleep 1
+      end
+      abort "\e[31mthe port-forward to postgres-oltp did not open\e[0m" unless ready
+
+      run! 'python', 'data-generator/oltp_seed.py',
+           '--host', '127.0.0.1', '--port', '5432', '--db', database,
+           '--user', user, '--password', password, '--records', records.to_s
+    ensure
+      begin
+        Process.kill('TERM', port_forward)
+        Process.wait(port_forward)
+      rescue StandardError
+        nil
+      end
+    end
+    ok_msg("OLTP seeded: #{records} orders (+ products, customers, campaigns)")
+  end
+
+  desc "Tear a startup profile down (args: profile=platform|stream|batch|serving|demo, default: stream)"
   task :down, [:profile] do |_t, args|
     profile = args[:profile] || 'stream'
     unless PROFILE_CHARTS.key?(profile)
@@ -1098,8 +1280,65 @@ namespace :cluster do
     docker.io/poc/lineage-webhook:0.1.0
   ].freeze
 
+  # How each local image is built: tag => [dockerfile, build context].
+  # The context is the directory the COPY paths are relative to: the repo
+  # root for the three images that carry the repository code, and
+  # lineage/config for the webhook, which is self-contained.
+  POC_IMAGE_BUILDS = {
+    'docker.io/poc/ingest:0.1.0'         => ['infra/docker/ingest.Dockerfile', '.'],
+    'docker.io/poc/spark-medallion:0.1.0' => ['infra/docker/spark.Dockerfile', '.'],
+    'docker.io/poc/flink-stream:0.1.0'   => ['infra/docker/flink.Dockerfile', '.'],
+    'docker.io/poc/lineage-webhook:0.1.0' => ['lineage/config/Dockerfile', 'lineage/config']
+  }.freeze
+
   namespace :image do
-    desc 'Copy built images into EVERY kind node (args: images=a,b; default: all poc/*)'
+    desc 'Build the poc/* images with podman and load them into every node (args: images=a,b; default: all)'
+    task :build, [:images] do |_t, args|
+      banner 'IMAGE BUILD'
+      images = args[:images].to_s.split(/[,+]/).map(&:strip).reject(&:empty?)
+      images = POC_IMAGE_BUILDS.keys if images.empty?
+
+      failures = 0
+      built = []
+      images.each do |image|
+        recipe = POC_IMAGE_BUILDS[image]
+        if recipe.nil?
+          err_msg("no build recipe for #{image}")
+          failures += 1
+          next
+        end
+        dockerfile, context = recipe
+        unless File.exist?(dockerfile)
+          err_msg("missing #{dockerfile}")
+          failures += 1
+          next
+        end
+        info_msg("building #{image} from #{dockerfile} (context: #{context})")
+        if system('podman', 'build', '-f', dockerfile, '-t', image, context)
+          ok_msg(image)
+          built << image
+        else
+          err_msg(image)
+          failures += 1
+        end
+      end
+
+      if failures.positive?
+        abort "\e[31m#{failures}/#{images.size} image(s) failed to build.\e[0m"
+      end
+      ok_msg("#{built.size} image(s) built")
+
+      # The build layers of a rebuilt image are dangling: they are the biggest
+      # consumer of the machine's disk and nothing else removes them.
+      capture('podman', 'image', 'prune', '-f')
+
+      # RNF-03 asks for ONE versioned procedure with no manual step, so the
+      # build does not stop at the image: it also puts it where the cluster
+      # can use it. `cluster:image:load` on its own still works.
+      Rake::Task['cluster:image:load'].invoke(built.join('+'))
+    end
+
+    desc 'Copy built images into EVERY kind node (args: images=a,b or a+b; default: all poc/*)'
     task :load, [:images] do |_t, args|
       banner 'IMAGE LOAD'
       probe = podman_probe
@@ -1116,15 +1355,26 @@ namespace :cluster do
       end
       info_msg("target nodes: #{nodes.map { |n| n[:name] }.join(', ')}")
 
-      images = args[:images].to_s.split(',').map(&:strip).reject(&:empty?)
+      images = args[:images].to_s.split(/[,+]/).map(&:strip).reject(&:empty?)
       images = POC_IMAGES if images.empty?
 
       # image => [nodes it is present in]
-      loaded_into = Hash.new { |h, k| h[k] = [] }
+      loaded_into = Hash.new { |h, image| h[image] = [] }
       images.each do |image|
         nodes.each do |node|
           loaded_into[image] << node[:name] if load_image_into(node, image)
         end
+
+        # The tar was a cache so that a failed import would not pay for the
+        # save again. Once the image is in every node it is dead weight on
+        # the machine's disk (a Spark image is ~950 MB), and so is the
+        # PREVIOUS version of the image in each node's containerd store:
+        # four rebuilds left ~10 GB of dead blobs per node, which is what
+        # filled the host disk.
+        next unless loaded_into[image].size == nodes.size
+
+        drop_image_tar(image)
+        nodes.each { |node| prune_node_images(node) }
       end
 
       puts
@@ -1141,15 +1391,24 @@ namespace :cluster do
       end
     end
 
-    desc 'Delete the cached image tars inside the machine (cluster:image:load keeps them)'
+    desc 'Delete the cached image tars inside the machine and prune the node image stores'
     task :clean do
       banner 'IMAGE CLEAN'
       out, ok = capture('podman', 'machine', 'ssh', 'sudo', '-n', 'sh', '-c',
-                        "'ls -l /tmp/kind-load-*.tar 2>/dev/null | wc -l; rm -f /tmp/kind-load-*.tar'")
+                        "'rm -f /var/tmp/kind-load-*.tar'")
       abort "\e[31mcould not reach the podman machine\e[0m" unless ok
 
-      warn_msg("deleted #{out.to_s.lines.last.to_s.strip} cached tar(s) from the machine")
+      # Every rebuild of an image left its PREVIOUS version in the node's
+      # containerd store, untagged, and nothing ever removed it: four rebuilds
+      # of the Spark image left ~10 GB of dead blobs per node, and the host
+      # disk (the machine's VHDX) filled up. The untagged images are pruned
+      # after every load, and this task prunes whatever is left.
+      probe = podman_probe
+      probe[:containers].each { |node| prune_node_images(node) }
+
+      warn_msg('deleted the cached image tars and pruned the node image stores')
     end
+
 
     desc 'List the images the kind node actually has, with their digests'
     task :list do
@@ -1301,6 +1560,139 @@ namespace :stream do
   end
 end
 
+# ------------------------------------------------------------------------------
+# Batch tier: run the medallion on demand
+# ------------------------------------------------------------------------------
+#
+# The medallion has TWO entry points per tier, and they are the same code:
+#
+#   bronze  the s1 CronJob (poc/ingest:0.1.0, plain Python) - the one path
+#           that writes bronze; the Spark bronze job is disabled in s3-batch
+#           so the two never write the same Iceberg table.
+#   silver  the s3 ScheduledSparkApplication (spark-silver-transform).
+#   gold    the s3 ScheduledSparkApplication (spark-gold-aggregation).
+#
+# The crons fire at 02:00/03:00/04:00, which is no use for a demo or for a
+# verification run, so this task submits the SAME spec on demand:
+#
+#   * bronze: the CronJob is suspended and a one-shot Job is created from it
+#     (`kubectl create job --from=cronjob/`), so what runs is exactly what
+#     the cron would have run.
+#   * silver/gold: the spec of the deployed ScheduledSparkApplication is read
+#     back and applied as a plain SparkApplication. The chart stays the only
+#     source of truth for what a tier runs, so the manual run and the
+#     scheduled run cannot drift.
+# ------------------------------------------------------------------------------
+BATCH_TIERS = {
+  'bronze' => { kind: 'cronjob', object: 'medallion-bronze-ingestion-cron', ns: 'platform' },
+  'silver' => { kind: 'spark', object: 'spark-silver-transform', ns: 'sales' },
+  'gold'   => { kind: 'spark', object: 'spark-gold-aggregation', ns: 'sales' }
+}.freeze
+
+def wait_for_spark_application(name, ns, timeout_s)
+  deadline = Time.now + timeout_s
+  loop do
+    state, = capture('kubectl', 'get', 'sparkapplication', name, '-n', ns,
+                      '-o', 'jsonpath={.status.applicationState.state}')
+    case state.to_s.strip
+    when 'COMPLETED'
+      return true
+    when 'FAILED', 'UNKNOWN', 'SUBMISSION_FAILED', 'INVALIDATING'
+      return false
+    end
+    return false if Time.now > deadline
+
+    sleep 10
+  end
+end
+
+# Applies the spec of a ScheduledSparkApplication as a one-shot
+# SparkApplication. Returns the name it created.
+def submit_one_shot_spark(scheduled_name, ns)
+  raw, ok = capture('kubectl', 'get', 'scheduledsparkapplication', scheduled_name,
+                    '-n', ns, '-o', 'jsonpath={.spec.template}')
+  unless ok
+    abort "\e[31mno se pudo leer el ScheduledSparkApplication #{scheduled_name} " \
+          "(is s3-batch deployed?)\e[0m"
+  end
+
+  manifest = {
+    'apiVersion' => 'sparkoperator.k8s.io/v1beta2',
+    'kind' => 'SparkApplication',
+    'metadata' => { 'name' => "#{scheduled_name}-oneshot", 'namespace' => ns },
+    'spec' => JSON.parse(raw)
+  }
+  file = Tempfile.new(['spark-oneshot-', '.json'])
+  file.write(JSON.pretty_generate(manifest))
+  file.close
+
+  run! 'kubectl', 'delete', 'sparkapplication', "#{scheduled_name}-oneshot",
+       '-n', ns, '--ignore-not-found'
+  # A failed attempt leaves the driver pod behind (the operator creates it
+  # and the pod stays in Failed/StartError), and the next submission collides
+  # with it: `pods "spark-...-driver" already exists` (409).
+  run! 'kubectl', 'delete', 'pod', '-n', ns,
+       '-l', "sparkoperator.k8s.io/app-name=#{scheduled_name}-oneshot", '--ignore-not-found'
+  run! 'kubectl', 'apply', '-f', file.path
+  manifest['metadata']['name']
+end
+
+namespace :batch do
+  desc 'Run the medallion now, in order (args: tiers=bronze,silver,gold; default: all)'
+  task :run, [:tiers] do |_t, args|
+    banner 'BATCH RUN'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    tiers = args[:tiers].to_s.split(',').map(&:strip).reject(&:empty?)
+    tiers = %w[bronze silver gold] if tiers.empty?
+    unknown = tiers - BATCH_TIERS.keys
+    abort "\e[31mUnknown tier(s): #{unknown.join(', ')}. Choose from: #{BATCH_TIERS.keys.join(', ')}\e[0m" if unknown.any?
+
+    tiers.each do |tier|
+      spec = BATCH_TIERS[tier]
+      info_msg("--- #{tier} ---")
+      case spec[:kind]
+      when 'cronjob'
+        # The cron is suspended while the one-shot runs, so the 15-minute
+        # schedule cannot fire in the middle of the verification.
+        run! 'kubectl', 'patch', 'cronjob', spec[:object], '-n', spec[:ns],
+             '-p', '{"spec":{"suspend":true}}'
+        run! 'kubectl', 'delete', 'job', "#{tier}-oneshot", '-n', spec[:ns], '--ignore-not-found'
+        run! 'kubectl', 'create', 'job', "--from=cronjob/#{spec[:object]}",
+             "#{tier}-oneshot", '-n', spec[:ns]
+        complete, = capture('kubectl', 'wait', "--for=condition=complete",
+                            "job/#{tier}-oneshot", '-n', spec[:ns], '--timeout=600s')
+        logs, = capture('kubectl', 'logs', "-n", spec[:ns], "job/#{tier}-oneshot", '--tail=200')
+        puts logs unless logs.to_s.strip.empty?
+        # The cron goes back to its schedule whatever happened.
+        run! 'kubectl', 'patch', 'cronjob', spec[:object], '-n', spec[:ns],
+             '-p', '{"spec":{"suspend":false}}'
+        abort "\e[31m#{tier}: el Job no termino correctamente\e[0m" unless complete.to_s.include?('condition met')
+        ok_msg("#{tier}: ingestion completada")
+      when 'spark'
+        name = submit_one_shot_spark(spec[:object], spec[:ns])
+        info_msg("esperando a #{name} (timeout 15 min)...")
+        finished = wait_for_spark_application(name, spec[:ns], 15 * 60)
+        logs, = capture('kubectl', 'logs', '-n', spec[:ns],
+                        "-l", "spark-role=driver,sparkoperator.k8s.io/app-name=#{name}",
+                        '--tail=200', '--all-containers=true')
+        puts logs unless logs.to_s.strip.empty?
+        state, = capture('kubectl', 'get', 'sparkapplication', name, '-n', spec[:ns],
+                          '-o', 'jsonpath={.status.applicationState.state}')
+        unless finished
+          abort "\e[31m#{tier}: la SparkApplication termino en estado #{state.to_s.strip.inspect}. " \
+                "Logs arriba, o: rake cluster:diagnose[#{name}]\e[0m"
+        end
+        ok_msg("#{tier}: completado (estado #{state.to_s.strip})")
+      end
+    end
+
+    puts
+    ok_msg('Medallion ejecutada. Comprueba las filas con: rake lakehouse:rows')
+  end
+end
+
 namespace :lakehouse do
   desc 'Prove the Iceberg lakehouse adapter in ONE pod: Polaris catalog -> MinIO -> Parquet'
   task :probe do
@@ -1392,19 +1784,320 @@ namespace :lakehouse do
       abort "\e[31mPROBE: no termino en 12 min. Logs: kubectl logs -n platform job/iceberg-adapter-probe\e[0m"
     end
   end
+
+  desc 'Count the rows the medallion left in the Iceberg lakehouse (args: tiers=bronze,silver,gold)'
+  task :rows, [:tiers] do |_t, args|
+    banner 'LAKEHOUSE ROWS'
+    script = File.join('infra', 'diagnostics', 'lakehouse_rows_probe.py')
+    job_file = File.join('infra', 'diagnostics', 'lakehouse-rows-probe.job.yaml')
+    abort "\e[31mMissing #{script}\e[0m" unless File.exist?(script)
+    abort "\e[31mMissing #{job_file}\e[0m" unless File.exist?(job_file)
+
+    _, api_ok = capture('kubectl', 'cluster-info')
+    unless api_ok
+      abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m"
+    end
+    up, = capture('kubectl', 'get', 'pods', '-n', 'platform',
+                  '-o', 'jsonpath={.items[*].metadata.name}')
+    %w[minio polaris].each do |component|
+      next if up.to_s.match?(/\A#{component}-\d/) || up.to_s.match?(/#{component}-[a-z0-9]+-/)
+
+      abort "\e[31m#{component} is not running in namespace platform.\e[0m\n" \
+            "\e[33mDeploy it first: rake cluster:up[batch]\e[0m"
+    end
+
+    tiers = args[:tiers].to_s
+    tiers = 'bronze,silver,gold' if tiers.strip.empty?
+
+    run! 'kubectl', 'delete', 'job', 'lakehouse-rows-probe', '-n', 'platform',
+         '--ignore-not-found'
+    run! 'kubectl', 'delete', 'configmap', 'lakehouse-rows-probe', '-n', 'platform',
+         '--ignore-not-found'
+    run! 'kubectl', 'create', 'configmap', 'lakehouse-rows-probe', '-n', 'platform',
+         "--from-file=lakehouse_rows_probe.py=#{script}"
+
+    # The tiers that have to have rows are part of the Job spec, so the
+    # manifest is submitted with the value already in it (patching a Job after
+    # its pod is running would change nothing).
+    manifest = File.read(job_file).sub('value: bronze,silver,gold', "value: #{tiers}")
+    applied, apply_ok = capture('kubectl', 'apply', '-f', '-', stdin: manifest)
+    abort "\e[31mno se pudo crear el Job del probe: #{applied}\e[0m" unless apply_ok
+
+    info_msg("contando filas (tiers: #{tiers})...")
+
+    deadline = Time.now + (8 * 60)
+    phase = ''
+    loop do
+      complete, = capture('kubectl', 'get', 'job', 'lakehouse-rows-probe', '-n', 'platform',
+                          '-o', 'jsonpath={.status.conditions[?(@.type=="Complete")].status}')
+      if complete.to_s.strip == 'True'
+        phase = 'complete'
+        break
+      end
+      failed, = capture('kubectl', 'get', 'job', 'lakehouse-rows-probe', '-n', 'platform',
+                        '-o', 'jsonpath={.status.failed}')
+      if failed.to_s.strip.to_i.positive?
+        phase = 'failed'
+        break
+      end
+      if Time.now > deadline
+        phase = 'timeout'
+        break
+      end
+      sleep 10
+    end
+
+    puts
+    logs, = capture('kubectl', 'logs', '-n', 'platform', 'job/lakehouse-rows-probe')
+    puts logs unless logs.to_s.strip.empty?
+    puts
+
+    case phase
+    when 'complete'
+      if logs.to_s.include?('RESULTADO: OK')
+        ok_msg('LAS FILAS ESTAN EN EL LAKEHOUSE')
+      else
+        abort "\e[31mPROBE FALLIDO: el Job termino sin 'RESULTADO: OK'.\e[0m"
+      end
+    when 'failed'
+      abort "\e[31mPROBE: el Job fallo (exit != 0). Lee el log de arriba.\e[0m"
+    else
+      abort "\e[31mPROBE: no termino en 8 min. Logs: kubectl logs -n platform job/lakehouse-rows-probe\e[0m"
+    end
+  end
 end
 
-desc 'RF-24 end-to-end demo on the cluster: code verification -> demo profile -> events -> Flink -> Trino'
+# ------------------------------------------------------------------------------
+# RF-24: the demo as a SEQUENCE of exclusive phases
+# ------------------------------------------------------------------------------
+#
+# RC-02 gives the box 8 GB and asks for EXCLUSIVE startup profiles; AD-4 says
+# "Demo por perfiles". The demo profile (all eight subsystems at once) needs
+# ~8000 MiB of container limits and does not fit on a 6 GiB host: the
+# kube-scheduler ended up losing its lease 107 times. So the demo is a
+# sequence, and each phase declares what it brings up AND what the next phase
+# cannot afford.
+#
+# What crosses the phases is the LAKEHOUSE (MinIO + Iceberg), not a pod: that
+# is why the batch tier and the stream tier can run in different phases and
+# still be queried together at the end (RF-11).
+#
+#   phase      up                                  down (for the next phase)
+#   platform   postgres, minio, polaris, marquez   -
+#   batch      + spark operator, medallion runs    -
+#   stream     kafka, flink operator, flink job    postgres, spark operator,
+#                                                   marquez, lineage webhook
+#   serving    trino                                flink job, flink operator
+#   fabric     marquez + lineage webhook back up    trino
+#   ops        prometheus, grafana (+ kafka up)     flink operator
+#   governance kyverno controller + policies        everything else
+# ------------------------------------------------------------------------------
+DEMO_PHASES = [
+  {
+    'name' => 'platform',
+    'profile' => 'platform',
+    'charts' => %w[s1-ingestion s2-lakehouse s7-fabric],
+    'wait' => [['platform', 'deploy/postgres-oltp'], ['platform', 'deploy/minio'],
+               ['platform', 'deploy/polaris'], ['platform', 'deploy/marquez'],
+               ['platform', 'deploy/lineage-alert-service']]
+  },
+  {
+    'name' => 'batch',
+    'profile' => 'batch',
+    'charts' => %w[s1-ingestion s2-lakehouse s3-batch],
+    'wait' => [['platform', 'deploy/spark-operator']]
+  },
+  {
+    'name' => 'stream',
+    'profile' => 'stream',
+    # s2 is NOT upgraded here: the lakehouse release is already installed and
+    # serving, and its bootstrap hook needs 6-11 minutes on this box (the
+    # whole cluster is swapping while it runs). Only s4 comes up. The speed
+    # layer writes into the lakehouse that is already there.
+    'charts' => %w[s4-stream],
+    'down' => [['scale', 'platform', 'deploy/postgres-oltp', 0],
+               ['scale', 'platform', 'deploy/spark-operator', 0],
+               ['scale', 'platform', 'deploy/marquez', 0],
+               ['scale', 'platform', 'deploy/lineage-alert-service', 0],
+               ['rmimage', 'docker.io/poc/spark-medallion:0.1.0'],
+               # The hook Jobs of an upgrade that timed out stay behind, and
+               # Helm then refuses to touch them ("invalid ownership
+               # metadata"): they belong to no release.
+               ['delete', 'job', 'polaris-catalog-bootstrap', 'platform'],
+               ['delete', 'job', 'polaris-catalog-registration', 'platform'],
+               ['delete', 'job', 'minio-bucket-init', 'platform'],
+               ['delete', 'job', 'kafka-topic-creator', 'platform']],
+    'wait' => [['platform', 'statefulset/kafka']]
+  },
+  {
+    'name' => 'serving',
+    'profile' => 'serving',
+    'charts' => %w[s5-serving],
+    'down' => [['delete', 'flinkdeployment', 'flink-orders-stream', 'sales'],
+               ['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
+               ['scale', 'platform', 'deploy/kafka', 0]],
+    'wait' => [['platform', 'deploy/trino']]
+  },
+  {
+    'name' => 'fabric',
+    'profile' => 'platform',
+    'charts' => %w[s7-fabric],
+    'down' => [['scale', 'platform', 'deploy/trino', 0]],
+    'wait' => [['platform', 'deploy/marquez'], ['platform', 'deploy/lineage-alert-service']]
+  },
+  {
+    'name' => 'ops',
+    'profile' => 'demo',
+    'charts' => %w[s8-ops],
+    'down' => [['scale', 'platform', 'deploy/flink-kubernetes-operator', 0]],
+    'wait' => [['platform', 'deploy/s8-ops-prometheus'], ['platform', 'deploy/s8-ops-grafana']]
+  },
+  {
+    'name' => 'governance',
+    'profile' => 'demo',
+    'charts' => %w[s6-mesh],
+    'down' => [['scale', 'platform', 'deploy/kafka', 0]],
+    # The s6-mesh chart only APPLIES the ClusterPolicies; the controller and
+    # its CRDs come from the upstream chart, which the cluster:create task
+    # already registers (https://kyverno.github.io/kyverno/).
+    'extra' => [%w[helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace]]
+  }
+].freeze
+
+
+# Installs the given charts of a profile. Returns the number of failures.
+def helm_upgrade_charts(profile, charts)
+  failures = 0
+  charts.each do |chart|
+    unless File.directory?(File.join('infra', 'helm', chart))
+      err_msg("MISSING: infra/helm/#{chart} not found")
+      failures += 1
+      next
+    end
+    values = extract_profile_values(profile, chart)
+    if values == :error
+      err_msg("could not extract 'subsystems.#{chart}' from #{profile}.yaml")
+      failures += 1
+      next
+    end
+    if values.nil?
+      warn_msg("no '#{chart}' section in #{profile}; installing with chart defaults")
+    end
+    info_msg("deploying Helm chart: #{chart}")
+    if helm_upgrade(chart, values&.path)
+      ok_msg(chart)
+    else
+      err_msg(chart)
+      failures += 1
+    end
+    values&.unlink
+  end
+  failures
+end
+
+# Applies one "down" entry of a phase: scale a workload to zero replicas, or
+# delete a custom resource. Scaling to zero keeps the PVCs, which is what
+# the lakehouse and the lineage database need.
+def apply_down(entry)
+  case entry[0]
+  when 'scale'
+    _kind, ns, target, replicas = entry
+    _, ok = capture('kubectl', 'scale', target, '-n', ns, "--replicas=#{replicas}")
+    if ok
+      info_msg("down: #{target} -> #{replicas} replicas")
+    else
+      warn_msg("down: could not scale #{target} (it may not be installed)")
+    end
+  when 'delete'
+    _kind, kind, name, ns = entry
+    _, ok = capture('kubectl', 'delete', kind, name, '-n', ns, '--ignore-not-found')
+    ok ? info_msg("down: #{kind}/#{name} deleted") : warn_msg("down: could not delete #{kind}/#{name}")
+  when 'rmimage'
+    # An image that this phase does not use costs a gigabyte of page cache
+    # per node on a 6 GiB box, and that cache is what makes the API server
+    # time out. The Spark image is only needed by the batch phase.
+    _kind, image = entry
+    probe = podman_probe
+    probe[:containers].each do |node|
+      [image, image.sub('docker.io/', 'localhost/')].each do |ref|
+        capture('podman', '--connection', node[:connection], 'exec', node[:name],
+                'ctr', '-n', 'k8s.io', 'images', 'rm', ref)
+      end
+    end
+    info_msg("down: removed #{image} from every node")
+  else
+    warn_msg("down: unknown action #{entry[0]}")
+  end
+end
+
+# Waits for a workload to be ready. `target` is "deploy/<name>" or
+# "statefulset/<name>".
+def wait_for_workload(ns, target, timeout_s = 300)
+  out, ok = capture('kubectl', 'rollout', 'status', target, '-n', ns, "--timeout=#{timeout_s}s")
+  if ok
+    ok_msg("#{ns}/#{target} ready")
+  else
+    warn_msg("#{ns}/#{target} not ready: #{out.to_s.lines.last.to_s.strip}")
+  end
+  ok
+end
+
+namespace :demo do
+  desc 'RF-24 end-to-end demo as a sequence of exclusive phases (args: phases=platform,batch,...; default: all)'
+  task :phases, [:phases] do |_t, args|
+    banner 'DEMO PHASES'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    wanted = args[:phases].to_s.split(',').map(&:strip).reject(&:empty?)
+    wanted = DEMO_PHASES.map { |p| p['name'] } if wanted.empty?
+    unknown = wanted - DEMO_PHASES.map { |p| p['name'] }
+    abort "\e[31mUnknown phase(s): #{unknown.join(', ')}\e[0m" if unknown.any?
+
+    DEMO_PHASES.each do |phase|
+      next unless wanted.include?(phase['name'])
+
+      puts
+      banner "PHASE #{phase['name'].upcase}"
+      charts = phase['charts'] || PROFILE_CHARTS.fetch(phase['profile'])
+
+      # What the previous phase leaves behind goes DOWN FIRST: on a 6 GiB box
+      # the room for the next phase has to be there before its hooks run,
+      # and the Helm hooks need 6-11 minutes each while the cluster is
+      # swapping.
+      (phase['down'] || []).each { |entry| apply_down(entry) }
+
+      failures = helm_upgrade_charts(phase['profile'], charts)
+      abort "\e[31mPhase #{phase['name']}: #{failures} chart(s) failed to deploy.\e[0m" if failures.positive?
+
+      (phase['extra'] || []).each do |command|
+        info_msg("running: #{command.join(' ')}")
+        out, ok = capture(*command)
+        puts out unless out.to_s.strip.empty?
+        abort "\e[31mPhase #{phase['name']}: '#{command.join(' ')}' failed\e[0m" unless ok
+      end
+
+      (phase['wait'] || []).each { |ns, target| wait_for_workload(ns, target) }
+    end
+
+    puts
+    ok_msg('All the requested phases are up. Next: the checks of each phase')
+  end
+end
+
+desc 'RF-24 end-to-end demo on the cluster: code verification -> phases -> medallion -> events -> Trino'
 task :demo do
   puts '==> Verifying code (the only local step)'
   %w[governance:validate lint typecheck test].each { |t| Rake::Task[t].invoke }
 
-  puts '==> Deploying the demo profile (all 8 subsystems) to the local kind cluster'
-  Rake::Task['cluster:up'].invoke('demo')
+  puts '==> Deploying the phases (platform -> batch -> stream -> serving)'
+  Rake::Task['demo:phases'].invoke('platform,batch,stream,serving')
 
-  puts '==> Waiting for the Flink speed-layer jobs to be RUNNING'
-  sh 'kubectl wait --for=condition=ready pod -l app=flink-orders-stream -n sales --timeout=300s' rescue warn_msg('flink orders pod not ready yet')
-  sh 'kubectl get flinkdeployments -A'
+  puts '==> Running the medallion now (bronze -> silver -> gold)'
+  Rake::Task['batch:run'].invoke
+
+  puts '==> Counting the rows the medallion left in the lakehouse'
+  Rake::Task['lakehouse:rows'].invoke
 
   puts '==> Publishing events into Kafka for 60 s'
   Rake::Task['stream:produce'].invoke
@@ -1416,7 +2109,7 @@ task :demo do
   run! 'kubectl', 'run', 'trino-cli', '--rm', '-i', '--restart=Never', '--image=' + trino_image,
        '--command', '--', 'trino', '--server', 'http://trino.platform.svc.cluster.local:8080',
        '--execute',
-       'SELECT status, count(*) AS windows, sum(window_orders) AS orders, sum(window_revenue) AS revenue FROM stream.sales.orders_windowed GROUP BY status ORDER BY status'
+       'SELECT status, count(*) AS windows, sum(window_orders) AS orders, sum(window_revenue) AS revenue FROM iceberg.sales.orders_windowed GROUP BY status ORDER BY status'
 
   puts '==> Querying the unified serving view (RF-11)'
   run! 'kubectl', 'run', 'trino-unified', '--rm', '-i', '--restart=Never', '--image=' + trino_image,

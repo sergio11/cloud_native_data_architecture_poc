@@ -102,7 +102,11 @@ ingestionRunner:
     # MinIO data files) through the Iceberg adapter; "sqlite" keeps them in a
     # local file. The same four variables name the same things as in s3-batch.
     LAKEHOUSE_BACKEND: "iceberg"
-    ICEBERG_CATALOG_URL: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
+    # The name the code reads (src/adapters/storage/iceberg_catalog.py:39).
+    # It used to be ICEBERG_CATALOG_URL here and in s3-batch, and nothing
+    # read that spelling: the medallion died in the pod with
+    # "ICEBERG_CATALOG_URI is required for the Iceberg lakehouse backend".
+    ICEBERG_CATALOG_URI: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
     ICEBERG_CATALOG_NAME: "polaris"
     ICEBERG_WAREHOUSE: "polaris"
     POLARIS_OAUTH2_CREDENTIAL: "poc-admin:poc-admin-secret"
@@ -110,6 +114,8 @@ ingestionRunner:
     MINIO_ENDPOINT: "http://minio.platform.svc.cluster.local:9000"
     MINIO_ACCESS_KEY: "minioadmin"
     MINIO_SECRET_KEY: "minioadmin"
+    # Iceberg's S3 client needs a region even against MinIO.
+    MINIO_REGION: "us-east-1"
     # Trino, for the serving adapter (src/adapters/serving/sql_serving.py:119-122).
     TRINO_HOST: "trino.platform.svc.cluster.local"
     TRINO_PORT: "8080"

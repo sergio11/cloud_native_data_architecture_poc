@@ -31,7 +31,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bronze Layer Raw Ingestion Pipeline (Hexagonal)")
     parser.add_argument(
         "--entity",
-        default="orders",
+        # The Spark Operator (v1beta2) cannot pass arguments to the main
+        # file, so the entity travels in the environment (the chart sets
+        # MEDALLION_ENTITY). The default is "all": the Bronze tier is the
+        # input of Silver, and a Bronze with only orders leaves Silver and
+        # Gold without customers.
+        default=os.environ.get("MEDALLION_ENTITY", "all"),
         choices=["orders", "customers", "all"],
         help="Operational entity to ingest into Bronze tier",
     )

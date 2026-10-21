@@ -23,6 +23,10 @@ metadata:
     helm.sh/hook: post-install,pre-upgrade
     helm.sh/hook-weight: "-5"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    # The default hook timeout is 5 minutes, and on a 6 GiB box the broker
+    # needs longer to accept the topic requests while the cluster is swapping.
+    helm.sh/hook-timeout: 20m
+
 spec:
   backoffLimit: 10
   # The initContainer already gives up after 300s, so the Job fails rather than

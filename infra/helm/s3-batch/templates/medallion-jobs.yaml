@@ -1,23 +1,51 @@
-{{- if .Values.jobs.bronzeIngestion.enabled }}
+{{- /*
+One body for the three medallion tiers. The three blocks used to be three
+near-identical copies of the same spec, and they drifted: the executor lost
+its coreLimit while the driver kept it. Now the tier only says which script
+runs, which tier it is, and whether it needs PostgreSQL.
+
+The cron is the scheduled path (RF-08 asks for a programmed AND a manual
+recomputation); `rake batch:run` submits the SAME spec on demand by reading
+it back from this object, so there is one source of truth for what a tier
+runs.
+
+Parameters:
+  root     the chart context (for .Values)
+  tier     bronze | silver | gold
+  key      the key under .Values.jobs
+  name     the object name
+  script   the file under pipelines/medallion/
+  postgres true when the tier reads the OLTP source
+
+MEMORY: the container limit is memory + memoryOverhead, NOT memory. The
+operator maps `memory` to spark.driver.memory (the JVM heap) and adds the
+overhead to reach the pod limit; for a Kubernetes non-JVM (Python) job Spark
+defaults that factor to 0.40, so leaving it implicit made the budget
+unpredictable. It is set explicitly, or the heap is the whole container and
+the first allocation gets the driver OOM-killed.
+*/ -}}
+{{- define "s3-batch.medallion.job" -}}
+{{- $root := .root -}}
+{{- $job := index $root.Values.jobs .key -}}
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: ScheduledSparkApplication
 metadata:
-  name: spark-bronze-ingestion
-  namespace: {{ .Values.global.computeNamespace | default "sales" }}
+  name: {{ .name }}
+  namespace: {{ $root.Values.global.computeNamespace | default "sales" }}
   labels:
-    app: spark-bronze-ingestion
-    medallion: bronze
-    {{- include "s3-batch.labels" . | nindent 4 }}
+    app: {{ .name }}
+    medallion: {{ .tier }}
+    {{- include "s3-batch.labels" $root | nindent 4 }}
 spec:
-  schedule: {{ .Values.jobs.bronzeIngestion.schedule | quote }}
+  schedule: {{ $job.schedule | quote }}
   concurrencyPolicy: Forbid
   template:
     type: Python
     pythonVersion: "3"
     mode: cluster
-    image: "{{ .Values.sparkDefaults.image.repository }}:{{ .Values.sparkDefaults.image.tag }}"
-    imagePullPolicy: {{ .Values.sparkDefaults.image.pullPolicy }}
-    mainApplicationFile: "local:///opt/spark/work-dir/pipelines/medallion/bronze_ingestion.py"
+    image: "{{ $root.Values.sparkDefaults.image.repository }}:{{ $root.Values.sparkDefaults.image.tag }}"
+    imagePullPolicy: {{ $root.Values.sparkDefaults.image.pullPolicy }}
+    mainApplicationFile: "local:///opt/spark/work-dir/pipelines/medallion/{{ .script }}"
     sparkVersion: "3.5.1"
     restartPolicy:
       type: OnFailure
@@ -25,192 +53,72 @@ spec:
       onFailureRetryInterval: 10
       onSubmissionFailureRetries: 3
     driver:
-      cores: {{ .Values.sparkDefaults.driver.cores }}
-      coreLimit: {{ .Values.sparkDefaults.driver.coreLimit | quote }}
-      memory: {{ .Values.sparkDefaults.driver.memory | quote }}
+      cores: {{ $root.Values.sparkDefaults.driver.cores }}
+      coreLimit: {{ $root.Values.sparkDefaults.driver.coreLimit | quote }}
+      memory: {{ $root.Values.sparkDefaults.driver.memory | quote }}
+      memoryOverhead: {{ $root.Values.sparkDefaults.driver.memoryOverhead | quote }}
       labels:
         version: "3.5.1"
         role: driver
-      serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
-      env:
+      serviceAccount: {{ $root.Values.sparkDefaults.driver.serviceAccount }}
+      # envVars, NOT env. The v1beta2 operator (1.6.2) does not translate the
+      # `env` LIST of the CRD into anything: it accepts it, the API server
+      # keeps it, and the driver pod is created by the spark-submit client
+      # WITHOUT it. The medallion then ran with no ICEBERG_* variables at all,
+      # fell back to the SQLite adapter and reported "no records found" while
+      # the lakehouse had the rows. `envVars` is the map the operator turns
+      # into spark.kubernetes.driverEnv.<name> options, which is how the
+      # variables reach the driver container.
+      envVars:
         # Names must match what the code reads (see s1-ingestion/values.yaml env
         # for the full note). PG*/MARQUEZ_URL are the ones the Python source
         # actually resolves; JDBC_*/OPENLINEAGE_URL were read by nothing.
-        - name: PGHOST
-          value: {{ .Values.sparkDefaults.database.host | quote }}
-        - name: PGPORT
-          value: {{ .Values.sparkDefaults.database.port | quote }}
-        - name: PGDATABASE
-          value: {{ .Values.sparkDefaults.database.name | quote }}
-        - name: PGUSER
-          value: {{ .Values.sparkDefaults.database.jdbcUser | quote }}
-        - name: PGPASSWORD
-          value: {{ .Values.sparkDefaults.database.jdbcPassword | quote }}
-        - name: MARQUEZ_URL
-          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
-        - name: ICEBERG_CATALOG_URL
-          value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
-        - name: ICEBERG_CATALOG_NAME
-          value: {{ .Values.sparkDefaults.iceberg.catalogName | quote }}
-        - name: ICEBERG_WAREHOUSE
-          value: {{ .Values.sparkDefaults.iceberg.warehouse | quote }}
-        - name: MINIO_ENDPOINT
-          value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
-        - name: MINIO_ACCESS_KEY
-          value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
-        - name: MINIO_SECRET_KEY
-          value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
-        - name: POLARIS_OAUTH2_CREDENTIAL
-          value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
-        - name: POLARIS_OAUTH2_SCOPE
-          value: {{ .Values.sparkDefaults.iceberg.oauth2Scope | quote }}
+{{- if .postgres }}
+        PGHOST: {{ $root.Values.sparkDefaults.database.host | quote }}
+        PGPORT: {{ $root.Values.sparkDefaults.database.port | quote }}
+        PGDATABASE: {{ $root.Values.sparkDefaults.database.name | quote }}
+        PGUSER: {{ $root.Values.sparkDefaults.database.jdbcUser | quote }}
+        PGPASSWORD: {{ $root.Values.sparkDefaults.database.jdbcPassword | quote }}
+{{- end }}
+        MARQUEZ_URL: {{ $root.Values.sparkDefaults.openLineage.url | quote }}
+        ICEBERG_CATALOG_URI: {{ $root.Values.sparkDefaults.iceberg.catalogUrl | quote }}
+        ICEBERG_CATALOG_NAME: {{ $root.Values.sparkDefaults.iceberg.catalogName | quote }}
+        ICEBERG_WAREHOUSE: {{ $root.Values.sparkDefaults.iceberg.warehouse | quote }}
+        MINIO_ENDPOINT: {{ $root.Values.sparkDefaults.iceberg.s3Endpoint | quote }}
+        MINIO_ACCESS_KEY: {{ $root.Values.sparkDefaults.iceberg.accessKey | quote }}
+        MINIO_SECRET_KEY: {{ $root.Values.sparkDefaults.iceberg.secretKey | quote }}
+        MINIO_REGION: {{ $root.Values.sparkDefaults.iceberg.s3Region | quote }}
+        POLARIS_OAUTH2_CREDENTIAL: {{ $root.Values.sparkDefaults.iceberg.oauth2Credential | quote }}
+        POLARIS_OAUTH2_SCOPE: {{ $root.Values.sparkDefaults.iceberg.oauth2Scope | quote }}
         # Which implementation of the lakehouse port the medallion persists
         # through. "iceberg" writes the tier tables to the real lakehouse
         # (Polaris catalog + MinIO data files); "sqlite" keeps them in the local
         # file the unit tests use.
-        - name: LAKEHOUSE_BACKEND
-          value: {{ .Values.sparkDefaults.iceberg.lakehouseBackend | quote }}
+        LAKEHOUSE_BACKEND: {{ $root.Values.sparkDefaults.iceberg.lakehouseBackend | quote }}
+        # What the tier processes. The Spark Operator (v1beta2) has no way to
+        # pass ARGUMENTS to the main file - `args` is not in the CRD schema,
+        # so the application would fail to apply - so the entity travels in
+        # the environment. Without it the Silver tier only cleansed "orders"
+        # and the Gold tier found no customers to publish.
+        MEDALLION_ENTITY: {{ $root.Values.sparkDefaults.entity | quote }}
     executor:
-      cores: {{ .Values.sparkDefaults.executor.cores }}
-      instances: {{ .Values.sparkDefaults.executor.instances }}
-      memory: {{ .Values.sparkDefaults.executor.memory | quote }}
+      cores: {{ $root.Values.sparkDefaults.executor.cores }}
+      coreLimit: {{ $root.Values.sparkDefaults.executor.coreLimit | quote }}
+      instances: {{ $root.Values.sparkDefaults.executor.instances }}
+      memory: {{ $root.Values.sparkDefaults.executor.memory | quote }}
+      memoryOverhead: {{ $root.Values.sparkDefaults.executor.memoryOverhead | quote }}
       labels:
         version: "3.5.1"
         role: executor
-{{- end }}
+{{- end -}}
+{{- if .Values.jobs.bronzeIngestion.enabled }}
+{{ include "s3-batch.medallion.job" (dict "root" . "tier" "bronze" "key" "bronzeIngestion" "name" "spark-bronze-ingestion" "script" "bronze_ingestion.py" "postgres" true) }}
 ---
+{{- end }}
 {{- if .Values.jobs.silverTransform.enabled }}
-apiVersion: sparkoperator.k8s.io/v1beta2
-kind: ScheduledSparkApplication
-metadata:
-  name: spark-silver-transform
-  namespace: {{ .Values.global.computeNamespace | default "sales" }}
-  labels:
-    app: spark-silver-transform
-    medallion: silver
-    {{- include "s3-batch.labels" . | nindent 4 }}
-spec:
-  schedule: {{ .Values.jobs.silverTransform.schedule | quote }}
-  concurrencyPolicy: Forbid
-  template:
-    type: Python
-    pythonVersion: "3"
-    mode: cluster
-    image: "{{ .Values.sparkDefaults.image.repository }}:{{ .Values.sparkDefaults.image.tag }}"
-    imagePullPolicy: {{ .Values.sparkDefaults.image.pullPolicy }}
-    mainApplicationFile: "local:///opt/spark/work-dir/pipelines/medallion/silver_transform.py"
-    sparkVersion: "3.5.1"
-    restartPolicy:
-      type: OnFailure
-      onFailureRetries: 2
-      onFailureRetryInterval: 10
-      onSubmissionFailureRetries: 3
-    driver:
-      cores: {{ .Values.sparkDefaults.driver.cores }}
-      coreLimit: {{ .Values.sparkDefaults.driver.coreLimit | quote }}
-      memory: {{ .Values.sparkDefaults.driver.memory | quote }}
-      labels:
-        version: "3.5.1"
-        role: driver
-      serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
-      env:
-        - name: MARQUEZ_URL
-          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
-        - name: ICEBERG_CATALOG_URL
-          value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
-        - name: ICEBERG_CATALOG_NAME
-          value: {{ .Values.sparkDefaults.iceberg.catalogName | quote }}
-        - name: ICEBERG_WAREHOUSE
-          value: {{ .Values.sparkDefaults.iceberg.warehouse | quote }}
-        - name: MINIO_ENDPOINT
-          value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
-        - name: MINIO_ACCESS_KEY
-          value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
-        - name: MINIO_SECRET_KEY
-          value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
-        - name: POLARIS_OAUTH2_CREDENTIAL
-          value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
-        - name: POLARIS_OAUTH2_SCOPE
-          value: {{ .Values.sparkDefaults.iceberg.oauth2Scope | quote }}
-        # Which implementation of the lakehouse port the medallion persists
-        # through. "iceberg" writes the tier tables to the real lakehouse
-        # (Polaris catalog + MinIO data files); "sqlite" keeps them in the local
-        # file the unit tests use.
-        - name: LAKEHOUSE_BACKEND
-          value: {{ .Values.sparkDefaults.iceberg.lakehouseBackend | quote }}
-    executor:
-      cores: {{ .Values.sparkDefaults.executor.cores }}
-      instances: {{ .Values.sparkDefaults.executor.instances }}
-      memory: {{ .Values.sparkDefaults.executor.memory | quote }}
-      labels:
-        version: "3.5.1"
-        role: executor
-{{- end }}
+{{ include "s3-batch.medallion.job" (dict "root" . "tier" "silver" "key" "silverTransform" "name" "spark-silver-transform" "script" "silver_transform.py" "postgres" false) }}
 ---
+{{- end }}
 {{- if .Values.jobs.goldAggregation.enabled }}
-apiVersion: sparkoperator.k8s.io/v1beta2
-kind: ScheduledSparkApplication
-metadata:
-  name: spark-gold-aggregation
-  namespace: {{ .Values.global.computeNamespace | default "sales" }}
-  labels:
-    app: spark-gold-aggregation
-    medallion: gold
-    {{- include "s3-batch.labels" . | nindent 4 }}
-spec:
-  schedule: {{ .Values.jobs.goldAggregation.schedule | quote }}
-  concurrencyPolicy: Forbid
-  template:
-    type: Python
-    pythonVersion: "3"
-    mode: cluster
-    image: "{{ .Values.sparkDefaults.image.repository }}:{{ .Values.sparkDefaults.image.tag }}"
-    imagePullPolicy: {{ .Values.sparkDefaults.image.pullPolicy }}
-    mainApplicationFile: "local:///opt/spark/work-dir/pipelines/medallion/gold_aggregation.py"
-    sparkVersion: "3.5.1"
-    restartPolicy:
-      type: OnFailure
-      onFailureRetries: 2
-      onFailureRetryInterval: 10
-      onSubmissionFailureRetries: 3
-    driver:
-      cores: {{ .Values.sparkDefaults.driver.cores }}
-      coreLimit: {{ .Values.sparkDefaults.driver.coreLimit | quote }}
-      memory: {{ .Values.sparkDefaults.driver.memory | quote }}
-      labels:
-        version: "3.5.1"
-        role: driver
-      serviceAccount: {{ .Values.sparkDefaults.driver.serviceAccount }}
-      env:
-        - name: MARQUEZ_URL
-          value: {{ .Values.sparkDefaults.openLineage.url | quote }}
-        - name: ICEBERG_CATALOG_URL
-          value: {{ .Values.sparkDefaults.iceberg.catalogUrl | quote }}
-        - name: ICEBERG_CATALOG_NAME
-          value: {{ .Values.sparkDefaults.iceberg.catalogName | quote }}
-        - name: ICEBERG_WAREHOUSE
-          value: {{ .Values.sparkDefaults.iceberg.warehouse | quote }}
-        - name: MINIO_ENDPOINT
-          value: {{ .Values.sparkDefaults.iceberg.s3Endpoint | quote }}
-        - name: MINIO_ACCESS_KEY
-          value: {{ .Values.sparkDefaults.iceberg.accessKey | quote }}
-        - name: MINIO_SECRET_KEY
-          value: {{ .Values.sparkDefaults.iceberg.secretKey | quote }}
-        - name: POLARIS_OAUTH2_CREDENTIAL
-          value: {{ .Values.sparkDefaults.iceberg.oauth2Credential | quote }}
-        - name: POLARIS_OAUTH2_SCOPE
-          value: {{ .Values.sparkDefaults.iceberg.oauth2Scope | quote }}
-        # Which implementation of the lakehouse port the medallion persists
-        # through. "iceberg" writes the tier tables to the real lakehouse
-        # (Polaris catalog + MinIO data files); "sqlite" keeps them in the local
-        # file the unit tests use.
-        - name: LAKEHOUSE_BACKEND
-          value: {{ .Values.sparkDefaults.iceberg.lakehouseBackend | quote }}
-    executor:
-      cores: {{ .Values.sparkDefaults.executor.cores }}
-      instances: {{ .Values.sparkDefaults.executor.instances }}
-      memory: {{ .Values.sparkDefaults.executor.memory | quote }}
-      labels:
-        version: "3.5.1"
-        role: executor
+{{ include "s3-batch.medallion.job" (dict "root" . "tier" "gold" "key" "goldAggregation" "name" "spark-gold-aggregation" "script" "gold_aggregation.py" "postgres" false) }}
 {{- end }}

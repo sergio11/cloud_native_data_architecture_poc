@@ -15,6 +15,14 @@
 # needs ~1.8 GB. RC-02's own mitigation (ADR-004) applies: run the heavy
 # engines (Spark batch, Flink stream) SEQUENTIALLY. targetRamMb below is the
 # real figure, not an aspirational one.
+#
+# THIS PROFILE IS THE COMPLETE TOPOLOGY, NOT A RUNNABLE ONE. On the 6 GiB
+# development box it does not fit and the kube-scheduler ends up losing its
+# lease. The runnable end-to-end demo is the SEQUENCE of phases
+# (`rake demo:phases`): platform -> batch -> stream -> serving -> fabric ->
+# ops -> governance, each one on its own, which is what RC-02 and AD-4
+# ("Demo por perfiles") ask for. Keep this file as the description of the
+# whole platform.
 # ==============================================================================
 profile:
   name: "demo"
@@ -83,11 +91,13 @@ subsystems:
         cores: 1
         coreLimit: "500m"
         memory: "512m"
+        memoryOverhead: "384m"
       executor:
         cores: 1
         coreLimit: "500m"
         instances: 1
-        memory: "640m"
+        memory: "512m"
+        memoryOverhead: "384m"
 
   s4-stream:
     kafka:

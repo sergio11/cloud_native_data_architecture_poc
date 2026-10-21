@@ -39,11 +39,21 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 > **What "VERIFIED" means here.** A requirement is VERIFIED only if an automated
 > test or a real cluster run proves it. Note carefully that a passing test suite
 > proves **code correctness** (the aggregation, the contracts, the gates, the
-> lineage), not that the corresponding Kubernetes workload has ever run: no
-> cluster has executed this platform in the authoring environment. RF-01..RF-08
-> and RF-15..RF-21 are covered by unit/integration tests over the hexagonal core
-> (`src/`), which uses in-memory/temporary SQLite as a **test double** for
-> Iceberg, Trino and Kafka — that is a test fixture, not a runtime claim.
+> lineage), not that the corresponding Kubernetes workload has ever run: a
+> test over the hexagonal core (`src/`) says nothing about the pods.
+>
+> **What has run on the cluster** (kind + Podman, 6 GiB / 4 CPU, the
+> development box): the medallion on the Spark Operator - bronze through the
+> `s1` CronJob, silver and gold as `ScheduledSparkApplication` on the
+> operator - writing real rows into the Iceberg lakehouse (Polaris + MinIO),
+> with the quality gates evaluating the contract thresholds; the speed layer
+> on Flink (Kafka -> 4 s tumbling window -> Iceberg -> Parquet in MinIO),
+> read back by Trino through Polaris; the serving layer (Trino) over the
+> single `iceberg` catalog; the lineage from the core into Marquez; the
+> observability tier (Prometheus + Grafana) and the admission control
+> (Kyverno). The demo is a **sequence of phases**
+> (`rake demo:phases`), not the eight subsystems at once, because the box
+> does not hold them.
 >
 > The K8s
 > charts render real workloads: `s1-ingestion` CronJob runs
@@ -74,6 +84,93 @@ The **Modern Data Architecture Proof of Concept (POC)** is a reference implement
 > `s3.region` is set to `us-east-1` (required by the Trino native S3 client even
 > for MinIO). JVM heap is 896 M (was 1024 M — dangerously close to the 1280 Mi
 > container limit with `ExitOnOutOfMemoryError`).
+>
+> **Batch layer (S3) — the medallion on the Spark Operator.**
+> `s3-batch` renders three `ScheduledSparkApplication` (bronze 02:00, silver
+> 03:00, gold 04:00) that run `pipelines/medallion/*.py` inside a Spark driver
+> pod. Five things about it are worth knowing before touching it:
+>
+> - **The medallion code is Spark-free.** `src/` has no `pyspark` import
+>   anywhere: the drivers are plain Python that the core runs, and Spark is
+>   the *deployment mechanism*, not a dependency. The executor pod therefore
+>   has nothing to do, and the lineage that the platform exposes is published
+>   by the core itself (`MarquezLineageAdapter`,
+>   `src/adapters/lineage/marquez_lineage.py`), not by a Spark listener.
+> - **The Spark image is `python:3.11-slim` + the pyspark wheel, not
+>   `apache/spark`.** The official `apache/spark:3.5.1-...-python3-ubuntu`
+>   image is Ubuntu 20.04 with **Python 3.8**, and the core needs 3.11:
+>   `from enum import StrEnum` (`src/domain/contracts.py`) and
+>   `from datetime import UTC` (`src/use_cases/ingest_bronze.py`) are 3.11
+>   imports that fail at *import* time, so the driver died before running a
+>   line of the pipeline. The image is now `python:3.11-slim-bookworm` (Java
+>   17 for the JVM, `pyspark==3.5.1` placed at `/opt/spark`, which is where
+>   the operator looks for `spark-submit`) and it is ~1 GB instead of 2.5 GB.
+> - **`spark-defaults.conf` is NOT mounted, on purpose.** The ConfigMap
+>   existed and nothing referenced it; mounting it as it was written would
+>   have broken every job, because it asked for
+>   `org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions` and
+>   `io.openlineage.spark.agent.OpenLineageSparkListener`, two JARs that are
+>   in neither the official image nor this one. The catalog is opened by
+>   PyIceberg, so Spark never needs a catalog of its own. The template now
+>   renders nothing and says why.
+> - **The container limit is `memory + memoryOverhead`, not `memory`.** The
+>   operator maps `memory` to `spark.driver.memory` (the JVM heap) and adds
+>   the overhead to reach the pod limit; for a Kubernetes *non-JVM* (Python)
+>   job Spark defaults that factor to **0.40**. Both are set explicitly now
+>   (`driver: 512m + 384m`, `executor: 512m + 384m`), because with the heap
+>   filling the whole container the first allocation gets the pod
+>   OOM-killed.
+> - **The image needs an entrypoint that dispatches on `driver`/`executor`.**
+>   The operator starts the pod with an *empty* command and puts `driver` (or
+>   `executor`) as the first argument, expecting the image to dispatch on it
+>   the way the official `apache/spark` image does through
+>   `/opt/entrypoint.sh`. An image without it dies with
+>   `exec: "driver": executable file not found in $PATH`.
+>   `infra/docker/spark-entrypoint.sh` is that entrypoint, and the `driver`
+>   branch is not a plain `spark-submit`: it adds **`--deploy-mode client`**,
+>   because the operator has already created the driver pod. Without the flag
+>   the driver tries to create its own pod and dies with
+>   `pods "spark-...-driver" already exists` (409).
+> - **The environment goes in `envVars`, not `env`.** The v1beta2 operator
+>   (1.6.2) does not translate the `env` LIST of the CRD into anything: the
+>   API server accepts it, the operator ignores it, and the driver pod is
+>   created without it. The medallion then ran with no `ICEBERG_*` variables,
+>   fell back to the **SQLite** adapter and reported "no records found" while
+>   the lakehouse had 105 rows. `driver.envVars` (a map) is what the operator
+>   turns into `spark.kubernetes.driverEnv.<name>` options, and that is how
+>   the variables reach the driver container.
+> - **The variable names have to match the code.** The charts set
+>   `ICEBERG_CATALOG_URL` while the code reads `ICEBERG_CATALOG_URI`: the
+>   medallion died in the pod with "ICEBERG_CATALOG_URI is required for the
+>   Iceberg lakehouse backend". The charts now use the canonical name and
+>   the code accepts the old one as an alias
+>   (`tests/unit/test_iceberg_catalog.py`).
+> - **The operator needs RBAC on the `status` subresource.** `sparkapplications`
+>   and `scheduledsparkapplications` are not enough: without
+>   `sparkapplications/status` the operator submits the application but cannot
+>   record what happened to it, and every `SparkApplication` keeps an empty
+>   status (`cannot update resource "sparkapplications/status"`).
+> - **A table created by the catalogue registration has to be evolved.** The
+>   registration job creates the published tables in Polaris so the catalogue
+>   lists them, and it creates them with the business schema only. The write
+>   payload always carries the two internal columns (`_content_hash`,
+>   `_row_seq`), so the Gold tier died with "PyArrow table contains more
+>   columns" until the adapter learned to add them to a table it did not
+>   create.
+> - **The OLTP database is not seeded by the deployment.** The chart creates
+>   the SCHEMA; the data comes from `data-generator/oltp_seed.py`, which
+>   needs Faker and numpy, so it runs on the host through a port-forward:
+>   `rake cluster:seed`. Without it the medallion reads an empty source and
+>   reports EMPTY for every entity.
+> - **One writer per table.** Bronze is ingested by the `s1` CronJob
+>   (`poc/ingest:0.1.0`) and the Spark bronze job is **disabled**
+>   (`jobs.bronzeIngestion.enabled=false`): with both enabled the same
+>   Iceberg table had two writers, one every 15 minutes and one at 02:00.
+>   Silver and gold run on Spark. `rake batch:run` runs the whole medallion
+>   on demand: the CronJob is suspended and a one-shot Job is created from
+>   it, and the silver/gold `ScheduledSparkApplication` spec is read back
+>   and submitted as a plain `SparkApplication`, so the manual run and the
+>   cron run exactly the same thing.
 >
 > **Stream layer (S4) — read this before trusting any "it runs" claim.**
 > `pipelines/stream/flink_orders_stream.py` and `flink_clickstream_stream.py`
@@ -309,10 +406,51 @@ rake typecheck            # mypy
 
 ```bash
 rake cluster:setup                  # create the kind cluster, namespaces, prerequisites
-podman build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
-rake cluster:up[demo]               # all 8 subsystems
-rake demo                           # RF-24 end-to-end demo on the cluster
+rake cluster:image:build            # build the four poc/* images and load them into every node
+rake cluster:up[batch]              # the batch phase: ingestion + lakehouse + Spark Operator
+rake batch:run                      # run the medallion now (bronze -> silver -> gold)
+rake lakehouse:rows                 # count the rows the medallion left in the Iceberg lakehouse
+rake demo                           # RF-24 end-to-end demo, phase by phase
 ```
+
+`rake cluster:image:build` is the single versioned procedure RNF-03 asks for:
+it builds `poc/ingest`, `poc/spark-medallion`, `poc/flink-stream` and
+`poc/lineage-webhook` with podman and copies them into every kind node
+(building them by hand and forgetting to load them was the usual way to end
+up with `failed to pull image: insufficient_scope`).
+
+### The demo is a sequence of phases, not eight subsystems at once
+
+RC-02 gives the box 8 GB and asks for **exclusive** startup profiles, and
+AD-4 says "Demo por perfiles". The `demo` profile (all eight subsystems
+simultaneously) needs ~8000 MiB of container limits and does not fit in 6 GiB:
+the `kube-scheduler` ended up losing its lease 107 times. So the end-to-end
+demo is a **sequence**, and each phase brings up what it needs and takes down
+what the next one cannot afford:
+
+```bash
+rake demo:phases                    # platform -> batch -> stream -> serving -> fabric -> ops -> governance
+rake demo:phases[batch,stream]      # only some phases
+```
+
+| Phase | Up | Taken down for the next phase |
+| :--- | :--- | :--- |
+| `platform` | postgres, minio, polaris, marquez, lineage webhook | - |
+| `batch` | Spark Operator + the medallion | - |
+| `stream` | kafka, flink operator, flink job | postgres, Spark Operator, marquez, webhook |
+| `serving` | trino | flink job, flink operator |
+| `fabric` | marquez + webhook back up | trino |
+| `ops` | prometheus, grafana | flink operator |
+| `governance` | kyverno controller + policies | kafka |
+
+What crosses the phases is the **lakehouse** (MinIO + Iceberg), not a pod.
+That is what makes it possible to run the batch tier in one phase and the
+stream tier in another and still query them together at the end (RF-11).
+
+`infra/profiles/platform.yaml`, `stream.yaml`, `batch.yaml`, `serving.yaml`
+and `demo.yaml` describe the five profiles; `demo.yaml` is the complete
+topology and documents what the whole platform looks like, but it is the one
+profile that does not fit in the box.
 
 ### Stream layer (S4)
 
@@ -343,6 +481,29 @@ the aggregate → window → Table API → Iceberg → Parquet chain works, and 
 checkpoint storage `s3a://` really writes to MinIO. It does **not** cover the
 Kafka source, the FlinkDeployment, the checkpointing of a running job, or the
 serving layer.
+
+#### `rake batch:run` and `rake lakehouse:rows` - the medallion, on demand and counted
+
+`rake lakehouse:probe` proves the *adapter*; these two prove the *medallion*.
+
+`rake batch:run` runs the three tiers in order, right now, without waiting
+for the 02:00/03:00/04:00 crons:
+
+* **bronze** — the `s1` CronJob is suspended and a one-shot Job is created
+  from it (`kubectl create job --from=cronjob/`), so what runs is exactly
+  what the cron would have run;
+* **silver** and **gold** — the spec of the deployed
+  `ScheduledSparkApplication` is read back and applied as a plain
+  `SparkApplication`, so the chart stays the only source of truth for what a
+  tier runs and the manual run cannot drift from the scheduled one.
+
+`rake lakehouse:rows` then reads the catalogue and the tables and reports how
+many rows each tier really has, from two independent angles: what PyIceberg
+sees in Polaris, and what the storage adapter reads back. If the two disagree,
+the medallion is writing somewhere the catalogue does not know about, which
+is exactly the failure the probe exists to catch. It is the acceptance check
+for the batch phase ("bronze, silver and gold have rows in Iceberg"), and it
+reads the lakehouse itself rather than trusting a log line.
 
 #### `rake lakehouse:probe` - the batch layer against the real lakehouse
 
@@ -392,11 +553,11 @@ Two findings it encodes, both measured on a cluster:
   worse than broken: the legacy jets3t `S3FileSystem` ignores `fs.s3.endpoint`
   and talks to real AWS.
 
-Verify the result in Trino (cluster `stream` catalog, Iceberg over Polaris):
+Verify the result in Trino (single `iceberg` catalog, Iceberg over Polaris):
 
 ```sql
 SELECT status, count(*) AS windows, sum(window_orders) AS orders, sum(window_revenue) AS revenue
-FROM stream.sales.orders_windowed
+FROM iceberg.sales.orders_windowed
 GROUP BY status;
 ```
 
@@ -452,7 +613,7 @@ poc_data_engineering/
 │   ├── docker/                               # Container images (poc/*:0.1.0: ingest, spark, flink)
 │   ├── diagnostics/                           # Executable probes: the single-pod speed-layer check
 │   ├── kind/                                 # Local kind cluster config
-│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/demo, via rake cluster:up)
+│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/serving/demo)
 ├── governance/                                # Data contracts validation (contract_validator.py), policies, schemas, federation
 │   ├── contract_validator.py                 # CLI: structure + BACKWARD + product<->contract threshold cross-check
 │   ├── federation/global-standards.yaml      # Federated (cross-domain) standards
@@ -470,7 +631,7 @@ poc_data_engineering/
 │   ├── helm/                                 # One chart per subsystem (s1-ingestion … s8-ops, with real templates)
 │   ├── docker/                               # Container images (poc/*:0.1.0: ingest, spark, flink)
 │   ├── kind/                                 # Local kind cluster config
-│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/demo, via rake cluster:up)
+│   └── profiles/                             # Resource-constrained startup profiles (platform/stream/batch/serving/demo)
 ├── pipelines/                                 # S3, S4, S5, S8: Processing, Serving & Orchestration pipelines
 │   ├── medallion/                            # S3: batch Medallion drivers (pure Python locally, Spark jobs in K8s)
 │   │   ├── bronze_ingestion.py               # OLTP (PG or synthetic) -> Bronze snapshot

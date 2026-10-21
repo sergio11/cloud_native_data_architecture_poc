@@ -1,0 +1,16 @@
+# Build context exclusions.
+#
+# The images only need the repository CODE. The caches and the git history
+# are the biggest part of the context and the build has to copy all of it
+# into the builder container on every rebuild.
+.git
+.gitignore
+.coverage
+.coverage.*
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+data/
+lineage_events.db

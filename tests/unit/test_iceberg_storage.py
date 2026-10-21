@@ -38,9 +38,10 @@ from src.domain.naming import iceberg_identifier
 # ---------------------------------------------------------------------------
 def _install_fake_pyarrow(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Field:
-        def __init__(self, name: str, type_: Any) -> None:
+        def __init__(self, name: str, type_: Any, nullable: bool = True) -> None:
             self.name = name
             self.type = type_
+            self.nullable = nullable
 
     class _Type:
         def __init__(self, kind: str) -> None:
@@ -241,11 +242,14 @@ class _FakeSchemaUpdate:
         self._table = table
         self._pending: list[Any] = []
 
-    def add_column(self, name: str, type_: Any, nullable: bool = True) -> None:
-        self._pending.append((name, type_, nullable))
+    def add_column(self, name: str, type_: Any) -> None:
+        # PyIceberg's UpdateSchema.add_column takes an Iceberg type name and
+        # has no `nullable` argument: the column it adds is always optional.
+        self._pending.append((name, type_, True))
 
     def commit(self) -> None:
-        fields = list(self._table.schema().fields())
+        # In pyarrow, Schema.fields is a PROPERTY, not a method.
+        fields = list(self._table.schema().fields)
         for name, type_, _nullable in self._pending:
             fields.append(_FakeField(name, type_))
         self._table._schema = _FakeSchema(fields)
@@ -258,9 +262,12 @@ class _FakeSchemaUpdate:
 
 
 class _FakeField:
-    def __init__(self, name: str, type_: Any) -> None:
+    def __init__(self, name: str, type_: Any, required: bool = False) -> None:
         self.name = name
         self.type = type_
+        # The Iceberg side of a field: `required` is what the catalogue
+        # declared, and the write has to agree with it.
+        self.required = required
 
 
 class _FakeSchema:
@@ -439,3 +446,30 @@ def test_overwrite_with_an_empty_set_clears_the_table(adapter: IcebergLakehouseS
     adapter.write_table("gold.sales.daily_metrics", _orders(3))
     assert adapter.write_table("gold.sales.daily_metrics", [], mode="overwrite") == 0
     assert adapter.read_table("gold.sales.daily_metrics") == []
+
+
+def test_writing_to_a_table_created_outside_the_adapter_evolves_it(
+    adapter: IcebergLakehouseStorageAdapter,
+) -> None:
+    """The catalogue registration creates the published tables, and it creates
+    them with the business schema only. The payload always carries the two
+    internal columns, so without the evolution the write died with
+    "PyArrow table contains more columns: _content_hash, _row_seq"."""
+    catalog = adapter._catalog  # noqa: SLF001 - the double is the test's own
+    catalog.namespaces.add("sales")
+    catalog.tables["sales.daily_metrics"] = _FakeTable(
+        "sales.daily_metrics",
+        _FakeSchema(
+            [
+                _FakeField("order_id", "string"),
+                _FakeField("status", "string"),
+                _FakeField("total_amount", "double"),
+                _FakeField("order_date", "string"),
+            ]
+        ),
+    )
+
+    assert adapter.write_table("gold.sales.daily_metrics", _orders(2)) == 2
+    names = {field.name for field in catalog.tables["sales.daily_metrics"].schema().fields}
+    assert {"_content_hash", "_row_seq"} <= names
+    assert len(adapter.read_table("gold.sales.daily_metrics")) == 2

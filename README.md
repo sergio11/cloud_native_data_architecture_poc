@@ -1,6 +1,8 @@
-# Modern Data Architecture POC
+# 🌐 Modern Data Architecture
 
-> A local-first, open-source reference implementation of Data Mesh, Data Fabric, Medallion Lakehouse, hybrid Lambda/Kappa processing and a unified serving layer on Kubernetes.
+> 🕸️ Open-source reference implementation of Data Mesh, Data Fabric, 🏔️ Medallion Lakehouse and ⚡ hybrid Lambda/Kappa on Kubernetes.
+>
+> 🧊 Iceberg + Polaris + Spark + Flink + Kafka + Trino, with ✅ contract-driven quality gates and 🔗 OpenLineage/Marquez lineage.
 
 [![100% Open Source](https://img.shields.io/badge/Open%20Source-100%25-brightgreen.svg?style=flat-square)](#)
 [![Kubernetes / kind](https://img.shields.io/badge/Runtime-Kubernetes%20%2F%20kind-blue.svg?style=flat-square)](#)
@@ -17,7 +19,7 @@
 
 ## Introduction
 
-The **Modern Data Architecture POC** is a reference implementation of the architectural patterns that shape modern analytical platforms. It is built to be read, run and inspected: each paradigm is represented by code, a deployed workload and a verification path.
+**Modern Data Architecture** is a local-first proof of concept and reference implementation of the architectural patterns that shape modern analytical platforms. It is built to be read, run and inspected: each paradigm is represented by code, a deployed workload and a verification path.
 
 The platform combines a Medallion lakehouse on Apache Iceberg, a hybrid Lambda/Kappa pipeline, domain-oriented Data Mesh governance, active metadata with OpenLineage and Marquez, and a single Trino serving layer. The application core is a hexagonal Python codebase; the heavy engines run on Kubernetes.
 
@@ -90,12 +92,12 @@ The platform is intentionally profiled. A full demo needs roughly 8 GB of contai
 ## Architecture at a Glance
 
 ```mermaid
-flowchart TB
+graph TB
     subgraph ORG["Organization Plane"]
-        SALES["Sales<br/>orders and customers"]
-        MKT["Marketing<br/>campaigns and leads"]
-        FIN["Finance<br/>budgets and closings"]
-        GOV["Federated governance<br/>contracts, policies, quotas"]
+        SALES["Sales orders and customers"]
+        MKT["Marketing campaigns and leads"]
+        FIN["Finance budgets and closings"]
+        GOV["Federated governance contracts, policies, quotas"]
         SALES --> GOV
         MKT --> GOV
         FIN --> GOV
@@ -104,11 +106,11 @@ flowchart TB
     subgraph PROC["Processing Plane"]
         PG[("PostgreSQL OLTP")]
         KAFKA[("Kafka event log")]
-        ING["Bronze ingestion<br/>CronJob"]
-        SPARK["Silver and Gold<br/>Spark Operator"]
-        FLINK["Orders speed layer<br/>Flink"]
-        ICE[("Apache Iceberg<br/>Polaris and MinIO")]
-        TRINO["Trino<br/>unified serving"]
+        ING["Bronze ingestion CronJob"]
+        SPARK["Silver and Gold Spark Operator"]
+        FLINK["Orders speed layer Flink"]
+        ICE[("Apache Iceberg Polaris and MinIO")]
+        TRINO["Trino unified serving"]
         PG --> ING --> ICE
         SPARK --> ICE
         KAFKA --> FLINK --> ICE
@@ -118,7 +120,7 @@ flowchart TB
     subgraph OPS["Operations Plane"]
         OL["OpenLineage events"]
         MQ[("Marquez")]
-        ALERT["Active metadata<br/>alert service"]
+        ALERT["Active metadata alert service"]
         PROM["Prometheus"]
         GRAF["Grafana"]
         OL --> MQ
@@ -140,25 +142,25 @@ flowchart TB
 ## End-to-End Data Flow
 
 ```mermaid
-flowchart LR
+graph LR
     subgraph BATCH["Batch path"]
-        PG[("PostgreSQL<br/>poc_oltp")] --> BRONZE["Bronze<br/>append-only and content hash"]
-        BRONZE --> SILVER["Silver<br/>dedupe and typing"]
+        PG[("PostgreSQL poc_oltp")] --> BRONZE["Bronze append-only and content hash"]
+        BRONZE --> SILVER["Silver dedupe and typing"]
         SILVER --> G1{"Contract gate"}
-        G1 -->|pass| GOLD["Gold<br/>daily metrics and masked customers"]
-        G1 -->|fail| BLOCK1["Block publication<br/>and emit FAIL lineage"]
+        G1 -->|pass| GOLD["Gold daily metrics and masked customers"]
+        G1 -->|fail| BLOCK1["Block publication and emit FAIL lineage"]
         GOLD --> G2{"Contract gate"}
-        G2 -->|pass| ICE[("Iceberg tables<br/>Polaris and MinIO")]
-        G2 -->|fail| BLOCK2["Block publication<br/>and emit FAIL lineage"]
+        G2 -->|pass| ICE[("Iceberg tables Polaris and MinIO")]
+        G2 -->|fail| BLOCK2["Block publication and emit FAIL lineage"]
     end
 
     subgraph SPEED["Speed path"]
-        K[("Kafka<br/>sales.orders.events")] --> F["Flink<br/>4 s event-time windows"]
-        F --> SPEEDICE[("Iceberg table<br/>sales.orders_windowed")]
-        F -.-> DLQ["Dead-letter<br/>invalid records"]
+        K[("Kafka sales.orders.events")] --> F["Flink 4 s event-time windows"]
+        F --> SPEEDICE[("Iceberg table sales.orders_windowed")]
+        F -.-> DLQ["Dead-letter invalid records"]
     end
 
-    ICE --> VIEW["Trino unified view<br/>iceberg.serving.sales_unified_revenue"]
+    ICE --> VIEW["Trino unified view iceberg.serving.sales_unified_revenue"]
     SPEEDICE --> VIEW
     VIEW --> CONSUMERS["SQL and BI consumers"]
 ```
@@ -182,11 +184,11 @@ The lakehouse uses Iceberg as the table format, Polaris as the REST catalog and 
 Published tiers (Gold and Speed) drop the tier from the physical identifier so products and serving views can address them by name. Internal tiers keep it to avoid collisions between Bronze and Silver.
 
 ```mermaid
-flowchart LR
-    SRC["OLTP snapshot<br/>or synthetic fallback"] --> B["Bronze<br/>raw plus provenance"]
-    B --> S["Silver<br/>conformed records"]
-    S --> QG1{"Quality gate<br/>completeness, uniqueness, validity"}
-    QG1 -->|pass| G["Gold<br/>business products"]
+graph LR
+    SRC["OLTP snapshot or synthetic fallback"] --> B["Bronze raw plus provenance"]
+    B --> S["Silver conformed records"]
+    S --> QG1{"Quality gate completeness, uniqueness, validity"}
+    QG1 -->|pass| G["Gold business products"]
     QG1 -->|fail| X1["No publication"]
     G --> QG2{"Gold quality gate"}
     QG2 -->|pass| P["Published Iceberg tables"]
@@ -228,17 +230,17 @@ The batch layer and the speed layer are deliberately asymmetric.
 **Speed (Kappa).** Flink reads `sales.orders.events` from Kafka, assigns event time from the payload timestamp, applies a 500 ms out-of-orderness watermark and aggregates 4-second tumbling windows keyed by order status. Invalid payloads are dead-lettered rather than coerced.
 
 ```mermaid
-flowchart TB
+graph TB
     subgraph BATCH["Batch layer"]
         PG[("PostgreSQL")] --> BR["Bronze"] --> SV["Silver"] --> GD["Gold"]
     end
 
     subgraph SPEED["Speed layer"]
-        K[("Kafka log")] --> FL["Flink<br/>4 s windows"]
+        K[("Kafka log")] --> FL["Flink 4 s windows"]
         FL --> SP["orders_windowed"]
     end
 
-    GD --> FUSE{"Serving fusion<br/>batch wins on order_date and status"}
+    GD --> FUSE{"Serving fusion batch wins on order_date and status"}
     SP --> FUSE
     FUSE --> OUT["Unified revenue view"]
 ```
@@ -318,7 +320,7 @@ spec:
 `rake governance:validate` runs structural checks, JSON Schema validation and a sibling cross-check between each product manifest and its authoritative contract. A contract change is checked for backward compatibility before it can be published.
 
 ```mermaid
-flowchart LR
+graph LR
     subgraph SALES["Sales domain"]
         O["orders product"] --> OC["orders contract"]
         C["customers product"] --> CC["customers contract"]
@@ -349,12 +351,12 @@ The cluster side is equally explicit. S6 renders `DataContract` and `DataProduct
 Every use case can emit an OpenLineage run event. The Marquez adapter writes a local JSONL audit trail first and then posts the same event to the Marquez API. The local trail is the durable source of truth for the POC; the HTTP call is best-effort.
 
 ```mermaid
-flowchart LR
+graph LR
     CORE["Use cases and adapters"] -->|OpenLineage RunEvent| AUDIT["Local JSONL audit trail"]
     CORE -->|HTTP POST| MQ[("Marquez API")]
-    MQ --> UI["Marquez UI<br/>localhost:3002"]
-    CORE -->|same event| WH["Alert service<br/>FastAPI on port 8000"]
-    WH --> RULES["alert-rules.yaml<br/>schema, quality, failure, SLA"]
+    MQ --> UI["Marquez UI on port 3002"]
+    CORE -->|same event| WH["Alert service FastAPI on port 8000"]
+    WH --> RULES["alert-rules.yaml schema, quality, failure, SLA"]
     WH --> DB[("SQLite WAL")]
     WH -->|best-effort| HOOK["Alertmanager webhook"]
 ```
@@ -376,7 +378,7 @@ Four rules run on ingestion: schema changes on Silver and Gold, quality-threshol
 The codebase is organized around a dependency rule: the domain and use cases do not know about Kubernetes, Spark, Trino, Marquez or the filesystem.
 
 ```mermaid
-flowchart LR
+graph LR
     subgraph DRIVERS["Driving adapters"]
         D1["CronJob and CLI"]
         D2["Spark drivers"]
@@ -387,12 +389,12 @@ flowchart LR
     subgraph CORE["Application core"]
         PI["Inbound ports"]
         UC["Use cases"]
-        DOM["Pure domain<br/>entities, naming, contracts, privacy, quality policy"]
+        DOM["Pure domain entities, naming, contracts, privacy, quality policy"]
         PI --> UC --> DOM
     end
 
     subgraph OUT["Driven ports"]
-        PO["Lakehouse, source, serving<br/>lineage, quality, catalog"]
+        PO["Lakehouse, source, serving lineage, quality, catalog"]
     end
 
     subgraph ADAPTERS["Driven adapters"]
@@ -407,7 +409,7 @@ flowchart LR
     DRIVERS --> PI
     UC --> PO
     PO --> ADAPTERS
-    ROOT["container.py<br/>composition root"] -.-> ADAPTERS
+    ROOT["container.py composition root"] -.-> ADAPTERS
     ROOT -.-> CORE
 ```
 
@@ -427,27 +429,27 @@ This is why the same aggregation code can be unit-tested locally, executed by a 
 The local cluster is a three-node kind cluster: one control plane and two workers. Application workloads are split across the `platform`, `sales`, `marketing` and `finance` namespaces.
 
 ```mermaid
-flowchart TB
-    subgraph KIND["kind: poc-data-platform"]
-        subgraph PLATFORM["namespace: platform"]
-            S1["S1 - PostgreSQL<br/>ingestion CronJob"]
+graph TB
+    subgraph KIND["kind poc-data-platform"]
+        subgraph PLATFORM["namespace platform"]
+            S1["S1 - PostgreSQL ingestion CronJob"]
             S2["S2 - MinIO and Polaris"]
             S4["S4 - Kafka and Flink Operator"]
             S5["S5 - Trino"]
-            S7["S7 - Marquez, Postgres<br/>and alert service"]
+            S7["S7 - Marquez, Postgres and alert service"]
             S8["S8 - Prometheus and Grafana"]
         end
-        subgraph SALESNS["namespace: sales"]
-            SPARK["Spark Operator<br/>Silver and Gold"]
+        subgraph SALESNS["namespace sales"]
+            SPARK["Spark Operator Silver and Gold"]
             FLINK["Flink orders job"]
         end
-        subgraph MKTNS["namespace: marketing"]
-            CLICK["Clickstream job<br/>optional"]
+        subgraph MKTNS["namespace marketing"]
+            CLICK["Clickstream job optional"]
         end
-        subgraph FINNS["namespace: finance"]
+        subgraph FINNS["namespace finance"]
             QUOTA["Quotas and network policy"]
         end
-        GOV["Cluster-scoped governance<br/>CRDs, Kyverno policies, quotas"]
+        GOV["Cluster-scoped governance CRDs, Kyverno policies, quotas"]
         S1 --> S2
         S2 --> SPARK
         S2 --> FLINK

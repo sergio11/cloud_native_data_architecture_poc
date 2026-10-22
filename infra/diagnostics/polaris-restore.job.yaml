@@ -1,0 +1,99 @@
+# ==============================================================================
+# Polaris catalog restore Job
+#
+# Polaris runs with an in-memory metastore, so a restart leaves the catalog
+# empty even though the Iceberg metadata and the parquet files are still in
+# MinIO. This Job recreates the catalog, its namespaces and re-registers the
+# existing tables by pointing Polaris at the metadata files that are already
+# in the bucket.
+#
+# It never drops a catalog that already holds tables: the drop path is only
+# reachable for an empty catalog whose base location does not match the
+# expected one.
+# ==============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-restore
+  namespace: platform
+  labels:
+    app: polaris-restore
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: polaris-restore
+    spec:
+      restartPolicy: Never
+      # Not BestEffort: under memory pressure the first pods evicted are the
+      # ones without limits, and a restore that dies half-way leaves the
+      # catalogue with a namespace but without its tables.
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "384Mi"
+      # The compute node: it is where the poc/ingest image is loaded, and the
+      # restore has to be able to run while the heavy increment has the
+      # "worker" node stopped (which is where it used to be pinned).
+      nodeSelector:
+        kubernetes.io/hostname: poc-data-platform-worker2
+      volumes:
+        - name: script
+          configMap:
+            name: polaris-restore
+      containers:
+        - name: restore
+          image: docker.io/poc/ingest:0.1.0
+          imagePullPolicy: Never
+          workingDir: /app
+          env:
+            - name: POLARIS_URL
+              value: http://polaris.platform.svc.cluster.local:8181
+            - name: POLARIS_CLIENT_ID
+              value: poc-admin
+            - name: POLARIS_CLIENT_SECRET
+              value: poc-admin-secret
+            - name: CATALOG_NAME
+              value: polaris
+            - name: WAREHOUSE_LOCATION
+              value: s3://warehouse/
+            - name: S3_ENDPOINT
+              value: http://minio.platform.svc.cluster.local:9000
+            - name: AWS_REGION
+              value: us-east-1
+            - name: NAMESPACES
+              value: sales,marketing,finance
+            # The tables to re-register, as "namespace.table=metadata-location".
+            #
+            # Each metadata location is the Iceberg metadata JSON that is
+            # already in MinIO, and it MUST be the current one: a table that
+            # was written twice keeps two histories under its metadata/
+            # directory, and the right file is the one with the highest
+            # "last-updated-ms". They can be listed with
+            #   kubectl exec -n platform deploy/minio -- \
+            #     /opt/bitnami/minio-client/bin/mc --config-dir /tmp/mc \
+            #     ls local/warehouse/sales/<table>/metadata/
+            - name: TABLES
+              value: >-
+                sales.bronze_orders=s3://warehouse/sales/bronze_orders/metadata/00001-12787326-27bf-4372-ba0c-219ebfa77106.metadata.json,
+                sales.bronze_customers=s3://warehouse/sales/bronze_customers/metadata/00001-ebcd9e1f-5bfa-476c-8a75-0d166b842a39.metadata.json,
+                sales.silver_orders=s3://warehouse/sales/silver_orders/metadata/00002-0628c14d-af2e-489a-8a39-bbf6863a7061.metadata.json,
+                sales.silver_customers=s3://warehouse/sales/silver_customers/metadata/00001-6701baa5-b280-4016-bf5e-940b6daab099.metadata.json,
+                sales.daily_metrics=s3://warehouse/sales/daily_metrics/metadata/00009-afe04644-28aa-4f22-bd5a-c20662812914.metadata.json,
+                sales.customers=s3://warehouse/sales/customers/metadata/00002-3deb3998-8e99-47d8-812e-26ed59d33d64.metadata.json
+          volumeMounts:
+            - name: script
+              mountPath: /probe
+              readOnly: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -x
+              python3 /probe/polaris_restore.py
+              echo "RESTORE_EXIT=$?"

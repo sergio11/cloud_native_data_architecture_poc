@@ -18,26 +18,27 @@
 # lakehouse content survive.
 #
 # Target RAM Footprint (container LIMITS):
-#   postgres 384 + minio 384 + polaris 1024 + trino 1280 = 3072 MiB
-#   plus the kind control plane, which shares the same 6 GiB.
+#   minio 320 + polaris 384 + trino 1024 = 1728 MiB
+# plus ~3.5 GB of kind overhead (the three node containers themselves are
+# 2.0 + 1.5 + 1.6 GB measured from the host), which is what the 5.9 GiB VM
+# actually has to give.
+#
+# The OLTP Postgres is NOT part of this phase: serving reads the lakehouse,
+# and postgres would only add 384MiB of limits for a database nothing in the
+# serving path touches.
 # ==============================================================================
 profile:
   name: "serving"
   description: "Trino serving layer over the Iceberg lakehouse (unified batch + stream view, RF-11)"
-  targetRamMb: 3072
+  targetRamMb: 1728
   targetCpuCores: 2.5
 
 subsystems:
   s1-ingestion:
     postgresql:
-      enabled: true
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "192Mi"
-        limits:
-          cpu: "400m"
-          memory: "384Mi"
+      # OFF: the serving phase reads the lakehouse, not the OLTP source. The
+      # 384MiB of limits it costs are 384MiB the coordinator does not get.
+      enabled: false
     ingestionRunner:
       enabled: false
 
@@ -47,19 +48,19 @@ subsystems:
       resources:
         requests:
           cpu: "100m"
-          memory: "192Mi"
+          memory: "256Mi"
         limits:
           cpu: "400m"
-          memory: "384Mi"
+          memory: "448Mi"
     polaris:
       enabled: true
       resources:
         requests:
           cpu: "150m"
-          memory: "384Mi"
+          memory: "256Mi"
         limits:
           cpu: "600m"
-          memory: "1024Mi"
+          memory: "384Mi"
 
   s5-serving:
     trino:
@@ -69,12 +70,20 @@ subsystems:
       # s5-serving/values.yaml calls out as an OOM risk, and the chart runs with
       # -XX:+ExitOnOutOfMemoryError, so the first heap excursion kills the pod.
       # 896M gives ~384MiB of headroom, which is what the chart ships.
+      #
+      # 1280Mi -> 1024Mi with a 640M heap: the query memory has to follow the
+      # heap down, because Trino refuses to start when the per-node query
+      # memory plus 30% of the heap exceeds the heap
+      # (maxMemoryPerNode 256MB + 192MB headroom = 448MB, inside 640MB).
       resources:
         requests:
           cpu: "400m"
-          memory: "896Mi"
+          memory: "640Mi"
         limits:
           cpu: "1200m"
-          memory: "1280Mi"
+          memory: "1024Mi"
       jvm:
-        maxHeapSize: "896M"
+        maxHeapSize: "640M"
+      query:
+        maxMemory: "512MB"
+        maxMemoryPerNode: "256MB"

@@ -20,6 +20,17 @@ kafka:
   # back to localhost:9092 and find no broker.
   bootstrapServers: "kafka.platform.svc.cluster.local:9092"
 
+  # JVM options of the broker. It is a VALUE and not a constant in the
+  # template because the heap is what the container actually reserves: the
+  # broker's RSS is heap + direct buffers + metaspace, so lowering
+  # kafka.resources.limits.memory WITHOUT lowering this only makes the kubelet
+  # kill a broker that is happily using more than its limit.
+  #
+  # The default (512m heap + 128m direct) needs a 768Mi container. The
+  # stream profile lowers both to 256m/64m because the broker shares the box
+  # with Flink and only carries two topics with three partitions each.
+  heapOpts: "-Xms384m -Xmx512m -XX:MaxDirectMemorySize=128m"
+
   service:
     type: ClusterIP
     port: 9092
@@ -206,6 +217,12 @@ flinkJobs:
     namespace: "sales"
     # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
     image: poc/flink-stream:0.1.0
+    # Where the JobManager and the TaskManager run. Empty by default so the
+    # job can be scheduled anywhere. Pinning it matters on this box: the
+    # Flink image is 1.7 GB and loading it into every kind node is several
+    # GB of writes, and the filesystem (a WSL2 rootfs on the Windows one)
+    # does not take that without starving etcd.
+    nodeSelector: {}
     # Flink process memory must exceed JVM heap + metaspace + overhead;
     # 256m is rejected by the operator, 768m is the smallest workable value.
     jobManager:
@@ -243,12 +260,13 @@ flinkJobs:
     namespace: "marketing"
     # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
     image: poc/flink-stream:0.1.0
+    nodeSelector: {}
     jobManager:
       memory: "768m"
-      cpu: 0.3
+      cpu: 0.5
     taskManager:
       memory: "1024m"
-      cpu: 0.4
+      cpu: 0.5
       replicas: 1
     topic: "marketing.clickstream.raw"
     kafkaGroupId: "flink-clickstream-speed-group"

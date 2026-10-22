@@ -104,6 +104,10 @@ spec:
   jobManager:
     podTemplate:
       spec:
+        {{- with .Values.flinkJobs.ordersStream.nodeSelector }}
+        nodeSelector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         containers:
           - name: flink-main-container
             env:
@@ -120,6 +124,10 @@ spec:
   taskManager:
     podTemplate:
       spec:
+        {{- with .Values.flinkJobs.ordersStream.nodeSelector }}
+        nodeSelector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         containers:
           - name: flink-main-container
             env:
@@ -204,6 +212,10 @@ spec:
   jobManager:
     podTemplate:
       spec:
+        {{- with .Values.flinkJobs.clickstreamStream.nodeSelector }}
+        nodeSelector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         containers:
           - name: flink-main-container
             env:
@@ -220,6 +232,10 @@ spec:
   taskManager:
     podTemplate:
       spec:
+        {{- with .Values.flinkJobs.clickstreamStream.nodeSelector }}
+        nodeSelector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         containers:
           - name: flink-main-container
             env:

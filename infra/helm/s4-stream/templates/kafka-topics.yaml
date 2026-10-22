@@ -13,14 +13,24 @@ metadata:
     # template fails (see s4 upgrade failure). before-hook-creation deletes
     # the previous hook Job before the new one is created.
     #
-    # post-install, NOT pre-install: the initContainer waits for
-    # kafka.platform.svc.cluster.local:9092, which is created by kafka.yaml in
-    # this same release as an ordinary (non-hook) resource. As a pre-install
-    # hook that name does not resolve yet, so the loop below burned its 300 s
-    # and the whole `helm install s4-stream` failed - taking Kafka, the Flink
-    # operator and both FlinkDeployments down with it. post-install guarantees
-    # the broker exists; pre-upgrade keeps reconciling topics first.
-    helm.sh/hook: post-install,pre-upgrade
+    # post-install AND post-upgrade, never pre-install and never pre-upgrade:
+    # the initContainer waits for kafka.platform.svc.cluster.local:9092, which
+    # is created by kafka.yaml in this same release as an ordinary
+    # (non-hook) resource. A pre-install hook runs before Helm has created
+    # anything, so the loop below burned its 300 s and the whole
+    # `helm install s4-stream` failed - taking Kafka, the Flink operator and
+    # both FlinkDeployments down with it.
+    #
+    # pre-upgrade has the SAME problem from the other side: the broker is an
+    # ordinary resource of this release, so a pre-upgrade hook runs before
+    # Helm has reconciled it, and when the previous phase had scaled Kafka
+    # down (which the ramp increments do, to fit in the RAM) there is no
+    # broker to talk to at all:
+    #   pre-upgrade hooks failed: resource Job/platform/kafka-topic-creator
+    #   not ready. status: Failed, message: Job Failed. failed: 1/1
+    # The price of running afterwards is that the Flink job may be applied
+    # before its topic exists; the KafkaSource retries until it does.
+    helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "-5"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     # The default hook timeout is 5 minutes, and on a 6 GiB box the broker

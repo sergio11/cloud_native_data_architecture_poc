@@ -82,8 +82,15 @@ def main() -> int:
         print("   (el catalogo no tiene ninguna tabla)")
 
     problems: list[str] = []
+    # The Flink sink writes the windowed table in UPSERT mode, so its commits
+    # carry equality deletes and PyIceberg refuses them:
+    #   PyIceberg does not yet support equality deletes
+    # That is a limit of the reader in this image, not a broken table: Trino
+    # reads it fine, and it is Trino that the serving layer uses. Those tables
+    # are reported as a warning and left out of the verdict.
+    unreadable_by_pyiceberg: set[str] = set()
     print("\n-- filas por tabla de la medallion --")
-    for tier, tables in TIER_TABLES.items():
+    for _tier, tables in TIER_TABLES.items():
         for logical in tables:
             namespace, table_id = iceberg_identifier(logical)
             physical = f"{namespace}.{table_id}"
@@ -94,6 +101,11 @@ def main() -> int:
                 try:
                     rows = storage.read_table(logical)
                 except Exception as exc:  # noqa: BLE001 - the probe reports, it does not raise
+                    if "equality deletes" in str(exc):
+                        print(f"   {physical}: NO LEGIBLE AQUI (equality deletes de upsert; "
+                              f"comprobar con Trino)")
+                        unreadable_by_pyiceberg.add(physical)
+                        continue
                     print(f"   {physical}: ERROR al leer: {exc}")
                     problems.append(f"{physical}: error al leer ({exc})")
                     continue
@@ -110,6 +122,8 @@ def main() -> int:
             physical = f"{namespace}.{table_id}"
             if not storage.table_exists(logical):
                 problems.append(f"{physical}: no existe (tier {tier})")
+                continue
+            if physical in unreadable_by_pyiceberg:
                 continue
             count = len(storage.read_table(logical))
             if count == 0:

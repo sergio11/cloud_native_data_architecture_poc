@@ -27,8 +27,10 @@ spec:
       restartPolicy: Never
       # Pinned on purpose: the probe must run where the image was loaded, so a
       # missing image cannot be mistaken for a failure of the probe.
+      # The compute node, which is where the ingestion image is loaded and
+      # which stays up while the "worker" node is stopped.
       nodeSelector:
-        kubernetes.io/hostname: poc-data-platform-worker
+        kubernetes.io/hostname: poc-data-platform-worker2
       volumes:
         - name: script
           configMap:

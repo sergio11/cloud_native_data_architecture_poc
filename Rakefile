@@ -21,6 +21,7 @@ require 'open3'
 require 'tempfile'
 require 'yaml'
 require 'json'
+require 'time'
 require 'socket'
 
 # Interleave our output with the child processes' (kubectl/helm write
@@ -483,11 +484,44 @@ rescue Psych::Exception, Errno::ENOENT
   :error
 end
 
+# Helm 4 changed the default apply method: `helm upgrade --server-side`
+# defaults to "auto", which means "keep the method the previous revision of
+# this release used". Every release in this repo was first installed with
+# Helm 4's own default (server-side apply), so every later upgrade keeps
+# applying with SSA - and SSA rejects the `helm.sh/hook-*` annotations of a
+# hook resource:
+#
+#   failed to create resource: server-side apply failed for object
+#   platform/kafka-topic-creator batch/v1, Kind=Job: failed to create typed
+#   patch object (platform/kafka-topic-creator; batch/v1, Kind=Job):
+#   .metadata.helm.sh/hook-timeout: field not declared in schema
+#
+# That killed s2-lakehouse (rev 13, on hook-weight) and s4-stream (rev 4, on
+# hook-timeout) and left s2-lakehouse stuck in pending-upgrade. Client-side
+# apply computes a strategic merge patch, where removing an annotation is an
+# ordinary patch operation instead of an undeclared field, so the hook
+# resources deploy again.
+HELM_APPLY_ARGS = ['--server-side=false'].freeze
+
+# How long Helm waits for a hook Job. The default is 5 minutes and the
+# catalogue bootstrap alone takes 6 to 11 minutes on this box, so the default
+# kills the upgrade with "pre-upgrade hooks failed: ... context deadline
+# exceeded" while the Job is still doing its work. The per-hook
+# `helm.sh/hook-timeout` annotation is the precise control; this is the
+# ceiling that applies to the release as a whole.
+HELM_TIMEOUT_ARGS = ['--timeout', '20m'].freeze
+
 # Streams `helm upgrade --install` for one chart. Returns true/false.
-def helm_upgrade(chart, values_path)
+#
+# `sets` are --set overrides. They win over the profile's values file, which
+# is what the ramp increments use to switch ONE feature of a chart on or off
+# without forking the profile (and without duplicating the RAM budget in a
+# second file that would drift).
+def helm_upgrade(chart, values_path, sets = {})
   cmd = ['helm', 'upgrade', '--install', chart, "infra/helm/#{chart}",
-         '-n', 'platform', *HELM_KUBE_ARGS]
+         '-n', 'platform', *HELM_KUBE_ARGS, *HELM_APPLY_ARGS, *HELM_TIMEOUT_ARGS]
   cmd += ['-f', values_path] if values_path
+  sets.each { |key, value| cmd += ['--set', "#{key}=#{value}"] }
   sh(*cmd)
   true
 rescue StandardError
@@ -743,13 +777,41 @@ namespace :cluster do
       abort "\e[31mNo kind cluster container found. Run: rake cluster:setup\e[0m"
     end
 
+    # The nodes are started ONE AT A TIME, control plane first.
+    #
+    # Starting all three at once is what turns a slow disk into an outage:
+    # each kubelet pulls, unpacks and mounts its images at the same time, the
+    # filesystem (the WSL2 rootfs lives on the Windows filesystem through
+    # 9P/virtiofs) saturates, and etcd - which fsyncs on every Raft write -
+    # stops answering. The apiserver then times out on every request and the
+    # control plane crash-loops:
+    #
+    #   http: Handler timeout ... rpc error: code = Canceled desc = context canceled
+    #   load average: 63.52, 53.10, 32.15   (on 4 CPUs)
+    #
+    # With the API up first, the workers come up against a working etcd.
     probe[:containers].each do |c|
       if container_running?(c)
         ok_msg("container #{c[:name]} already running (#{c[:connection]})")
-      else
-        info_msg("starting #{c[:name]} (currently: #{c[:status]}) via #{c[:connection]}...")
-        run! 'podman', '--connection', c[:connection], 'start', c[:name]
-        ok_msg("container #{c[:name]} started")
+        next
+      end
+      info_msg("starting #{c[:name]} (currently: #{c[:status]}) via #{c[:connection]}...")
+      run! 'podman', '--connection', c[:connection], 'start', c[:name]
+      ok_msg("container #{c[:name]} started")
+      if c[:name].end_with?('-control-plane')
+        info_msg('waiting for the API before starting the workers...')
+        deadline = Time.now + 180
+        last_error = nil
+        until api_up?
+          if Time.now > deadline
+            err_msg('API did not become reachable within 180 s')
+            warn_msg("last kubectl error: #{last_error&.lines&.last&.strip}")
+            abort "\e[33mInspect the control plane: podman logs #{c[:name]} --tail 50\e[0m"
+          end
+          last_error, = capture('kubectl', 'get', 'nodes', '--request-timeout=5s')
+          sleep 5
+        end
+        ok_msg('API reachable')
       end
     end
 
@@ -1434,7 +1496,346 @@ rescue StandardError
   'trinodb/trino:455'
 end
 
+# ------------------------------------------------------------------------------
+# The windowed speed-layer table cannot be counted with a query engine here:
+#
+#   * PyIceberg refuses the table ("does not yet support equality deletes"),
+#     because the Flink sink writes in upsert mode;
+#   * Trino cannot be up AT THE SAME TIME as Flink on a 6 GiB box, which is the
+#     whole reason the increments exist.
+#
+# So the state is read from the table metadata in MinIO: the current
+# snapshot's summary carries total-records and total-data-files.
+# ------------------------------------------------------------------------------
+def orders_windowed_state(table = 'orders_windowed', namespace = 'sales')
+  user, = capture('kubectl', 'get', 'deploy', 'minio', '-n', 'platform', '-o',
+                  'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="MINIO_ROOT_USER")].value}')
+  password, = capture('kubectl', 'get', 'deploy', 'minio', '-n', 'platform', '-o',
+                      'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="MINIO_ROOT_PASSWORD")].value}')
+  user = 'minioadmin' if user.to_s.strip.empty?
+  password = 'minioadmin' if password.to_s.strip.empty?
+
+  script = <<~SH
+    export MC_CONFIG_DIR=/tmp/.mc
+    mc alias set local http://localhost:9000 #{user.to_s.strip} #{password.to_s.strip} >/dev/null 2>&1
+    latest=$(mc ls local/warehouse/#{namespace}/#{table}/metadata/ | awk '{print $NF}' | grep 'metadata.json' | sort | tail -1)
+    test -n "$latest" || { echo NO_METADATA; exit 1; }
+    mc cat "local/warehouse/#{namespace}/#{table}/metadata/$latest"
+  SH
+
+  out, ok = capture('kubectl', 'exec', '-n', 'platform', 'deploy/minio', '--', 'sh', '-c', script)
+  body = out.to_s[out.to_s.index('{')..] if out.to_s.include?('{')
+  unless ok && body
+    abort "\e[31mNo se pudo leer la metadata de #{namespace}.#{table} en MinIO: #{out.to_s.strip}\e[0m"
+  end
+  JSON.parse(body)
+end
+
+def snapshot_records(state)
+  snapshot = state['snapshots'].find { |s| s['snapshot-id'] == state['current-snapshot-id'] } ||
+             state['snapshots'].last
+  snapshot.dig('summary', 'total-records').to_s
+end
+
+# Every line the Iceberg committer writes when it closes a checkpoint:
+#   2026-10-22 15:23:15,603 INFO ... Committed rowDelta to table: ..., checkpointId 2 in 13265 ms
+def commit_timestamps
+  out, ok = capture('kubectl', 'logs', '-n', 'sales', '-l', 'component=taskmanager', '--tail=1000')
+  return [] unless ok
+
+  out.lines.filter_map do |line|
+    match = line.match(/^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[,.]\d{3}).*Committed rowDelta.*checkpointId (\d+) in (\d+) ms/)
+    next unless match
+
+    { at: Time.parse(match[1].tr(',', '.')), checkpoint: match[2], duration_ms: match[3].to_i }
+  end
+end
+
+def last_commit_timestamp
+  commits = commit_timestamps
+  commits.last&.dig(:at)
+end
+
+# The FlinkDeployment as a Hash, or nil when it is not deployed.
+def flink_state(deployment, namespace)
+  out, ok = capture('kubectl', 'get', 'flinkdeployment', deployment, '-n', namespace, '-o', 'json')
+  ok ? JSON.parse(out) : nil
+end
+
+# Rotates the Kafka consumer group and rewinds to offset 0 on the live
+# FlinkDeployment. The env lives in the pod templates (the operator puts it
+# there), not in spec.env, and main() runs in the JobManager pod, so BOTH
+# templates are patched.
+#
+# Same rule as pipelines/orchestration/flink_replay.py: a group that has
+# already committed offsets ignores KAFKA_START_OFFSET=earliest, so rotating
+# the group is what actually makes the replay happen.
+def rotate_consumer_group!(deployment, namespace, state)
+  abort "\e[31m#{deployment} is not deployed.\e[0m" if state.nil?
+
+  containers = %w[jobManager taskManager].flat_map do |component|
+    Array(state.dig('spec', component, 'podTemplate', 'spec', 'containers'))
+      .each_with_index
+      .map { |container, index| [component, index, Array(container['env'])] }
+  end
+  abort "\e[31m#{deployment} declares no pod-template env.\e[0m" if containers.empty?
+
+  group_var = containers.flat_map { |_, _, env| env.map { |entry| entry['name'] } }
+                        .find { |name| %w[KAFKA_GROUP_ID KAFKA_CLICKSTREAM_GROUP_ID].include?(name) }
+  unless group_var
+    abort "\e[31mNo consumer-group variable in the pod templates; a replay cannot be guaranteed.\e[0m"
+  end
+
+  group = "#{deployment}-replay-#{Time.now.utc.strftime('%Y%m%d%H%M%S')}"
+  operations = []
+  containers.each do |component, container_index, env|
+    env.each_with_index do |entry, env_index|
+      value = case entry['name']
+              when group_var then group
+              when 'KAFKA_START_OFFSET' then 'earliest'
+              end
+      next unless value
+
+      operations << {
+        'op' => 'replace',
+        'path' => "/spec/#{component}/podTemplate/spec/containers/#{container_index}/env/#{env_index}/value",
+        'value' => value
+      }
+    end
+  end
+  abort "\e[31mNo env var to patch (#{group_var} / KAFKA_START_OFFSET).\e[0m" if operations.empty?
+
+  run! 'kubectl', 'patch', 'flinkdeployment', deployment, '-n', namespace,
+       '--type', 'json', '-p', JSON.generate(operations)
+  [group_var, group]
+end
+
+# Waits for a commit NEWER than the one seen before the patch: that is the
+# proof the job came back up and flushed the replayed windows.
+def wait_for_new_commit(deployment, namespace, previous_commit, timeout_minutes: 20)
+  info_msg('esperando a que el job relea el log y cierre un checkpoint...')
+  deadline = Time.now + (timeout_minutes * 60)
+  loop do
+    current = last_commit_timestamp
+    return current if current && previous_commit && current > previous_commit
+    if Time.now > deadline
+      state, = capture('kubectl', 'get', 'flinkdeployment', deployment, '-n', namespace,
+                       '-o', 'jsonpath={.status.jobStatus.state}')
+      abort "\e[31mNo hubo un commit nuevo en #{timeout_minutes} min (job=#{state.to_s.strip}).\e[0m"
+    end
+    sleep 15
+  end
+end
+
+def suspend_flink!(deployment, namespace)
+  run! 'kubectl', 'patch', 'flinkdeployment', deployment, '-n', namespace,
+       '--type', 'merge', '-p', JSON.generate('spec' => { 'job' => { 'state' => 'suspended' } })
+  deadline = Time.now + (5 * 60)
+  loop do
+    pods, = capture('kubectl', 'get', 'pods', '-n', namespace, '-l', "app=#{deployment}",
+                    '-o', 'jsonpath={.items[*].metadata.name}')
+    return if pods.to_s.strip.empty?
+    abort "\e[31mlos pods de #{deployment} no se fueron en 5 min.\e[0m" if Time.now > deadline
+
+    sleep 5
+  end
+end
+
+def resume_flink!(deployment, namespace)
+  run! 'kubectl', 'patch', 'flinkdeployment', deployment, '-n', namespace,
+       '--type', 'merge', '-p', JSON.generate('spec' => { 'job' => { 'state' => 'running' } })
+end
+
+def serving_up
+  run! 'kubectl', 'scale', 'deploy/trino', '-n', 'platform', '--replicas=1'
+  wait_for_workload('platform', 'deploy/trino')
+end
+
+# One line out of the Trino CLI: the digest both reads have to agree on.
+#
+# The Deployment reports Ready before the server accepts queries ("Trino
+# server is still initializing"), so the read is retried for a few minutes.
+def trino_digest(sql, timeout_minutes: 6)
+  deadline = Time.now + (timeout_minutes * 60)
+  loop do
+    out, ok = capture('kubectl', 'run', 'trino-digest', '-n', 'platform', '--rm', '-i',
+                      '--restart=Never', '--image=' + trino_image,
+                      '--image-pull-policy=IfNotPresent', '--command', '--',
+                      'trino', '--server', 'http://trino.platform.svc.cluster.local:8080',
+                      '--output-format', 'TSV', '--execute', sql)
+    # kubectl prints "pod ... deleted from platform namespace" AFTER the query
+    # output, so the answer is picked by its shape (TSV row starting with the
+    # row count) and not by position.
+    line = out.lines.map(&:strip).find { |candidate| candidate.match?(/^\d+\t/) }
+    return line if ok && line
+    unless out.to_s.include?('still initializing')
+      warn_msg("la consulta a Trino fallo: #{out.to_s.strip}") unless ok
+      return line
+    end
+
+    return nil if Time.now > deadline
+
+    sleep 20
+  end
+end
+
 namespace :stream do
+  desc 'Show the Iceberg state of the windowed table (reads the metadata, no query engine)'
+  task :state do
+    banner 'STREAM TABLE STATE'
+    state = orders_windowed_state
+    snapshot = state['snapshots'].find { |s| s['snapshot-id'] == state['current-snapshot-id'] } ||
+               state['snapshots'].last
+    summary = snapshot&.fetch('summary', {}) || {}
+    puts "  table            sales.orders_windowed"
+    puts "  current snapshot #{state['current-snapshot-id']}"
+    puts "  operation        #{summary['operation']}"
+    puts "  total-records    #{summary['total-records']}"
+    puts "  total-data-files #{summary['total-data-files']}"
+    puts "  snapshots        #{state['snapshots'].length}"
+  end
+
+  desc 'RF-10: replay the whole log into the speed layer (rotates the consumer group)'
+  task :replay do
+    banner 'STREAM REPLAY (RF-10)'
+    deployment = 'flink-orders-stream'
+    namespace = 'sales'
+
+    state = flink_state(deployment, namespace)
+    abort "\e[31m#{deployment} is not deployed. Bring the speed layer up first: rake ramp:stream\e[0m" if state.nil?
+
+    last_commit = last_commit_timestamp
+    group_var, group = rotate_consumer_group!(deployment, namespace, state)
+    info_msg("#{group_var} -> #{group} y KAFKA_START_OFFSET=earliest")
+    wait_for_new_commit(deployment, namespace, last_commit)
+    ok_msg('el job releyo el log entero desde el offset 0 y volvio a commitear')
+    info_msg('nota: total-records CRECE aunque el resultado sea identico, porque el')
+    info_msg('sink escribe en UPSERT (merge-on-read): cada commit anade los registros')
+    info_msg('nuevos y los equality-deletes de los anteriores. La prueba logica:')
+    info_msg('  rake stream:replay:verify')
+  end
+
+  desc 'RF-10 acceptance: a full replay regenerates the SAME logical result (suspends Flink, uses Trino)'
+  task 'replay:verify' do
+    banner 'STREAM REPLAY - VERIFICACION LOGICA (RF-10)'
+    deployment = 'flink-orders-stream'
+    namespace = 'sales'
+    sql = <<~SQL.gsub(/\s+/, ' ').strip
+      SELECT count(*) AS filas,
+             CAST(round(sum(window_orders)) AS bigint) AS pedidos,
+             CAST(round(sum(window_revenue), 2) AS varchar) AS ingresos,
+             to_hex(md5(to_utf8(array_join(array_agg(
+               concat(CAST(window_start AS varchar), '|', status, '|',
+                      CAST(window_orders AS varchar), '|',
+                      CAST(round(window_revenue, 2) AS varchar)) ORDER BY 1), ',')))) AS huella
+      FROM iceberg.sales.orders_windowed
+    SQL
+
+    state = flink_state(deployment, namespace)
+    abort "\e[31m#{deployment} is not deployed. Bring the speed layer up first: rake ramp:stream\e[0m" if state.nil?
+
+    # Flink and Trino do not fit in this box AT THE SAME TIME (that is what the
+    # increments exist for), so the two reads are taken with the job suspended:
+    # upgradeMode=stateless makes suspending cheap and safe.
+    info_msg('suspendiendo el job para dejar sitio a Trino...')
+    suspend_flink!(deployment, namespace)
+    serving_up
+    before = trino_digest(sql)
+    apply_down([['scale', 'platform', 'deploy/trino', 0]])
+    puts "  antes del replay  #{before}"
+
+    if before.nil? || before.to_s.strip.empty?
+      abort "\e[31mTrino no devolvio nada; no se puede comparar.\e[0m"
+    end
+
+    last_commit = last_commit_timestamp
+    resume_flink!(deployment, namespace)
+    group_var, group = rotate_consumer_group!(deployment, namespace,
+                                              flink_state(deployment, namespace))
+    info_msg("#{group_var} -> #{group} (segundo replay completo del mismo log)")
+    wait_for_new_commit(deployment, namespace, last_commit)
+
+    info_msg('suspendiendo otra vez para volver a leer con Trino...')
+    suspend_flink!(deployment, namespace)
+    serving_up
+    after = trino_digest(sql)
+    puts "  despues del replay #{after}"
+
+    if before == after
+      ok_msg('RF-10 VERIFICADO: releer el log entero regenera exactamente el mismo')
+      ok_msg('resultado logico (misma huella md5); el replay es idempotente.')
+    else
+      abort "\e[31mRF-10: el replay cambio el resultado logico.\n  antes:   #{before}\n" \
+            "  despues: #{after}\e[0m"
+    end
+  end
+
+  desc 'RF-09: measured latency from the producer log to the Iceberg commit'
+  task :latency do
+    banner 'STREAM LATENCY (RF-09)'
+    producer, ok = capture('kubectl', 'logs', '-n', 'platform', 'job/event-producer')
+    abort "\e[31mNo event-producer Job to read. Run: rake stream:produce:cluster\e[0m" unless ok
+
+    finished = producer.lines.grep(/Finished publishing/).last
+    abort "\e[31mThe producer log has no 'Finished publishing' line.\e[0m" if finished.nil?
+    produced_at = Time.parse(finished[/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d/].tr('T', ' '))
+    events = finished[/(\d+) events/, 1]
+
+    commits = commit_timestamps
+    if commits.empty?
+      abort "\e[31mNo commits in the TaskManager log. Is the speed layer RUNNING? rake stream:logs\e[0m"
+    end
+
+    # A commit that is logged just after the producer stopped may have STARTED
+    # before the last event was produced (the log line carries the END of the
+    # commit, which on this box takes 8-17 s), so the honest measurement waits
+    # for the sink to go quiet: once no new commit appears for 45 s there is
+    # nothing left to flush and the last commit carried the final windows.
+    info_msg('esperando a que el sink se quede quieto (45 s sin commits)...')
+    quiet_deadline = Time.now + (5 * 60)
+    last_seen = commits.last[:at]
+    loop do
+      sleep 15
+      current = commit_timestamps
+      if current.length > commits.length
+        commits = current
+        last_seen = commits.last[:at]
+      end
+      break if Time.now - last_seen > 45
+      break if Time.now > quiet_deadline
+    end
+
+    after = commits.select { |commit| commit[:at] >= produced_at }
+
+    puts "  productor termino   #{produced_at}  (#{events} eventos)"
+    puts "  commits observados  #{commits.length}"
+    puts
+    puts '  ultimos commits (checkpoint -> duracion -> hora):'
+    commits.last(5).each do |commit|
+      puts format('    #%-4s %6s ms  %s', commit[:checkpoint], commit[:duration_ms], commit[:at])
+    end
+    puts
+
+    if after.empty?
+      warn_msg('ningun commit posterior al productor: la ventana aun no se ha cerrado')
+      return
+    end
+
+    best = (after.first[:at] - produced_at).round(1)
+    worst = (after.last[:at] - produced_at).round(1)
+    puts "  ultimo evento -> primer commit:  #{best} s"
+    puts "  ultimo evento -> commit final:   #{worst} s   (ya no quedaban filas por escribir)"
+    puts "  duracion del commit final:       #{after.last[:duration_ms]} ms"
+    puts
+    puts '  desglose del presupuesto:'
+    puts '    ventana + watermark (config):        <= 4.5 s'
+    puts '    espera al siguiente checkpoint:      <= 30 s (enable_checkpointing(30_000))'
+    puts "    commit del sink (medido):            ~ #{after.last[:duration_ms]} ms (I/O de esta maquina)"
+    puts
+    info_msg('RF-09: el agregado se CALCULA en <= 4.5 s, pero la FILA queda visible')
+    info_msg("solo en el siguiente checkpoint: #{worst} s medidos de punta a punta aqui.")
+  end
+
   desc 'Deploy Kafka + Flink Operator + the speed-layer jobs via Helm'
   task :deploy do
     puts "\e[33m[S4] Deploying Kafka + Flink Operator + Flink jobs...\e[0m"
@@ -1460,6 +1861,84 @@ namespace :stream do
   task :produce do
     puts "\e[33m[S4] Publishing events to Kafka for 60 s at 20 events/s...\e[0m"
     sh 'python data-generator/event_producer.py --bootstrap-servers localhost:9092 --rate 20 --duration 60'
+  end
+
+  desc 'Publish domain events into Kafka FROM INSIDE the cluster (args: rate=20 duration=60)'
+  task 'produce:cluster', [:rate, :duration] do |_t, args|
+    banner 'STREAM PRODUCE (in-cluster)'
+    job_file = File.join('infra', 'diagnostics', 'event-producer.job.yaml')
+    abort "\e[31mMissing #{job_file}\e[0m" unless File.exist?(job_file)
+
+    rate = args[:rate].to_s.strip
+    rate = '20' if rate.empty?
+    duration = args[:duration].to_s.strip
+    duration = '60' if duration.empty?
+
+    _, api_ok = capture('kubectl', 'cluster-info')
+    unless api_ok
+      abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m"
+    end
+    brokers, = capture('kubectl', 'get', 'endpoints', 'kafka', '-n', 'platform',
+                       '-o', 'jsonpath={.subsets[0].addresses[0].ip}')
+    if brokers.to_s.strip.empty?
+      abort "\e[31mThe Kafka broker is not ready. Run: rake ramp:kafka\e[0m"
+    end
+
+    # The rate and the duration are part of the container's command, and a
+    # Job's spec is immutable once its pod runs, so the manifest is submitted
+    # with the values already in it.
+    #
+    # The check is on the RESULT and not on "the text changed": with the
+    # default rate and duration (20 and 60) the substitution is a no-op and
+    # comparing against the original file reported a bogus patch failure.
+    manifest = File.read(job_file)
+                   .sub('- "20"', "- \"#{rate}\"")
+                   .sub('- "60"', "- \"#{duration}\"")
+    unless manifest.include?("- \"#{rate}\"") && manifest.include?("- \"#{duration}\"")
+      abort "\e[31mcould not patch the rate/duration into the manifest.\e[0m"
+    end
+
+    run! 'kubectl', 'delete', 'job', 'event-producer', '-n', 'platform', '--ignore-not-found'
+    applied, apply_ok = capture('kubectl', 'apply', '-f', '-', stdin: manifest)
+    abort "\e[31mno se pudo crear el Job del producer: #{applied}\e[0m" unless apply_ok
+
+    info_msg("publicando #{rate} eventos/s durante #{duration}s dentro del clúster...")
+
+    deadline = Time.now + (duration.to_i + 180)
+    phase = ''
+    loop do
+      complete, = capture('kubectl', 'get', 'job', 'event-producer', '-n', 'platform',
+                          '-o', 'jsonpath={.status.conditions[?(@.type=="Complete")].status}')
+      if complete.to_s.strip == 'True'
+        phase = 'complete'
+        break
+      end
+      failed, = capture('kubectl', 'get', 'job', 'event-producer', '-n', 'platform',
+                        '-o', 'jsonpath={.status.failed}')
+      if failed.to_s.strip.to_i.positive?
+        phase = 'failed'
+        break
+      end
+      if Time.now > deadline
+        phase = 'timeout'
+        break
+      end
+      sleep 10
+    end
+
+    puts
+    logs, = capture('kubectl', 'logs', '-n', 'platform', 'job/event-producer')
+    puts logs unless logs.to_s.strip.empty?
+    puts
+
+    case phase
+    when 'complete'
+      ok_msg('EVENTOS PUBLICADOS EN KAFKA')
+    when 'failed'
+      abort "\e[31mPRODUCE: el Job fallo (exit != 0). Lee el log de arriba.\e[0m"
+    else
+      abort "\e[31mPRODUCE: no termino a tiempo. Logs: kubectl logs -n platform job/event-producer\e[0m"
+    end
   end
 
   desc 'Prove the speed layer in ONE pod: window operators -> Iceberg -> Parquet (no Kafka/JM/TM)'
@@ -1865,6 +2344,96 @@ namespace :lakehouse do
       abort "\e[31mPROBE: no termino en 8 min. Logs: kubectl logs -n platform job/lakehouse-rows-probe\e[0m"
     end
   end
+
+  desc 'Re-register the Iceberg tables in the Polaris catalogue after a Polaris restart'
+  task :restore do
+    banner 'LAKEHOUSE RESTORE'
+    run_lakehouse_restore
+  end
+end
+
+# Re-registers the Iceberg tables in the Polaris catalogue and waits for it.
+#
+# Polaris keeps the catalogue IN MEMORY, so every restart of the pod leaves it
+# empty even though the tables and their data are still in MinIO. Anything
+# that reads the lakehouse through the catalogue (Trino, the Flink speed
+# layer, the row counter) then fails with:
+#
+#   org.apache.iceberg.exceptions.RESTException: Unable to process:
+#   Unable to find warehouse polaris
+#
+# so this runs before every increment that reads the lakehouse.
+def run_lakehouse_restore
+  script = File.join('infra', 'diagnostics', 'polaris_restore.py')
+  job_file = File.join('infra', 'diagnostics', 'polaris-restore.job.yaml')
+  abort "\e[31mMissing #{script}\e[0m" unless File.exist?(script)
+  abort "\e[31mMissing #{job_file}\e[0m" unless File.exist?(job_file)
+
+  _, api_ok = capture('kubectl', 'cluster-info')
+  unless api_ok
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m"
+  end
+  up, = capture('kubectl', 'get', 'pods', '-n', 'platform',
+                '-o', 'jsonpath={.items[*].metadata.name}')
+  %w[minio polaris].each do |component|
+    next if up.to_s.match?(/\A#{component}-\d/) || up.to_s.match?(/#{component}-[a-z0-9]+-/)
+
+    abort "\e[31m#{component} is not running in namespace platform.\e[0m\n" \
+          "\e[33mDeploy it first: rake ramp:lakehouse\e[0m"
+  end
+
+  run! 'kubectl', 'delete', 'job', 'polaris-restore', '-n', 'platform',
+       '--ignore-not-found'
+  run! 'kubectl', 'delete', 'configmap', 'polaris-restore', '-n', 'platform',
+       '--ignore-not-found'
+  run! 'kubectl', 'create', 'configmap', 'polaris-restore', '-n', 'platform',
+       "--from-file=polaris_restore.py=#{script}"
+
+  applied, apply_ok = capture('kubectl', 'apply', '-f', job_file)
+  abort "\e[31mno se pudo crear el Job de restore: #{applied}\e[0m" unless apply_ok
+
+  info_msg('re-registrando las tablas en el catalogo de Polaris...')
+
+  deadline = Time.now + (10 * 60)
+  phase = ''
+  loop do
+    complete, = capture('kubectl', 'get', 'job', 'polaris-restore', '-n', 'platform',
+                        '-o', 'jsonpath={.status.conditions[?(@.type=="Complete")].status}')
+    if complete.to_s.strip == 'True'
+      phase = 'complete'
+      break
+    end
+    failed, = capture('kubectl', 'get', 'job', 'polaris-restore', '-n', 'platform',
+                      '-o', 'jsonpath={.status.failed}')
+    if failed.to_s.strip.to_i.positive?
+      phase = 'failed'
+      break
+    end
+    if Time.now > deadline
+      phase = 'timeout'
+      break
+    end
+    sleep 10
+  end
+
+  puts
+  logs, = capture('kubectl', 'logs', '-n', 'platform', 'job/polaris-restore')
+  puts logs unless logs.to_s.strip.empty?
+  puts
+
+  case phase
+  when 'complete'
+    if logs.to_s.include?('RESTORE: OK')
+      ok_msg('EL CATALOGO DE POLARIS TIENE LAS TABLAS')
+      true
+    else
+      abort "\e[31mRESTORE: el Job termino sin 'RESTORE: OK'.\e[0m"
+    end
+  when 'failed'
+    abort "\e[31mRESTORE: el Job fallo (exit != 0). Lee el log de arriba.\e[0m"
+  else
+    abort "\e[31mRESTORE: no termino en 10 min. Logs: kubectl logs -n platform job/polaris-restore\e[0m"
+  end
 end
 
 # ------------------------------------------------------------------------------
@@ -1935,28 +2504,43 @@ DEMO_PHASES = [
     'charts' => %w[s5-serving],
     'down' => [['delete', 'flinkdeployment', 'flink-orders-stream', 'sales'],
                ['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
-               ['scale', 'platform', 'deploy/kafka', 0]],
+               # Kafka is a StatefulSet, not a Deployment: scaling
+               # "deploy/kafka" fails with "the server doesn't have a resource
+               # type deploy" and the broker stays up with its 768Mi of limits,
+               # which is what the serving phase cannot afford.
+               ['scale', 'platform', 'statefulset/kafka', 0]],
     'wait' => [['platform', 'deploy/trino']]
   },
   {
     'name' => 'fabric',
     'profile' => 'platform',
     'charts' => %w[s7-fabric],
-    'down' => [['scale', 'platform', 'deploy/trino', 0]],
+    # Kafka is not part of the lineage: it comes down so the fabric phase has
+    # room for Marquez, its database and the alert service.
+    'down' => [['scale', 'platform', 'deploy/trino', 0],
+               ['scale', 'platform', 'statefulset/kafka', 0],
+               ['scale', 'platform', 'deploy/postgres-oltp', 0]],
     'wait' => [['platform', 'deploy/marquez'], ['platform', 'deploy/lineage-alert-service']]
   },
   {
     'name' => 'ops',
     'profile' => 'demo',
     'charts' => %w[s8-ops],
-    'down' => [['scale', 'platform', 'deploy/flink-kubernetes-operator', 0]],
+    # Kafka comes BACK up: Prometheus scrapes it (kafka_consumergroup_lag), and
+    # a scrape target that is down is not a verification.
+    'down' => [['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
+               ['scale', 'platform', 'statefulset/kafka', 1]],
     'wait' => [['platform', 'deploy/s8-ops-prometheus'], ['platform', 'deploy/s8-ops-grafana']]
   },
   {
     'name' => 'governance',
     'profile' => 'demo',
     'charts' => %w[s6-mesh],
-    'down' => [['scale', 'platform', 'deploy/kafka', 0]],
+    'down' => [['scale', 'platform', 'statefulset/kafka', 0],
+               ['scale', 'platform', 'deploy/s8-ops-prometheus', 0],
+               ['scale', 'platform', 'deploy/s8-ops-grafana', 0],
+               ['scale', 'platform', 'deploy/marquez', 0],
+               ['scale', 'platform', 'deploy/lineage-alert-service', 0]],
     # The s6-mesh chart only APPLIES the ClusterPolicies; the controller and
     # its CRDs come from the upstream chart, which the cluster:create task
     # already registers (https://kyverno.github.io/kyverno/).
@@ -1966,7 +2550,11 @@ DEMO_PHASES = [
 
 
 # Installs the given charts of a profile. Returns the number of failures.
-def helm_upgrade_charts(profile, charts)
+#
+# `sets` maps a chart name to its --set overrides:
+#   helm_upgrade_charts('stream', %w[s2-lakehouse s4-stream],
+#                       's4-stream' => { 'flinkJobs.ordersStream.enabled' => 'false' })
+def helm_upgrade_charts(profile, charts, sets = {})
   failures = 0
   charts.each do |chart|
     unless File.directory?(File.join('infra', 'helm', chart))
@@ -1984,7 +2572,7 @@ def helm_upgrade_charts(profile, charts)
       warn_msg("no '#{chart}' section in #{profile}; installing with chart defaults")
     end
     info_msg("deploying Helm chart: #{chart}")
-    if helm_upgrade(chart, values&.path)
+    if helm_upgrade(chart, values&.path, sets[chart] || {})
       ok_msg(chart)
     else
       err_msg(chart)
@@ -2040,6 +2628,489 @@ def wait_for_workload(ns, target, timeout_s = 300)
     warn_msg("#{ns}/#{target} not ready: #{out.to_s.lines.last.to_s.strip}")
   end
   ok
+end
+
+# ------------------------------------------------------------------------------
+# RAMP: the platform as a ladder of MINIMAL increments
+# ------------------------------------------------------------------------------
+#
+# The podman machine that backs kind has 5.9 GiB of RAM, and the three kind
+# node CONTAINERS are not free: measured from the host they are 2.0 + 1.5 +
+# 1.6 GB. The cluster itself costs ~3.5 GB before a single application pod
+# starts. Worse, every node REPORTS ~5.79 GiB of allocatable memory (they all
+# see the same VM), so the scheduler happily commits 17.4 GiB on a 5.9 GiB
+# machine and the kubelet then evicts whatever is unlucky - which is what made
+# the failures look random (minio's liveness probe timing out, marquez
+# OOM-killed, the scheduler losing its lease 107 times).
+#
+# So the platform is deployed in INCREMENTS. Each one brings up ONLY the pods
+# its test needs and takes the rest down, and the ledger (rake ramp:status)
+# prints the sum of the limits of the running pods: that sum, not the
+# scheduler's opinion, is the number that has to stay under the box.
+#
+#   ramp:lakehouse  minio + polaris                    -> the catalogue
+#   ramp:kafka      + kafka                            -> the topics
+#   ramp:stream     + flink operator + flink job       -> the speed layer
+#   ramp:serving    + trino (kafka and flink down)     -> the unified view
+#
+# The lakehouse crosses the increments: the data lives in MinIO, not in a pod,
+# which is why the speed layer and the serving layer see the same gold rows.
+#
+# s2-lakehouse is upgraded ONCE, by ramp:lakehouse, and never again. Its
+# chart has three Jobs that run on EVERY upgrade - the Polaris bootstrap (it
+# re-creates the catalogue, which WIPES it), the catalogue registration and
+# the bucket initialisation - and that burst of pods is what starves MinIO
+# and the API server on this box:
+#
+#   FALLO: sales.bronze_orders: error al leer (AWS Error NETWORK_CONNECTION
+#   during GetObject operation: curlCode: 28, Timeout was reached)
+#
+# The limits it needs are the same in the stream and the serving profile, so
+# there is nothing to change by re-upgrading it.
+#
+# The heavy increments additionally STOP the "worker" kind node, which is
+# where 1.5 GB of the overhead sits. The node comes back with
+# `rake ramp:node:start`.
+# ------------------------------------------------------------------------------
+
+# The kind node the heavy phases stop. It carries the "storage" role
+# (MinIO's PVC is on worker2, but Kafka's, Postgres' and Marquez' are on this
+# one), so stopping it is only possible when the workloads that need a
+# node-local volume are not in the increment.
+RAMP_HEAVY_NODE = 'poc-data-platform-worker'.freeze
+
+# The node the heavy workloads run on: the Flink operator's image and the
+# lakehouse's live there, so the 1.7 GB Flink image only has to be loaded
+# once.
+RAMP_COMPUTE_NODE = 'poc-data-platform-worker2'.freeze
+
+# Everything that is never part of an increment. Scaled to zero, not
+# uninstalled: the PVCs of the lineage database and the lakehouse are what
+# carry the data across the phases.
+RAMP_COMMON_DOWN = [
+  ['scale', 'platform', 'deploy/postgres-oltp', 0],
+  ['scale', 'platform', 'deploy/spark-operator', 0],
+  ['scale', 'platform', 'deploy/marquez', 0],
+  ['scale', 'platform', 'deploy/marquez-postgresql', 0],
+  ['scale', 'platform', 'deploy/lineage-alert-service', 0],
+  ['scale', 'platform', 'deploy/s8-ops-prometheus', 0],
+  ['scale', 'platform', 'deploy/s8-ops-grafana', 0],
+  ['delete', 'flinkdeployment', 'flink-orders-stream', 'sales']
+].freeze
+
+# Converts a human memory size ("1.615GB", "384Mi", "512MiB") to MiB.
+#
+# The unit letter is required and the trailing "B" is optional: Kubernetes
+# writes "320Mi" and podman writes "1.615GB", so a pattern that expects the
+# trailing B misses every Kubernetes quantity.
+#
+# The first match is taken instead of the whole string: the jsonpath below
+# concatenates the limits of a multi-container pod into one field.
+def mem_to_mib(text)
+  m = text.to_s.strip.match(/([\d.]+)\s*([KMG])i?B?/i)
+  return 0 if m.nil?
+
+  factor = case m[2].upcase
+           when 'K' then 1.0 / 1024
+           when 'M' then 1.0
+           when 'G' then 1024.0
+           else 0.0
+           end
+  (m[1].to_f * factor).round
+end
+
+# The RAM ledger: the running pods with their memory limits, their sum, and
+# the memory the kind node containers are holding. The sum is what the box
+# actually has to give, because the scheduler believes there is 17.4 GiB.
+def ram_ledger
+  # `containers[*]` and not `containers[0]`: inside a `range`, kubectl's
+  # jsonpath does NOT resolve the indexed form and returns an empty string
+  # for the limit, which made the whole ledger read 0 MiB.
+  out, ok = capture('kubectl', 'get', 'pods', '-A',
+                    '-o', 'jsonpath={range .items[*]}{.metadata.namespace}{" "}' \
+                    '{.metadata.name}{" "}{.status.phase}{" "}' \
+                    '{.spec.containers[*].resources.limits.memory}{"\n"}{end}')
+  pods = []
+  if ok
+    out.lines.each do |line|
+      ns, name, phase, limit = line.strip.split(/\s+/, 4)
+      next if ns.nil? || phase != 'Running'
+
+      pods << { ns: ns, name: name, mib: mem_to_mib(limit) }
+    end
+  end
+
+  probe = podman_probe
+  overhead = 0
+  probe[:containers].each do |container|
+    stats, stats_ok = capture('podman', '--connection', container[:connection], 'stats',
+                               '--no-stream', '--format', '{{.MemUsage}}', container[:name])
+    next unless stats_ok
+
+    overhead += mem_to_mib(stats.to_s.split('/').first.to_s.strip)
+  end
+
+  # The kube-system pods are NOT part of the budget: they are the control
+  # plane, they run whether the platform is up or not, and counting them
+  # twice (once here, once inside the kind node containers) makes the number
+  # meaningless.
+  apps = pods.reject { |p| p[:ns] == 'kube-system' || p[:ns] == 'local-path-storage' }
+  {
+    pods: pods,
+    apps_mib: apps.sum { |p| p[:mib] },
+    limits_mib: pods.sum { |p| p[:mib] },
+    kind_mib: overhead
+  }
+end
+
+# Prints the ledger and says whether the box has room for what comes next.
+def ramp_report(budget_mib = 1600)
+  ledger = ram_ledger
+  banner 'RAM LEDGER'
+  ledger[:pods].sort_by { |p| -p[:mib] }.each do |pod|
+    marker = pod[:ns] == 'kube-system' || pod[:ns] == 'local-path-storage' ? ' ' : '*'
+    puts format('%s %-10s %-44s %6s MiB', marker, pod[:ns], pod[:name], pod[:mib])
+  end
+  puts
+  puts format('  %-55s %6d MiB', 'sum of the APPLICATION pods LIMITS', ledger[:apps_mib])
+  puts format('  %-55s %6d MiB', 'sum of ALL the running pods limits', ledger[:limits_mib])
+  puts format('  %-55s %6d MiB', 'kind node containers (measured from the host)', ledger[:kind_mib])
+  puts
+  if ledger[:apps_mib] > budget_mib
+    warn_msg("the application pods ask for #{ledger[:apps_mib]} MiB, over the #{budget_mib} MiB budget")
+  else
+    ok_msg("the application pods ask for #{ledger[:apps_mib]} MiB of the #{budget_mib} MiB budget")
+  end
+  ledger
+end
+
+# Stops a kind node: drain it first so the API server evicts its pods, then
+# stop the container so its kubelet stops reporting.
+def ramp_node_stop(name)
+  probe = podman_probe
+  container = probe[:containers].find { |c| c[:name] == name }
+  if container.nil?
+    warn_msg("kind node container #{name} not found")
+    return false
+  end
+
+  unless container_running?(container)
+    ok_msg("kind node #{name} is already stopped")
+    return true
+  end
+
+  info_msg("draining #{name}...")
+  _out, ok = capture('kubectl', 'drain', name, '--ignore-daemonsets', '--delete-emptydir-data',
+                     '--force', '--timeout=180s')
+  warn_msg("the drain of #{name} did not finish cleanly") unless ok
+
+  # The hook Jobs are deleted BEFORE the node goes away. A pod of a node that
+  # is not there cannot be deleted (there is no kubelet to confirm the kill),
+  # so it stays Terminating forever, and a hook Job whose pod is stuck
+  # Terminating blocks the next hook of the SAME NAME:
+  #   pre-upgrade hooks failed: resource Job/platform/kafka-topic-creator
+  #   not ready. status: Failed, message: Job Failed. failed: 1/1
+  capture('kubectl', 'delete', 'job', 'kafka-topic-creator', '-n', 'platform',
+          '--ignore-not-found', '--force', '--grace-period=0')
+
+  info_msg("stopping the #{name} container...")
+  _out, ok = capture('podman', '--connection', container[:connection], 'stop', name)
+  unless ok
+    err_msg("could not stop #{name}")
+    return false
+  end
+  ok_msg("#{name} stopped (#{name} was holding ~1.5 GB of the VM)")
+  true
+end
+
+# Starts a kind node back and waits for it to be Ready again.
+def ramp_node_start(name)
+  probe = podman_probe
+  container = probe[:containers].find { |c| c[:name] == name }
+  if container.nil?
+    err_msg("kind node container #{name} not found")
+    return false
+  end
+
+  unless container_running?(container)
+    info_msg("starting the #{name} container...")
+    _out, ok = capture('podman', '--connection', container[:connection], 'start', name)
+    unless ok
+      err_msg("could not start #{name}")
+      return false
+    end
+  end
+
+  capture('kubectl', 'uncordon', name)
+  info_msg("waiting for #{name} to be Ready...")
+  deadline = Time.now + (5 * 60)
+  loop do
+    ready, = capture('kubectl', 'get', 'node', name,
+                     '-o', 'jsonpath={.status.conditions[?(@.type=="Ready")].status}')
+    break if ready.to_s.strip == 'True'
+    if Time.now > deadline
+      err_msg("#{name} did not become Ready in 5 min")
+      return false
+    end
+    sleep 5
+  end
+  ok_msg("#{name} is Ready again")
+  true
+end
+
+# Deletes the Kafka StatefulSet and its volume.
+#
+# Needed because `persistence.enabled` is part of the StatefulSet's
+# volumeClaimTemplates, and those are IMMUTABLE: switching the flag from true
+# to false on a live StatefulSet fails with "updates to statefulset spec for
+# fields other than 'replicas' are forbidden". The broker's log is a
+# throwaway buffer - the events are re-produced on every run and the topics
+# are recreated by the hook - so dropping it costs nothing.
+def ramp_kafka_reset
+  capture('kubectl', 'delete', 'statefulset/kafka', '-n', 'platform', '--ignore-not-found')
+  capture('kubectl', 'delete', 'pvc', 'data-kafka-0', '-n', 'platform', '--ignore-not-found')
+  capture('kubectl', 'delete', 'job', 'kafka-topic-creator', '-n', 'platform', '--ignore-not-found')
+
+  # The ControllerRevisions of the old StatefulSet have to go with it. They
+  # are named after a HASH of the pod template, so the next StatefulSet
+  # adopts the leftovers, and then currentRevision and updateRevision point
+  # at a revision that is NOT the pod's: the rolling update never fires and
+  # the broker keeps running the old template (and the old heap) forever.
+  #
+  #   currentRev=kafka-8667856cd4 updateRev=kafka-8667856cd4
+  #   podHash=kafka-5c76cdddfc
+  capture('kubectl', 'delete', 'controllerrevision', '-n', 'platform',
+          '--selector', 'app=kafka', '--ignore-not-found')
+end
+
+# Loads an image into ONE kind node.
+#
+# cluster:image:load copies into EVERY node, and on this box that is several
+# GB of writes: the Flink image alone is 1.7 GB, and the filesystem (a WSL2
+# rootfs on the Windows one) does not take that without starving etcd and
+# killing the API server. The ramp increments pin the workloads to one node,
+# so one copy is enough.
+def ramp_load_image(image, node_name)
+  probe = podman_probe
+  node = probe[:containers].find { |c| c[:name] == node_name }
+  if node.nil?
+    err_msg("kind node #{node_name} not found")
+    return false
+  end
+  load_image_into(node, image)
+end
+
+# The topic creator is a PRE-upgrade hook: it runs BEFORE Helm applies the
+# release, so the broker it has to talk to has to be up already. When the
+# previous increment scaled Kafka down, the hook waits 300s for a broker that
+# does not exist yet and the whole upgrade fails with
+#   pre-upgrade hooks failed: resource Job/platform/kafka-topic-creator not
+#   ready. status: InProgress, message: Job in progress
+def ramp_broker_up
+  capture('kubectl', 'scale', 'statefulset/kafka', '-n', 'platform', '--replicas=1')
+  wait_for_workload('platform', 'statefulset/kafka', 300)
+end
+
+namespace :ramp do
+  desc 'Show the RAM ledger: the running pods, their limits and the kind overhead'
+  task :status do
+    banner 'RAMP STATUS'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    ramp_report
+    puts
+    info_msg('next increments: ramp:lakehouse -> ramp:kafka -> ramp:stream -> ramp:serving')
+  end
+
+  desc 'Increment I0: the lakehouse only (MinIO + Polaris) and its catalogue'
+  task :lakehouse do
+    banner 'RAMP I0 - LAKEHOUSE'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    RAMP_COMMON_DOWN.each { |entry| apply_down(entry) }
+    [['scale', 'platform', 'statefulset/kafka', 0],
+     ['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
+     ['scale', 'platform', 'deploy/trino', 0]].each { |entry| apply_down(entry) }
+
+    failures = helm_upgrade_charts('stream', %w[s2-lakehouse])
+    abort "\e[31ms2-lakehouse did not install cleanly.\e[0m" unless failures.zero?
+
+    wait_for_workload('platform', 'deploy/minio')
+    wait_for_workload('platform', 'deploy/polaris')
+    ramp_report
+    info_msg('next: rake lakehouse:restore (the catalogue is empty after a Polaris restart)')
+  end
+
+  desc 'Increment I1: the lakehouse plus the Kafka broker and its topics'
+  task :kafka do
+    banner 'RAMP I1 - LAKEHOUSE + KAFKA'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    RAMP_COMMON_DOWN.each { |entry| apply_down(entry) }
+    [['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
+     ['scale', 'platform', 'deploy/trino', 0]].each { |entry| apply_down(entry) }
+
+    # The Flink job stays off in this increment: the broker and the topics are
+    # what this one proves, and the speed layer is the increment that does not
+    # fit without freeing a node.
+    #
+    # Kafka runs WITHOUT a volume from here on: the log is disposable, and
+    # without a PVC the broker can be scheduled on any node, which is what
+    # lets the heavy increment stop one.
+    ramp_kafka_reset
+
+    failures = helm_upgrade_charts('stream', %w[s4-stream],
+                                    's4-stream' => { 'flinkJobs.ordersStream.enabled' => 'false',
+                                                    'flinkOperator.enabled' => 'false',
+                                                    'kafka.persistence.enabled' => 'false' })
+    abort "\e[31mthe charts did not install cleanly.\e[0m" unless failures.zero?
+
+    wait_for_workload('platform', 'deploy/minio')
+    wait_for_workload('platform', 'deploy/polaris')
+    wait_for_workload('platform', 'statefulset/kafka')
+    ramp_report
+  end
+
+  desc 'Increment I2: the speed layer (Kafka + Flink). Stops the worker node'
+  task :stream do
+    banner 'RAMP I2 - SPEED LAYER'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    RAMP_COMMON_DOWN.each { |entry| apply_down(entry) }
+    [['scale', 'platform', 'deploy/trino', 0]].each { |entry| apply_down(entry) }
+
+    # The Flink image has to be in the node the job runs on: it is 1.7 GB
+    # and loading it into every node is several GB of writes, which on this
+    # filesystem (a WSL2 rootfs on the Windows one) starves etcd and kills
+    # the API server. The job is pinned to the compute node.
+    unless ramp_load_image('docker.io/poc/flink-stream:0.1.0', RAMP_COMPUTE_NODE)
+      abort "\e[31mthe Flink image could not be loaded into #{RAMP_COMPUTE_NODE}.\e[0m"
+    end
+
+    # The node is stopped BEFORE the upgrade, not after it.
+    #
+    # Starting the Flink JobManager and TaskManager on top of the cluster as
+    # it is pushes the box past its memory, and the API server dies first:
+    # the RBAC error Helm reports ("kubernetes-admin cannot list jobs",
+    # "cluster-admin not found") is a SYMPTOM of the apiserver restarting,
+    # not a permission problem. Stopping the node first frees 1.5 GB, and
+    # the apiserver survives the arrival of the speed layer.
+    ramp_node_stop(RAMP_HEAVY_NODE)
+
+    # Kafka's PVC lived on the node this increment stops, and a Pod cannot be
+    # scheduled on a node that is not there: the broker's log is a throwaway
+    # buffer (the events are re-produced on every run), so it runs without a
+    # volume in this increment.
+    # The catalogue is restored BEFORE the speed layer starts. Polaris keeps
+    # it in memory, so it is empty after every restart of the pod, and the
+    # Flink job cannot even start without it:
+    #   org.apache.iceberg.exceptions.RESTException: Unable to process:
+    #   Unable to find warehouse polaris
+    run_lakehouse_restore
+
+    ramp_broker_up
+    ramp_kafka_reset
+
+    failures = helm_upgrade_charts('stream', %w[s4-stream],
+                                    's4-stream' => { 'kafka.persistence.enabled' => 'false' })
+    abort "\e[31mthe charts did not install cleanly.\e[0m" unless failures.zero?
+
+    wait_for_workload('platform', 'deploy/minio')
+    wait_for_workload('platform', 'deploy/polaris')
+    wait_for_workload('platform', 'statefulset/kafka')
+    wait_for_workload('platform', 'deploy/flink-kubernetes-operator')
+
+    ramp_report
+    info_msg('next: rake stream:produce:cluster, then check the Flink job')
+  end
+
+  desc 'Increment I3: the serving layer (Trino). Kafka and Flink go down'
+  task :serving do
+    banner 'RAMP I3 - SERVING LAYER'
+    _, api_ok = capture('kubectl', 'cluster-info')
+    abort "\e[31mNo reachable cluster. Start it first: rake cluster:start\e[0m" unless api_ok
+
+    RAMP_COMMON_DOWN.each { |entry| apply_down(entry) }
+    [['delete', 'flinkdeployment', 'flink-orders-stream', 'sales'],
+     ['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
+     ['scale', 'platform', 'statefulset/kafka', 0]].each { |entry| apply_down(entry) }
+
+    failures = helm_upgrade_charts('serving', %w[s5-serving])
+    abort "\e[31mthe charts did not install cleanly.\e[0m" unless failures.zero?
+
+    wait_for_workload('platform', 'deploy/minio')
+    wait_for_workload('platform', 'deploy/polaris')
+    wait_for_workload('platform', 'deploy/trino')
+    ramp_report
+    info_msg('next: query iceberg.serving.sales_unified_revenue')
+  end
+
+  namespace :node do
+    desc 'Stop the worker kind node (frees ~1.5 GB)'
+    task :stop do
+      banner 'RAMP NODE STOP'
+      ramp_node_stop(RAMP_HEAVY_NODE)
+      ramp_report
+    end
+
+    desc 'Start the worker kind node back'
+    task :start do
+      banner 'RAMP NODE START'
+      ramp_node_start(RAMP_HEAVY_NODE)
+      ramp_report
+    end
+  end
+
+  desc 'Load an image into ONE kind node (args: image=... node=...; default: the compute node)'
+  task :load, [:image, :node] do |_t, args|
+    banner 'RAMP IMAGE LOAD'
+    image = args[:image].to_s.strip
+    node = args[:node].to_s.strip
+    node = RAMP_COMPUTE_NODE if node.empty?
+    abort "\e[31mMissing the image to load. Usage: rake ramp:load[docker.io/poc/flink-stream:0.1.0]\e[0m" if image.empty?
+
+    ok = ramp_load_image(image, node)
+    abort "\e[31m#{image} could not be loaded into #{node}.\e[0m" unless ok
+    ok_msg("#{image} is in #{node}")
+  end
+end
+
+namespace :serving do
+  # The Trino CLI CANNOT be run with "kubectl exec" inside the Trino pod: the
+  # server already runs its own JVM with a 640M heap under a 1024Mi limit, and
+  # the second JVM dies before it prints anything:
+  #   Failed to start thread "Unknown thread" - pthread_create failed (EAGAIN)
+  # It is run as a throwaway pod instead, with the same image (already in the
+  # node) and the server reached through its Service.
+  desc 'Run a SQL query with the Trino CLI in its own pod (args: sql="...")'
+  task :query, [:sql] do |_t, args|
+    sql = args[:sql].to_s.strip
+    abort "\e[31mMissing the query. Usage: rake serving:query[\"SELECT 1\"]\e[0m" if sql.empty?
+
+    run! 'kubectl', 'run', 'trino-query', '--rm', '-i', '--restart=Never',
+         '--image=' + trino_image, '--image-pull-policy=IfNotPresent',
+         '--command', '--', 'trino',
+         '--server', 'http://trino.platform.svc.cluster.local:8080',
+         '--output-format', 'ALIGNED', '--execute', sql
+  end
+
+  desc 'RF-11 acceptance: the view carries both tiers and has no duplicated keys'
+  task :verify do
+    banner 'RF-11 UNIFIED VIEW'
+    Rake::Task['serving:query'].reenable
+    Rake::Task['serving:query'].invoke(
+      'SELECT source_tier, count(*) AS filas FROM iceberg.serving.sales_unified_revenue GROUP BY 1 ORDER BY 1'
+    )
+    Rake::Task['serving:query'].reenable
+    Rake::Task['serving:query'].invoke(
+      'SELECT count(*) AS claves_duplicadas FROM (SELECT order_date, status ' \
+      'FROM iceberg.serving.sales_unified_revenue GROUP BY 1,2 HAVING count(*) > 1)'
+    )
+  end
 end
 
 namespace :demo do

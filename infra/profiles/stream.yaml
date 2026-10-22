@@ -8,17 +8,27 @@
 # for streaming stays on the demo profile until a profile explicitly wires it).
 # Trino is not part of this profile either: it is the serving phase
 # (infra/profiles/serving.yaml).
-# Target RAM Footprint: workloads ~4.2 GB + ~1.3 GB control plane on a 6 GiB VM.
-# Sum of container limits actually set here:
-#   postgres 384 + minio 384 + polaris 512 + kafka 768
-#   + flink-operator 384 + flink orders JM 768 + TM 1024  = 4224 MiB
-# plus the transient bootstrap Jobs (bucket-init, polaris-schema, polaris
-# bootstrap, kafka-topics) and the control plane, which shares the same 6 GiB.
+# Target RAM Footprint: workloads ~2.5 GB + ~3.5 GB of kind overhead on a
+# 5.9 GiB VM.
+#
+# The three kind node CONTAINERS are not free: measured from the host, the
+# control-plane container alone is 2.0 GB and each worker ~1.6 GB, so the
+# cluster itself costs ~3.5 GB before a single application pod starts. That
+# leaves ~2.4 GB for everything else, and every kind node REPORTS ~5.79 GiB
+# of allocatable memory (they all see the same VM), so the scheduler happily
+# commits 17.4 GiB on a 5.9 GiB machine and the kubelet then evicts whatever
+# is unlucky. The limits below are the budget that actually fits:
+#
+#   minio 320 + polaris 384 + kafka 448 + flink-operator 192
+#   + flink orders JM 640 + TM 640                     = 2624 MiB
+#
+# and the heavy phase additionally STOPS the "worker" kind node (see
+# `rake ramp:stream`), which frees 1.5 GB and is what makes this fit.
 # ==============================================================================
 profile:
   name: "stream"
   description: "Real-time stream processing with Kafka, Apache Flink, and Observability"
-  targetRamMb: 4224
+  targetRamMb: 2624
   targetCpuCores: 4.0
 
 subsystems:
@@ -43,28 +53,39 @@ subsystems:
           cpu: "150m"
           memory: "256Mi"
         limits:
-          cpu: "500m"
-          memory: "384Mi"
+          cpu: "400m"
+          # 320Mi was not enough once the speed layer starts committing small
+          # parquet files every checkpoint: MinIO was SIGKILLed (exit 137) and
+          # the probes and the Iceberg readers lost the broker mid-flight.
+          memory: "448Mi"
     polaris:
       enabled: true
       resources:
         requests:
           cpu: "150m"
-          memory: "384Mi"
+          memory: "256Mi"
         limits:
           cpu: "600m"
-          memory: "512Mi"
+          memory: "384Mi"
 
   s4-stream:
     kafka:
       enabled: true
+      # The broker's RSS is its heap plus its direct buffers, so the heap has
+      # to come down with the limit: 256m + 64m + metaspace fits in 448Mi.
+      #
+      # 192m is NOT enough: the broker died at boot with
+      #   java.lang.OutOfMemoryError: Java heap space
+      #   at org.apache.kafka.storage.internals.log.SkimpyOffsetMap.<init>
+      # while starting the LogManager.
+      heapOpts: "-Xms192m -Xmx256m -XX:MaxDirectMemorySize=64m"
       resources:
         requests:
           cpu: "300m"
-          memory: "512Mi"
+          memory: "320Mi"
         limits:
-          cpu: "1000m"
-          memory: "768Mi"
+          cpu: "800m"
+          memory: "448Mi"
     kafkaUi:
       # OFF: a 256Mi container for a browser tab, on the profile that has to fit
       # a 6 GiB VM together with the control plane. Turn it on with -set once
@@ -80,22 +101,47 @@ subsystems:
     flinkOperator:
       enabled: true
       replicaCount: 1
+      # 384Mi, NOT less. The operator is a Quarkus JVM and it was OOM-killed
+      # at 192Mi:
+      #   OOMKilled exit=137
+      # which looked like a Flink problem (the deployment never got created
+      # and the operator retried the submission every two minutes) and was
+      # not one. The chart's own default is 512Mi.
       resources:
         requests:
           cpu: "150m"
           memory: "256Mi"
         limits:
-          cpu: "500m"
+          cpu: "400m"
           memory: "384Mi"
     flinkJobs:
       ordersStream:
         enabled: true
+        # Pinned to the compute node: the Flink image is 1.7 GB and it only
+        # has to be loaded where the job runs. The operator's own image is
+        # only on that node too.
+        nodeSelector:
+          kubernetes.io/hostname: poc-data-platform-worker2
         jobManager:
           # The operator rejects a JobManager below 768m (JVM heap + metaspace
           # + overhead), so these MUST NOT be lowered below the chart values.
           memory: "768m"
           cpu: 0.5
         taskManager:
+          # 1024m, NOT lower. Flink's TaskManager has fixed costs that do not
+          # scale with the memory you give it: framework heap (128m) +
+          # framework off-heap (128m) + network (64m) = 320m BEFORE any task
+          # heap, plus the managed memory. At 640m the process only had
+          # 192m of "Total Flink Memory" left for 396m of mandatory
+          # components, and the operator refused to submit the job:
+          #
+          #   TaskManager memory configuration failed: Sum of configured
+          #   Framework Heap Memory (128.000mb), Framework Off-Heap Memory
+          #   (128.000mb), Task Off-Heap Memory (0 bytes), Managed Memory
+          #   (76.800mb) and Network Memory (64.000mb) exceed configured
+          #   Total Flink Memory (192.000mb)
+          #
+          # At 1024m there are ~665m of Flink memory for 586m of components.
           memory: "1024m"
           cpu: 0.5
           replicas: 1

@@ -1,0 +1,61 @@
+# ==============================================================================
+# Event producer Job
+#
+# The speed layer is fed from INSIDE the cluster. It cannot be fed from the
+# workstation:
+#
+#   * the broker advertises kafka.platform.svc.cluster.local:9092, a name
+#     that does not resolve outside the cluster, so a producer pointed at
+#     localhost:9092 through a port-forward is redirected to a name it
+#     cannot resolve;
+#   * the workstation's Python does not have confluent-kafka installed.
+#
+# The image is the ingestion one (it carries data-generator/ and the client).
+# ==============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: event-producer
+  namespace: platform
+  labels:
+    app: event-producer
+spec:
+  backoffLimit: 2
+  # The producer runs for --duration seconds; the deadline is a backstop for
+  # a producer that hangs on a broker that never acknowledges.
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: event-producer
+    spec:
+      restartPolicy: Never
+      # The compute node: it is where the image is loaded (loading a 410 MB
+      # image into every node is several hundred MB of writes this box does
+      # not need) and where the Flink operator and the speed layer run.
+      nodeSelector:
+        kubernetes.io/hostname: poc-data-platform-worker2
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+      containers:
+        - name: producer
+          image: docker.io/poc/ingest:0.1.0
+          imagePullPolicy: Never
+          workingDir: /app
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: kafka.platform.svc.cluster.local:9092
+          command:
+            - python
+            - data-generator/event_producer.py
+            - --bootstrap-servers
+            - kafka.platform.svc.cluster.local:9092
+            - --rate
+            - "20"
+            - --duration
+            - "60"

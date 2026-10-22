@@ -1,14 +1,6 @@
-"""
-oltp_seed.py - Synthetic OLTP relational data generator for PostgreSQL.
-Generates realistic e-commerce operational datasets:
-  - customers:   1,000 records  (PII: name, email)
-  - orders:      1,000 records by default (last 90 days, configurable via --records)
-  - order_items: ~4,000 records by default (1-5 per order, scales with --records)
-  - products:    500 records
-  - campaigns:   100 records
+"""Synthetic OLTP e-commerce data generator for PostgreSQL.
 
 Idempotent: uses INSERT ON CONFLICT DO NOTHING.
-All table, column, and constraint names are in English.
 """
 
 from __future__ import annotations
@@ -103,11 +95,8 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 """
 
-# order_items has only a SERIAL PK, so ON CONFLICT needs an explicit
-# conflict target: without this unique index, `ON CONFLICT DO NOTHING`
-# would silently re-insert duplicate line items on every re-run.
-# IF NOT EXISTS so pre-existing databases are migrated in place (a database
-# that already contains duplicates must be re-seeded with --recreate first).
+# ON CONFLICT needs an explicit target on order_items; without this unique
+# index, re-runs would silently duplicate line items.
 DDL_ORDER_ITEMS_UNIQUE = """
 CREATE UNIQUE INDEX IF NOT EXISTS uq_order_items_order_product
     ON order_items (order_id, product_id);
@@ -173,12 +162,10 @@ def create_schema(conn: psycopg2.extensions.connection, recreate: bool = False) 
 
 
 def _table_columns(conn: psycopg2.extensions.connection, table: str) -> set[str]:
-    """Returns the live column names of ``table`` (K8s chart schema compatibility).
+    """Return the live column names of ``table``.
 
-    The Helm chart ships its own init schema (``postgres-configmap.yaml``) which
-    drifted from this file's DDL (e.g. ``products.cost``/``sku`` NOT NULL,
-    ``campaigns.name`` NOT NULL). Inserts adapt to whichever columns exist so
-    seeding works on empty DBs, chart-created DBs and legacy seeder DBs alike.
+    The Helm chart schema differs from this file's DDL, so inserts adapt to
+    whichever columns exist.
     """
     with conn.cursor() as cur:
         cur.execute(

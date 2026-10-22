@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
-"""
-Modern Data Architecture POC - Data Contract & Manifest Validator (CLI driver).
-Thin delegator: every validation rule lives in the application core
-(src.use_cases.validate_contract / src.domain.contracts). This file is kept
-at its original path because the Rakefile (governance:validate task) and
-scripts/demo.sh invoke it as ``python governance/contract_validator.py
---repo-root .``; the legacy ``--file/--prev-file`` two-file comparison mode
-is preserved as well.
+"""Data contract and manifest validator CLI driver.
 
-One composition-level check lives here instead of the core: the
-product.yaml <-> contract.yaml quality-threshold cross-check. It compares two
-sibling FILES of the same data product (manifest ``spec.quality`` vs the
-authoritative contract ``spec.quality.thresholds``), which is a repository
-consistency concern rather than a single-manifest rule.
-
+Delegates validation to ``src.use_cases.validate_contract`` and adds the
+product.yaml <-> contract.yaml quality-threshold cross-check.
 Exit codes: 0 = all validations passed, 1 = one or more violations.
 """
 
@@ -130,7 +119,7 @@ def run_legacy_comparison(new_file: str, prev_file: str) -> int:
 
 
 def run_repo_validation(repo_root: str) -> int:
-    """Full RF-15 repository validation via the use case (single composition root)."""
+    """Full repository validation via the use case (single composition root)."""
     use_case = Container(repo_root=repo_root).validate_contract
     results = use_case.execute()
 

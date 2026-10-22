@@ -1,7 +1,5 @@
-# Self-contained Prometheus (no upstream subchart; offline env).
-# Rules come from the chart asset prometheus/alerts.yaml via .Files.Get, which
-# returns raw content WITHOUT templating, so the alert expressions with
-# dollar-labels placeholders pass through untouched.
+# Self-contained Prometheus. Rules come from the chart asset
+# prometheus/alerts.yaml via .Files.Get, which returns the content untemplated.
 {{- if .Values.prometheus.enabled }}
 apiVersion: v1
 kind: ConfigMap
@@ -22,22 +20,7 @@ data:
         static_configs:
           - targets:
               - "localhost:9090"
-      # The previous config scraped ONLY Prometheus itself, so every series the
-      # alert rules reference was absent and none of them could ever transition
-      # to firing - the rules were decoration. These jobs add the two targets
-      # in this POC that actually export metrics:
-      #
-      #   kafka  exports kafka_consumergroup_lag (ConsumerGroupLagGauge) on 9092
-      #   minio  exports the minio_* family on /minio/v2/metrics/cluster, which
-      #          needs MINIO_PROMETHEUS_AUTH_TYPE=public (already set)
-      #
-      # Deliberately NOT scraped, because nothing in this repo emits them:
-      #   data_quality_assertion_success_ratio
-      #   lakehouse_table_last_write_timestamp
-      #   flink_taskmanager_job_latency_source_to_sink_seconds
-      # The alert rules that reference those metrics are commented out in
-      # prometheus/alerts.yaml with the reason, rather than left to sit in a
-      # permanent "no data" state that looks like a healthy system.
+      # Targets that actually export metrics; rules for absent metrics are commented out.
       - job_name: kafka
         static_configs:
           - targets:
@@ -88,17 +71,10 @@ spec:
             - name: config
               mountPath: /etc/prometheus/rules/alerts.yaml
               subPath: alerts.yaml
-            # --storage.tsdb.path=/prometheus with no volume behind it writes to
-            # the container's writable layer, so every restart discards the
-            # TSDB and the 15d retention this chart asks for is a fiction:
-            # rate() and the GoldTableFreshnessExpired rule restart from zero
-            # every time. emptyDir keeps it for the life of the pod, which is
-            # what a POC wants without claiming durability it does not have.
+            # emptyDir keeps the TSDB for the life of the pod; it does not survive a restart.
             - name: data
               mountPath: /prometheus
-          # No probes at all before this: a wedged Prometheus stayed in the
-          # Service endpoints and the Grafana datasource simply stopped
-          # resolving. Both endpoints are documented by Prometheus itself.
+          # Without probes a wedged Prometheus stays in the Service endpoints.
           startupProbe:
             httpGet:
               path: /-/ready

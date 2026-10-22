@@ -1,21 +1,13 @@
-# ==============================================================================
-# Subsystem S6: Data Mesh Governance - Values Configuration
-# File: infra/helm/s6-mesh/values.yaml
-# ==============================================================================
+# Data mesh governance: per-domain quotas and the Kyverno policies.
 
 global:
   namespace: platform
 
-# PREREQUISITE (K-B): installing Kyverno itself is NOT done by this chart.
-# Install it first from its official chart/OCI (offline env: no dependency
-# build is attempted, the Chart.yaml dependency stays commented). The flag
-# below only gates the ClusterPolicies rendered by
-# templates/kyverno-policies.yaml from governance/policies/*.yaml.
-# DEFERRED (RF-17): no template in templates/ consumes this block yet — admission
-# control is not rendered; scripts/setup-cluster.sh only registers the Kyverno repo.
+# Kyverno itself is not installed by this chart: install it from its official
+# chart first. enabled only gates the ClusterPolicies from governance/policies/*.yaml.
 kyverno:
   enabled: true
-  # Gate for templates/kyverno-policies.yaml (ClusterPolicies only).
+  # Gate for the ClusterPolicies.
   policiesEnabled: true
   replicaCount: 1
   image:
@@ -31,19 +23,11 @@ kyverno:
       cpu: 250m
       memory: 192Mi
 
-  # Empty by default so single-node clusters schedule anywhere (multi-node:
-  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/compute).
   nodeSelector: {}
 
-# No `crds:` block on purpose. The DataContract/DataProduct definitions moved to
-# crds/, which Helm installs unconditionally and does not template, so there is
-# nothing left to switch on or off. `crds.install` used to guard a wrapper in
-# templates/crds/ that no longer exists.
-
-# SINGLE SOURCE OF TRUTH for per-domain ResourceQuota/LimitRange (rendered by
-# templates/domain-quotas.yaml). The former duplicate governance/policies/domain-quotas.yaml
-# was deleted: scripts/setup.sh applies governance/policies/ wholesale, so keeping both
-# would install contradictory quotas (e.g. sales 15 pods/4Gi vs 20 pods/6Gi here — this chart wins).
+# The DataContract/DataProduct definitions live in crds/, installed
+# unconditionally. Single source of truth for the per-domain ResourceQuota/LimitRange.
 domains:
   sales:
     enabled: true

@@ -1,4 +1,4 @@
-"""Unit tests: Silver latest-snapshot-wins (C2 / RF-01 periodic snapshots). Hermetic: tmp_path only."""
+"""Unit tests: Silver latest-snapshot-wins. Hermetic: tmp_path only."""
 
 from __future__ import annotations
 
@@ -53,8 +53,7 @@ def test_silver_keeps_latest_snapshot(tmp_path: Path) -> None:
     silver = storage.read_table("silver.sales.orders")
     by_id = {str(r["id"]): r for r in silver}
     assert len(silver) == 10
-    # RF-04 explicit typing: Silver holds native numerics (INTEGER/REAL affinity),
-    # not the TEXT coercion of earlier revisions.
+    # Explicit typing: Silver holds native numerics (INTEGER/REAL affinity).
     assert by_id["1"]["total_amount"] == 200.0
     assert "_batch_id" not in by_id["1"] and "_ingested_at" not in by_id["1"]
 

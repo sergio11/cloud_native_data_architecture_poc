@@ -55,7 +55,7 @@ def test_pseudonymize_email_salted_deterministic() -> None:
     Pure domain function: the salt travels as an explicit argument (DIP - the
     domain never reads ``PII_HASH_SALT``; only the composition root does). The
     salted scheme keeps the Gold ``^[0-9a-f]{64}$`` regex contract, and the
-    legacy ``hash_email`` entry point delegates to the salted default.
+    backward-compatible ``hash_email`` entry point delegates to the salted default.
     """
     assert DEFAULT_PII_HASH_SALT == "poc-demo-salt-v1"
 

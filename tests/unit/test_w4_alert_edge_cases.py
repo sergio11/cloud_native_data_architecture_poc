@@ -1,4 +1,4 @@
-"""W4 alert edge cases (RF-06/RF-20): zero passRate and malformed eventTime.
+"""W4 alert edge cases: zero passRate and malformed eventTime.
 
 A pass rate of 0.0 is a TOTAL quality failure and must alert (CRITICAL per
 severity_mapping); an unparsable eventTime must not fail open with lag 0.
@@ -178,7 +178,7 @@ def test_naive_event_time_is_treated_as_utc(monkeypatch, tmp_path):
 
     event = _make_event(
         svc,
-        eventTime="2020-01-01T00:00:00",  # naive: old code raised -> lag 0 -> no alert
+        eventTime="2020-01-01T00:00:00",  # naive timestamp, no offset
         outputs=[{"namespace": "default", "name": "silver.orders", "facets": {}}],
     )
     alerts = engine.evaluate(event)

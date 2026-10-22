@@ -1,18 +1,12 @@
 """
-Local job dispatch for the batch orchestration resources (RF-22).
+Local job dispatch for the batch orchestration resources.
 
-The K8s profile submits Spark/Flink work to the cluster; the LOCAL profile must
-still be able to materialize the Dagster batch assets, so
-``SparkResource.submit_job`` delegates here to run the equivalent pipeline
-scripts in a subprocess with ``sys.executable`` (the same scripts the
-``rake medallion:*`` tasks invoke).
+The LOCAL profile runs the equivalent pipeline scripts in a subprocess with
+``sys.executable``; the K8s profile submits to the cluster. The streaming speed
+layer has no local equivalent (see :data:`LOCAL_SCRIPT_MAP`).
 
-The streaming speed layer is NOT dispatched here: it is a real Apache Flink job
-with no local equivalent (see :data:`LOCAL_SCRIPT_MAP`).
-
-This module deliberately contains NO dagster imports: the dispatch logic is
-unit-testable in environments where the optional ``orchestration`` extra
-(``dagster``) is not installed.
+No dagster imports, so the dispatch logic is unit-testable without the optional
+``orchestration`` extra.
 """
 
 from __future__ import annotations
@@ -31,15 +25,10 @@ DEFAULT_TIMEOUT_SECONDS: float = 600.0
 K8S_SPARK_WORKDIR_PREFIX = "local:///opt/spark/work-dir/"
 
 # Documented submit path -> repo-relative local pipeline script mapping.
-# Values are the scripts actually executed by the local profile (the ones the
-# Rakefile tasks run); keys are the paths the K8s profile / Dagster assets use.
-#
-# There is deliberately NO entry for pipelines/stream/flink_*.py: the speed layer
-# is a real Apache Flink job submitted by the Flink Kubernetes Operator and has
-# no local equivalent. Kappa replay is driven against the cluster by
-# pipelines/orchestration/resources.py :: FlinkResource, not by a local script.
+# No entry for pipelines/stream/flink_*.py: the speed layer has no local
+# equivalent and Kappa replay runs against the cluster via FlinkResource.
 LOCAL_SCRIPT_MAP: dict[str, str] = {
-    # Dagster asset submit paths (RF-22) -> same repo-relative script locally.
+    # Dagster asset submit paths -> same repo-relative script locally.
     "pipelines/medallion/bronze_ingestion.py": "pipelines/medallion/bronze_ingestion.py",
     "pipelines/medallion/silver_transform.py": "pipelines/medallion/silver_transform.py",
     "pipelines/medallion/gold_aggregation.py": "pipelines/medallion/gold_aggregation.py",

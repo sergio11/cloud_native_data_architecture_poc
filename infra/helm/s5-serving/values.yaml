@@ -1,7 +1,4 @@
-# ==============================================================================
-# Subsystem S5: Serving Layer - Values Configuration
-# File: infra/helm/s5-serving/values.yaml
-# ==============================================================================
+# Serving layer: Trino over the Iceberg catalog.
 
 global:
   namespace: platform
@@ -11,23 +8,14 @@ trino:
   replicaCount: 1
   image:
     repository: trinodb/trino
-    # 455 is the FIRST Trino release that exposes
-    # iceberg.rest-catalog.oauth2.scope. Without it the Iceberg REST client
-    # sends the Iceberg library's default scope, "catalog", and Polaris 1.8
-    # rejects it:
-    #   Invalid scope 'catalog' provided. scope=catalog
-    #   Malformed request: invalid_scope: The scope is invalid
-    # which left Trino unable to reach a single table - the serving layer had
-    # never worked. Polaris expects PRINCIPAL_ROLE:ALL, the same scope the
-    # Flink job asks for.
+    # First Trino release with iceberg.rest-catalog.oauth2.scope, required by Polaris.
     tag: "455"
     pullPolicy: IfNotPresent
 
   service:
     type: NodePort
     port: 8080
-    # Must match the 8080 containerPort kind forwards to the host, otherwise the
-    # Trino UI documented at http://localhost:8080 is a dead port.
+    # Must match the 8080 port kind forwards to the host.
     nodePort: 8080
 
   resources:
@@ -39,31 +27,16 @@ trino:
       memory: 1280Mi
 
   jvm:
-    # Heap deliberately set below the 1280Mi container limit:
-    # 1024M left only 256MiB for metaspace + direct memory (OOM risk).
-    # 896M gives ~384MiB headroom — safe with ExitOnOutOfMemoryError.
+    # Below the container limit: the JVM also needs metaspace and direct memory.
     maxHeapSize: "896M"
     gc: "-XX:+UseG1GC"
 
-  # Query memory. It is NOT independent of the heap: Trino refuses to start
-  # when the per-node query memory plus the heap headroom (30% by default)
-  # exceeds the heap:
-  #
-  #   Invalid memory configuration. The sum of max query memory per node
-  #   (419430400) and heap headroom (161061274) cannot be larger than the
-  #   available heap memory (536870912)
-  #
-  # so lowering jvm.maxHeapSize without lowering these breaks the coordinator,
-  # and the failure is a Guice stack dump rather than a configuration error.
-  # Rule of thumb: maxMemoryPerNode + 30% of the heap must fit in the heap.
-  #   896M heap -> 400MB per node + 269MB headroom = 669MB, fits
-  #   512M heap -> 256MB per node + 154MB headroom = 410MB, fits
+  # Tied to jvm.maxHeapSize: Trino refuses when maxMemoryPerNode plus 30% headroom exceeds it.
   query:
     maxMemory: "800MB"
     maxMemoryPerNode: "400MB"
 
-  # Empty by default so single-node clusters schedule anywhere (multi-node:
-  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/compute).
   nodeSelector: {}
 
   tolerations: []
@@ -73,25 +46,17 @@ catalogs:
   iceberg:
     enabled: true
     restCatalogUri: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
-    # Name of the catalog inside Polaris. This is what identifies it to an Iceberg
-    # REST client (warehouse=<catalog name>), so it must match
-    # s2-lakehouse -> polaris.config.defaultCatalog, not the S3 location.
+    # REST clients identify the catalog by name; must match polaris.config.defaultCatalog.
     restCatalogName: "polaris"
-    # OAuth2 scope for the Polaris token request. It is NOT optional: without
-    # it the token endpoint answers
-    #   Malformed request: invalid_scope: The scope is invalid
-    # and Trino cannot reach a single table. Polaris 1.x expects
-    # PRINCIPAL_ROLE:ALL, the same scope the Flink job asks for.
+    # Polaris 1.x expects PRINCIPAL_ROLE:ALL and rejects the default scope.
     oauth2Scope: "PRINCIPAL_ROLE:ALL"
     s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
-    # s3.region is required by the Trino native S3 client even for MinIO.
+    # Required by the Trino native S3 client even for MinIO.
     s3Region: "us-east-1"
     s3AccessKey: "minioadmin"
     s3SecretKey: "minioadmin"
     s3PathStyleAccess: true
-    # OAuth2 credential for Polaris 1.x REST catalog authentication.
-    # Format: "client_id:client_secret" — must match polaris.clientId / clientSecret
-    # in s2-lakehouse/values.yaml and POLARIS_BOOTSTRAP_CREDENTIALS.
+    # client_id:client_secret; must match polaris.clientId/clientSecret in s2-lakehouse.
     oauth2Credential: "poc-admin:poc-admin-secret"
 
   kafka:
@@ -103,14 +68,6 @@ viewsInit:
   enabled: true
   image:
     repository: trinodb/trino
-    # 455 is the FIRST Trino release that exposes
-    # iceberg.rest-catalog.oauth2.scope. Without it the Iceberg REST client
-    # sends the Iceberg library's default scope, "catalog", and Polaris 1.8
-    # rejects it:
-    #   Invalid scope 'catalog' provided. scope=catalog
-    #   Malformed request: invalid_scope: The scope is invalid
-    # which left Trino unable to reach a single table - the serving layer had
-    # never worked. Polaris expects PRINCIPAL_ROLE:ALL, the same scope the
-    # Flink job asks for.
+    # First Trino release with iceberg.rest-catalog.oauth2.scope, required by Polaris.
     tag: "455"
     pullPolicy: IfNotPresent

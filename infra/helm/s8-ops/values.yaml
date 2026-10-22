@@ -1,10 +1,4 @@
-# ==============================================================================
-# Subsystem S8: Operations & Observability - Values Configuration
-# File: infra/helm/s8-ops/values.yaml
-# Scope (K-B): this chart is SELF-CONTAINED (no external subchart dependencies;
-# the environment is offline so nothing can be fetched). Only the components
-# below with templates/ are rendered: prometheus + grafana.
-# ==============================================================================
+# Operations and observability. Self-contained chart: only Prometheus and Grafana are rendered.
 
 global:
   namespace: platform
@@ -18,13 +12,12 @@ grafana:
     pullPolicy: IfNotPresent
   admin:
     user: admin
-    # POC default only; override with --set grafana.admin.password=... .
+    # Default only; override with --set grafana.admin.password=... .
     password: prom-operator
   service:
     type: NodePort
     port: 3000
-    # Must match the 3000 containerPort kind forwards to the host, otherwise the
-    # Grafana URL documented at http://localhost:3000 is a dead port.
+    # Must match the 3000 port kind forwards to the host.
     nodePort: 3000
   resources:
     limits:
@@ -54,26 +47,3 @@ prometheus:
       cpu: "50m"
       memory: "128Mi"
 
-# NOT RENDERED (K-B decision): no template in templates/ consumes this block and
-# there is no upstream subchart declared (offline env: dependencies cannot be
-# fetched). Kept as COMMENT (not promised) so a future agent can wire it
-# without re-discovering the intended shape.
-# metabase:
-#   enabled: true
-#   replicaCount: 1
-#   image:
-#     repository: metabase/metabase
-#     tag: v0.48.0
-#   service:
-#     type: NodePort
-#     port: 3000
-#     nodePort: 30003
-#   resources:
-#     limits:
-#       cpu: "500m"
-#       memory: "512Mi"
-#     requests:
-#       cpu: "100m"
-#       memory: "256Mi"
-# NOTE: Dagster is mentioned in Chart.yaml history but never had a values block
-# nor templates here; orchestration stays out of scope until a controller exists.

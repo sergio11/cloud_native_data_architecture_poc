@@ -1,7 +1,6 @@
 """W4 alert-rules.yaml wiring: target gates, nullability detection, honest config.
 
-Every behavioural key the YAML declares must actually steer RuleEngine
-decisions; keys that no code reads must not exist in the shipped file.
+Every behavioural key in the YAML must steer RuleEngine decisions.
 """
 
 from __future__ import annotations
@@ -194,8 +193,7 @@ def test_nullability_change_skipped_when_disabled(monkeypatch, tmp_path):
 
 
 def test_rule4_event_types_gate_and_default(monkeypatch, tmp_path):
-    """Rule 4 reads target.event_types; without it the legacy COMPLETE/CHECK
-    default applies (CHECK allowed, START blocked)."""
+    """Rule 4 reads target.event_types; without it the COMPLETE/CHECK default applies."""
     svc = _load_service(monkeypatch, tmp_path)
     gated_rules = """\
 version: "1.0.0"
@@ -230,7 +228,7 @@ rules:
     alerts = engine.evaluate(complete_event)
     assert [a.rule_id for a in alerts] == ["RF20-RULE-004"]
 
-    # Legacy default (no target.event_types): CHECK allowed, START blocked.
+    # Default (no target.event_types): CHECK allowed, START blocked.
     default_rules = gated_rules.replace('    target:\n      event_types: ["COMPLETE"]\n', "")
     engine2 = _engine(svc, tmp_path, default_rules, "c5b.db")
     check2 = _make_event(svc, eventType="CHECK", run={"runId": "r3", "facets": {}}, outputs=outputs, **stale)
@@ -240,7 +238,7 @@ rules:
 
 
 def test_shipped_alert_rules_yaml_is_honest(monkeypatch, tmp_path):
-    """Wired keys exist; dead keys were deleted from the shipped config."""
+    """Wired keys exist; dead keys are absent from the shipped config."""
     import yaml
 
     svc = _load_service(monkeypatch, tmp_path)  # noqa: F841  (ensures import side effects)
@@ -261,7 +259,7 @@ def test_shipped_alert_rules_yaml_is_honest(monkeypatch, tmp_path):
     assert criteria3["terminal_states"] == ["FAIL", "ABORT"]
     assert criteria3["exclude_job_patterns"]
 
-    # Deleted keys (no code reads them)
+    # Unwired keys (no code reads them)
     assert "evaluation_interval_seconds" not in cfg
     assert "notification_channels" not in cfg.get("defaults", {})
     assert "environment" not in cfg.get("defaults", {})
@@ -269,5 +267,5 @@ def test_shipped_alert_rules_yaml_is_honest(monkeypatch, tmp_path):
         assert "type" not in rule.get("criteria", {}), rule["id"]
         assert "annotations" not in rule.get("actions", {}), rule["id"]
     assert "dataset_pattern" not in rules["RF20-RULE-003"]["target"]
-    assert "severity_mapping" not in rules["RF20-RULE-003"]  # medallion_core/streaming_core/auxiliary
+    assert "severity_mapping" not in rules["RF20-RULE-003"]
     assert "medallion_core" not in REAL_RULES.read_text(encoding="utf-8")

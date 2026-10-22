@@ -1,10 +1,6 @@
-"""
-Modern Data Architecture POC - Centralised logical table naming (pure domain).
+"""Modern Data Architecture POC - Centralised logical table naming.
 
-Single source of truth for every logical lakehouse table name used by the
-hexagonal core. Pure functions only: no I/O, no filesystem knowledge, no
-adapter imports. Use cases and the serving logical-to-physical bridge derive
-their table names from here instead of hardcoding dotted strings.
+Single source of truth for lakehouse table names used by the core.
 """
 
 from __future__ import annotations
@@ -22,12 +18,10 @@ DOMAIN_OF_ENTITY: dict[str, str] = {
 
 @dataclass(frozen=True)
 class GoldProduct:
-    """Gold product descriptor: the single source of truth for Gold routing.
+    """Gold product descriptor: single source of truth for Gold routing.
 
-    ``name`` is the product key used by drivers (``"daily_metrics"``),
-    ``contract_entity`` the entity whose contract governs its quality gate
-    (contracts live under ``data-products/<entity>/``), and ``result_key``
-    the row-count key reported in the Gold result contract.
+    ``name`` is the driver key, ``contract_entity`` the governing contract
+    entity and ``result_key`` the row-count key in the Gold result.
     """
 
     name: str
@@ -35,9 +29,7 @@ class GoldProduct:
     result_key: str
 
 
-#: Gold products modelled by the Gold tier (open for extension: adding a
-#: product means appending a descriptor here plus its publisher, without
-#: touching the aggregation control flow).
+#: Gold products modelled by the Gold tier.
 GOLD_PRODUCTS: tuple[GoldProduct, ...] = (
     GoldProduct(name="daily_metrics", contract_entity="orders", result_key="daily_metrics_rows"),
     GoldProduct(name="customers", contract_entity="customers", result_key="customers_masked_rows"),
@@ -73,32 +65,8 @@ PUBLISHED_TIERS: frozenset[str] = frozenset({"gold", "stream"})
 def iceberg_identifier(logical: str) -> tuple[str, str]:
     """Maps a logical table name to its Iceberg (namespace, table) identifier.
 
-    The logical vocabulary is ``<tier>.<domain>.<table>``; Iceberg splits that
-    into a namespace and a table name, and the split is NOT mechanical.
-
-    Published tiers (:data:`PUBLISHED_TIERS`) drop the tier, because the
-    serving layer and the product manifests reference them by that name:
-    ``gold.sales.daily_metrics`` is ``sales.daily_metrics`` and
-    ``stream.sales.orders_windowed`` is ``sales.orders_windowed``.
-
-    Internal tiers keep it, because otherwise Bronze and Silver would collide on
-    the same name inside the same domain:
-    ``bronze.sales.orders`` is ``sales.bronze_orders`` and
-    ``silver.sales.orders`` is ``sales.silver_orders``.
-
-    The physical location follows the same rule, ``<warehouse>/<namespace>/
-    <table>``: Polaris derives a table's location from the location allowed for
-    its NAMESPACE and refuses anything outside it, so the tier must not be part
-    of the path either.
-
-    Args:
-        logical: ``<tier>.<domain>.<table>`` id.
-
-    Returns:
-        The ``(namespace, table)`` pair.
-
-    Raises:
-        ValueError: If the id is not three dotted parts.
+    Published tiers drop the tier; internal tiers keep it as ``<tier>_<name>``
+    to avoid collisions. The physical path follows the same rule.
     """
     parts = logical.split(".")
     if len(parts) != 3:
@@ -112,12 +80,8 @@ def iceberg_identifier(logical: str) -> tuple[str, str]:
 def contract_entity_for_table(table_name: str) -> str:
     """Returns the data-product entity whose contract governs ``table_name``.
 
-    Contract documents live under ``data-products/<entity>/``, so the quality
-    gate must resolve the ENTITY behind a logical table name before looking up
-    thresholds. Gold product tables map through :data:`GOLD_PRODUCTS`
-    (``gold.sales.daily_metrics`` is governed by the ``orders`` contract);
-    every other table falls back to its last dotted segment
-    (``silver.sales.orders`` -> ``orders``).
+    Gold products map through :data:`GOLD_PRODUCTS`; other tables fall back to
+    their last dotted segment.
     """
     for product in GOLD_PRODUCTS:
         if table_name == gold_table(product.name):
@@ -131,19 +95,9 @@ def physical_sql_name(logical: str) -> str:
 
 
 def serving_view_name(logical: str) -> str:
-    """Maps a logical dotted table name to its serving live-view name (``<physical>_live``).
+    """Maps a logical table name to its serving live-view name.
 
-    Live-view contract (serving without rewriting): serving SQL references
-    these deterministic view names instead of dotted logical names, so the
-    statement runs VERBATIM on every backend with no textual rewriting.
-    Example: logical ``gold.sales.daily_metrics`` -> physical
-    ``gold_sales_daily_metrics`` -> view ``gold_sales_daily_metrics_live``.
-
-    Provisioning (idempotent ``CREATE VIEW IF NOT EXISTS``):
-    - SQLite (serving adapter, lazily on first query): ``SELECT * FROM
-      <physical> WHERE _row_superseded IS NULL`` when that versioning column
-      exists, plain pass-through ``SELECT * FROM <physical>`` otherwise;
-    - Trino (``pipelines/serving/unified_view.sql`` twins): pure pass-through
-      over Iceberg (``_row_superseded`` is a SQLite-only versioning concept).
+    Returns ``<physical>_live``; serving SQL references these names so it runs
+    verbatim on every backend.
     """
     return f"{physical_sql_name(logical)}_live"

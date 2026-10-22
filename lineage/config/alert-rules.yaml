@@ -1,16 +1,6 @@
-# ==============================================================================
-# Active Metadata Alert Rules (RF-20)
-# ==============================================================================
-# Configuration of real-time rules evaluated by the Lineage Webhook Service
-# against incoming OpenLineage events (runs, datasets, schemas, and assertions).
-#
-# Every BEHAVIOURAL key below is read by lineage_webhook_service.py:
-#   target.event_types / target.namespace / target.dataset_pattern -> gates
-#   criteria.*             -> detection settings (incl. sla_definitions)
-#   severity_mapping.*     -> alert severity per condition
-#   actions.webhook.*      -> outbound alert delivery (endpoint + retries)
-# Dead keys that no code read were removed so this file stays honest.
-# ==============================================================================
+# Active metadata alert rules evaluated by the Lineage Webhook Service
+# against incoming OpenLineage events (runs, datasets, schemas, assertions).
+# Keys: target.* gates, criteria.* detection, actions.webhook.* delivery.
 
 version: "1.0.0"
 service: "lineage-webhook-service"
@@ -20,9 +10,7 @@ defaults:
     deduplication_window_seconds: 300
 
 rules:
-  # ----------------------------------------------------------------------------
-  # Rule 1: Schema Change Alert on Silver/Gold Tables
-  # ----------------------------------------------------------------------------
+  # Rule 1: schema change alert on Silver/Gold tables
   - id: "RF20-RULE-001"
     name: "SchemaChangeAlert"
     enabled: true
@@ -50,9 +38,7 @@ rules:
         endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
         retry_count: 3
 
-  # ----------------------------------------------------------------------------
-  # Rule 2: Quality Threshold Breach Alert
-  # ----------------------------------------------------------------------------
+  # Rule 2: quality threshold breach alert
   - id: "RF20-RULE-002"
     name: "QualityThresholdBreachAlert"
     enabled: true
@@ -79,9 +65,7 @@ rules:
         endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
         retry_count: 3
 
-  # ----------------------------------------------------------------------------
-  # Rule 3: Pipeline Failure Alert
-  # ----------------------------------------------------------------------------
+  # Rule 3: pipeline failure alert
   - id: "RF20-RULE-003"
     name: "PipelineFailureAlert"
     enabled: true
@@ -101,9 +85,7 @@ rules:
         endpoint: "http://alertmanager.monitoring.svc.cluster.local:9093/api/v2/alerts"
         retry_count: 3
 
-  # ----------------------------------------------------------------------------
-  # Rule 4: SLA Freshness Breach Alert
-  # ----------------------------------------------------------------------------
+  # Rule 4: SLA freshness breach alert
   - id: "RF20-RULE-004"
     name: "SLAFreshnessBreachAlert"
     enabled: true

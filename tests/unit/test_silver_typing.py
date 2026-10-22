@@ -1,4 +1,4 @@
-"""Unit tests: Silver explicit typing (RF-04) + NULL-id audit (M2). Hermetic: tmp_path only."""
+"""Unit tests: Silver explicit typing + NULL-id audit. Hermetic: tmp_path only."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def test_silver_typing_typeof_matches_contract_schema(tmp_path: Path) -> None:
     """L1: TEXT-landed numerics are cast per contract; typeof() is INTEGER/REAL/TEXT."""
     db_path = str(tmp_path / "lakehouse.db")
     storage = LakehouseStorageAdapter(db_path=db_path)
-    # Bronze lands everything as TEXT (strings), as the legacy pipeline did.
+    # Bronze lands everything as TEXT (strings).
     raw = [_order_row(str(i), f"{50.0 + i}", i) for i in range(1, 11)]
     assert storage.write_table("bronze.sales.orders", raw, mode="append") == 10
 

@@ -48,12 +48,8 @@ from src.use_cases.validate_contract import ValidateContractUseCase
 class Container:
     """Dependency injection container assembling hexagonal components.
 
-    Construction is side-effect free: instantiating ``Container`` (including
-    the module-level ``container`` singleton) only stores configuration
-    strings. Every adapter and use case is built lazily via
-    :func:`functools.cached_property` on first attribute access, so
-    ``import src.container`` creates no files, directories or databases.
-    Public attribute names are stable so all drivers keep working unchanged.
+    Construction is side-effect free; adapters and use cases are built lazily
+    on first attribute access.
     """
 
     def __init__(
@@ -69,27 +65,21 @@ class Container:
         self._db_path = effective_db_path
         self._marquez_url = marquez_url or os.getenv("MARQUEZ_URL")
         self._repo_root = repo_root
-        # Which implementation of the lakehouse port to use. "sqlite" is the
-        # default and is what the local profile and the unit tests use;
-        # "iceberg" is the cluster's real lakehouse and is selected by the
-        # environment, so the application core never learns which one it is
-        # talking to.
+        # Lakehouse implementation: "sqlite" (default, local/unit tests) or
+        # "iceberg" (cluster), selected by environment.
         self._lakehouse_backend = (
             (lakehouse_backend if lakehouse_backend is not None else os.getenv("LAKEHOUSE_BACKEND", "sqlite"))
             .strip()
             .lower()
         )
-        # Hermetic defaults: sibling files of the lakehouse DB, so a Container
-        # pointed at tmp_path never writes under the repository's data/ dir.
-        # For the default db_path these resolve to the historical data/ paths.
+        # Hermetic defaults: sibling files of the lakehouse DB.
         base_dir = os.path.dirname(effective_db_path) or "."
         self._event_db_path = event_db_path or os.getenv("EVENT_DB_PATH") or os.path.join(base_dir, "event_log.db")
         self._lineage_audit_path = (
             lineage_audit_path or os.getenv("LINEAGE_AUDIT_PATH") or os.path.join(base_dir, "lineage_audit.jsonl")
         )
 
-    # Outbound Adapters (lazy). Public attributes are typed as ports (DIP):
-    # drivers depend on abstractions; only these constructors name concretes.
+    # Outbound adapters (lazy). Drivers depend on port abstractions.
     @functools.cached_property
     def storage(self) -> LakehouseStoragePort:
         if self._lakehouse_backend == "iceberg":
@@ -182,5 +172,5 @@ class Container:
         )
 
 
-# Global default container instance (lazy: no filesystem side effects on import)
+# Global default container instance (lazy: no side effects on import)
 container = Container()

@@ -12,87 +12,28 @@ spec:
   image: {{ .Values.flinkJobs.ordersStream.image }}
   flinkVersion: v1_18
   flinkConfiguration:
-    # ONE slot, and that is forced arithmetic, not a preference.
-    #
-    # parallelism.default is decided by the Operator, not by the job: with
-    # taskManager.replicas set it derives replicas * slots and ignores the job's
-    # own parallelism ("Job parallelism setting is ignored as TaskManager
-    # replicas are set"). The job needs 3 * parallelism + 1 slots, because
-    # keyBy(status) and the window boundary break the operator chain into slot
-    # sharing groups (source / window / writer, plus the IcebergFilesCommitter
-    # in one of its own). With the derived parallelism the job asks for more
-    # slots than the cluster has, and the only symptom is the checkpoint:
-    #
-    #   Failed to trigger checkpoint ... is not being executed at the moment.
-    #   Failure reason: Not all required tasks are currently running.
-    #
-    # replicas 1 * slots 1 = parallelism 1, and at parallelism 1 the whole
-    # pipeline fits in the single slot. Raising the slot count would raise the
-    # parallelism with it and make the shortage worse, not better.
+    # One slot: with taskManager.replicas the operator derives parallelism as
+    # replicas * slots, and the pipeline (keyBy plus window) needs 3 * parallelism + 1 slots.
     taskmanager.numberOfTaskSlots: "1"
     parallelism.default: "1"
     state.backend: rocksdb
-    # s3a:// is the ONLY scheme that works here, and it needs unshaded Guava in
-    # the image (infra/docker/flink.Dockerfile). Both alternatives were measured
-    # on a cluster with `rake stream:probe`:
-    #
-    #   s3a:// without Guava -> NoClassDefFoundError:
-    #       com/google/common/util/concurrent/ListeningExecutorService
-    #       because flink-shaded-hadoop-2-uber relocates Guava to
-    #       org.apache.flink.shaded.guava31
-    #
-    #   s3:// -> org.apache.hadoop.fs.s3.S3FileSystem (hadoop-aws 2.8.3, jets3t)
-    #       resolves the scheme but IGNORES fs.s3.endpoint and talks to real AWS:
-    #       403 InvalidAccessKeyId "The AWS Access Key Id you provided does not
-    #       exist in our records" for AWSAccessKeyId minioadmin
-    #       So s3:// is not just unsupported, it silently leaves the cluster.
-    #
-    # fs.s3a.* below is read by S3AFileSystem; the fs.s3.* keys above belong to
-    # the legacy s3 filesystem and are what the warehouse path uses through
-    # Iceberg's S3FileIO, which reads AWS_ACCESS_KEY_ID from the environment.
+    # s3a:// for checkpoints (needs unshaded Guava); the legacy s3:// ignores the endpoint.
     state.checkpoints.dir: "s3a://checkpoints/flink-orders"
     state.savepoints.dir: "s3a://checkpoints/flink-orders-savepoints"
-    # No high-availability.* here on purpose. With a single JobManager replica
-    # the HA services only add a leader-election lock plus an S3 blob store the
-    # JM must create before it will bind its REST port, and it waits several
-    # minutes (then never) on a 4-CPU box. A stateless job on one JM needs
-    # neither; add them back with replicas > 1.
+    # No high-availability.* with a single JobManager: it only adds a leader lock and S3 blob store.
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     s3.path.style.access: "true"
     s3.access-key: "{{ .Values.icebergCatalog.s3AccessKey }}"
     s3.secret-key: "{{ .Values.icebergCatalog.s3SecretKey }}"
-    # The s3.* keys above are for Iceberg's S3FileIO. With a Polaris INTERNAL
-    # catalog S3FileIO is never reached: Polaris owns io-impl and rejects it
-    # ("Cannot set property 'io-impl' ... for this catalog"), and
-    # GET /v1/config carries no s3.* keys, so Iceberg keeps its default
-    # HadoopFileIO and asks HADOOP to resolve the warehouse scheme s3://.
-    #
-    # These fs.s3.* keys are the ones Hadoop 2.8's S3FileSystem actually reads,
-    # and they live in flinkConfiguration rather than in the job's SQL because
-    # that is where Flink's Table API builds the Hadoop Configuration that
-    # HadoopFileIO is handed. Measured in the cluster:
-    #   s3:// + no hadoop-aws    -> No FileSystem for scheme: s3
-    #   s3:// + hadoop-aws 3.3.6 -> NoClassDefFoundError: StreamCapabilities
-    #   s3:// + hadoop-aws 2.8.3 -> the scheme resolves
+    # A Polaris INTERNAL catalog owns io-impl, so Iceberg falls back to HadoopFileIO
+    # for the s3:// warehouse; these are the keys Hadoop 2.8's S3FileSystem reads.
     fs.s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     fs.s3.awsAccessKeyId: "{{ .Values.icebergCatalog.s3AccessKey }}"
     fs.s3.awsSecretAccessKey: "{{ .Values.icebergCatalog.s3SecretKey }}"
     fs.s3.path.style.access: "true"
-    # s3a:// checkpoint storage needs its OWN key namespace:
-    # S3AFileSystem reads fs.s3a.* and nothing else, so the fs.s3.* keys above
-    # do not reach it. Without these the scheme resolves and the first
-    # checkpoint dies on credentials.
-    #
-    # flink_orders_stream.py calls env.enable_checkpointing(30_000,
-    # CheckpointingMode.EXACTLY_ONCE) and never sets
-    # checkpointing.tolerable-failed-checkpoints, whose Flink default is 0: the
-    # FIRST failed checkpoint fails the job. That is why the speed layer died
-    # ~30 s after reaching RUNNING.
-    #
-    # SimpleAWSCredentialsProvider is named rather than left to the default
-    # chain, which would look for an instance profile or container credentials
-    # that do not exist in kind and fail differently.
+    # S3AFileSystem reads only fs.s3a.*, so it needs its own credentials; the provider is
+    # explicit because the default chain looks for instance profiles that do not exist.
     fs.s3a.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     fs.s3a.access.key: "{{ .Values.icebergCatalog.s3AccessKey }}"
     fs.s3a.secret.key: "{{ .Values.icebergCatalog.s3SecretKey }}"
@@ -147,13 +88,7 @@ spec:
     entryClass: "org.apache.flink.client.python.PythonDriver"
     args: ["-py", "/opt/flink/pipelines/stream/flink_orders_stream.py"]
     parallelism: 1
-    # stateless, NOT last-state. last-state restores from the HA metadata the
-    # previous run left behind, so on a first deployment (or after any crash
-    # that lost the JobManager) there is nothing to restore from and the
-    # operator fails with "HA metadata not available to restore from last
-    # state", looping between recovering and failing without ever starting the
-    # job. Switch to last-state only once the job has run and you actually
-    # want state preserved across an upgrade.
+    # stateless: last-state needs HA metadata from a previous run.
     upgradeMode: stateless
 {{- end }}
 ---
@@ -171,23 +106,8 @@ spec:
   image: {{ .Values.flinkJobs.clickstreamStream.image }}
   flinkVersion: v1_18
   flinkConfiguration:
-    # ONE slot, and that is forced arithmetic, not a preference.
-    #
-    # parallelism.default is decided by the Operator, not by the job: with
-    # taskManager.replicas set it derives replicas * slots and ignores the job's
-    # own parallelism ("Job parallelism setting is ignored as TaskManager
-    # replicas are set"). The job needs 3 * parallelism + 1 slots, because
-    # keyBy(status) and the window boundary break the operator chain into slot
-    # sharing groups (source / window / writer, plus the IcebergFilesCommitter
-    # in one of its own). With the derived parallelism the job asks for more
-    # slots than the cluster has, and the only symptom is the checkpoint:
-    #
-    #   Failed to trigger checkpoint ... is not being executed at the moment.
-    #   Failure reason: Not all required tasks are currently running.
-    #
-    # replicas 1 * slots 1 = parallelism 1, and at parallelism 1 the whole
-    # pipeline fits in the single slot. Raising the slot count would raise the
-    # parallelism with it and make the shortage worse, not better.
+    # One slot: with taskManager.replicas the operator derives parallelism as
+    # replicas * slots, and the pipeline (keyBy plus window) needs 3 * parallelism + 1 slots.
     taskmanager.numberOfTaskSlots: "1"
     parallelism.default: "1"
     state.backend: rocksdb
@@ -199,8 +119,7 @@ spec:
     s3.path.style.access: "true"
     s3.access-key: "{{ .Values.icebergCatalog.s3AccessKey }}"
     s3.secret-key: "{{ .Values.icebergCatalog.s3SecretKey }}"
-    # Hadoop-side keys for the s3:// warehouse; see the orders job for why both
-    # sets of names are needed.
+    # Hadoop-side keys for the s3:// warehouse; see the orders job.
     fs.s3.endpoint: "{{ .Values.icebergCatalog.s3Endpoint }}"
     fs.s3.awsAccessKeyId: "{{ .Values.icebergCatalog.s3AccessKey }}"
     fs.s3.awsSecretAccessKey: "{{ .Values.icebergCatalog.s3SecretKey }}"
@@ -255,7 +174,6 @@ spec:
     entryClass: "org.apache.flink.client.python.PythonDriver"
     args: ["-py", "/opt/flink/pipelines/stream/flink_clickstream_stream.py"]
     parallelism: 1
-    # See the orders job: stateless, because last-state cannot bootstrap a job
-    # that has never run.
+    # See the orders job: stateless cannot restore a job that has never run.
     upgradeMode: stateless
 {{- end }}

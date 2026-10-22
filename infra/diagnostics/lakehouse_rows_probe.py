@@ -1,23 +1,8 @@
 """
 Counts the rows the medallion really left in the Iceberg lakehouse.
 
-Run it with `rake lakehouse:rows`. It is the answer to "did the batch tier
-actually write to the lakehouse, or did it only look like it did?", and it
-answers it by reading the catalogue and the tables, not the configuration.
-
-Two independent readings, on purpose:
-
-* the CATALOGUE is asked what tables exist (PyIceberg -> Polaris);
-* the ADAPTER is asked to read them back, which is the exact path the
-  medallion drivers use (LAKEHOUSE_BACKEND=iceberg in the composition root).
-
-If the two disagree, the medallion is writing somewhere the catalog does not
-know about, and that is exactly the failure this probe exists to catch.
-
-The tables it looks for are the physical names the medallion writes to. The
-mapping from the logical name (bronze.sales.orders) to the Iceberg one
-(sales.bronze_orders) is src/domain/naming.py:iceberg_identifier: published
-tiers drop the tier, the internal ones keep it.
+Run with `rake lakehouse:rows`; it reads both the catalogue (PyIceberg -> Polaris)
+and the adapter, the same path the medallion drivers use.
 """
 
 from __future__ import annotations
@@ -37,9 +22,7 @@ REPO_ROOT = os.environ.get("POC_REPO_ROOT", "/app")
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-#: Logical table name -> the tiers that must have rows for the probe to pass.
-#: The stream tier is optional on purpose: the speed layer is a different
-#: phase (Flink) and the batch phase must be verifiable without it.
+#: Logical table name -> tiers that must have rows; the stream tier is optional.
 TIER_TABLES: dict[str, list[str]] = {
     "bronze": ["bronze.sales.orders", "bronze.sales.customers"],
     "silver": ["silver.sales.orders", "silver.sales.customers"],
@@ -70,8 +53,7 @@ def main() -> int:
     catalog_tables: set[str] = set()
     for namespace in catalog.list_namespaces():
         for identifier in catalog.list_tables(namespace):
-            # PyIceberg returns either a (namespace, table) tuple or a
-            # TableIdentifier; both are "namespace.table" as text.
+            # PyIceberg returns a tuple or a TableIdentifier; both render as "namespace.table".
             if isinstance(identifier, (tuple, list)):
                 full = ".".join(str(part) for part in identifier)
             else:
@@ -82,12 +64,8 @@ def main() -> int:
         print("   (el catalogo no tiene ninguna tabla)")
 
     problems: list[str] = []
-    # The Flink sink writes the windowed table in UPSERT mode, so its commits
-    # carry equality deletes and PyIceberg refuses them:
-    #   PyIceberg does not yet support equality deletes
-    # That is a limit of the reader in this image, not a broken table: Trino
-    # reads it fine, and it is Trino that the serving layer uses. Those tables
-    # are reported as a warning and left out of the verdict.
+    # The Flink sink writes upsert tables with equality deletes, which PyIceberg
+    # cannot read; treat those as a warning, since Trino reads them fine.
     unreadable_by_pyiceberg: set[str] = set()
     print("\n-- filas por tabla de la medallion --")
     for _tier, tables in TIER_TABLES.items():

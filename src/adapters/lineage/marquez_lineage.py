@@ -1,7 +1,7 @@
-"""
-Modern Data Architecture POC - Marquez OpenLineage Adapter.
-Implements LineagePublisherPort emitting OpenLineage standard JSON events
-to Marquez and active metadata webhook listeners (RF-19).
+"""Modern Data Architecture POC - Marquez OpenLineage Adapter.
+
+Implements LineagePublisherPort, emitting OpenLineage events to Marquez
+and active metadata webhook listeners.
 """
 
 from __future__ import annotations
@@ -42,11 +42,8 @@ class MarquezLineageAdapter(LineagePublisherPort):
     ) -> bool:
         """Emits an OpenLineage run event.
 
-        Precedence (SRS audit retention for this POC): the local JSONL audit
-        trail is the source of truth. The method returns True when the local
-        audit append succeeded - even if the Marquez HTTP POST failed (the
-        failure is logged as a warning, never silenced). It returns False only
-        when the local audit trail could not be written either.
+        The local JSONL audit trail is the source of truth. Returns False only
+        when neither the audit trail nor Marquez accepted the event.
         """
         now_iso = datetime.now(UTC).isoformat()
         run_id = uuid.uuid4().hex
@@ -66,7 +63,7 @@ class MarquezLineageAdapter(LineagePublisherPort):
             "outputs": [{"namespace": "lakehouse", "name": out} for out in outputs],
         }
 
-        # 1. Write to local lineage audit log (source of truth for the POC)
+        # 1. Write to the local lineage audit log
         audit_ok = True
         try:
             with open(self._audit_file_path, "a", encoding="utf-8") as f:
@@ -79,7 +76,7 @@ class MarquezLineageAdapter(LineagePublisherPort):
                 exc,
             )
 
-        # 2. Post to Marquez API (best effort; local audit takes precedence)
+        # 2. Post to Marquez (best effort)
         marquez_ok = False
         try:
             target_url = f"{self._marquez_url.rstrip('/')}/api/v1/lineage"

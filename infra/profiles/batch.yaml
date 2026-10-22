@@ -1,26 +1,7 @@
-# ==============================================================================
-# Modern Data Architecture POC - Startup Profile: Batch
-# File: infra/profiles/batch.yaml
-# CONTRACT (K-B): each `subsystems.<chart>` is a verbatim Helm values fragment
-# for infra/helm/<chart> (keys verified 1:1 against each chart's values.yaml).
-# Only charts this profile deploys have a section (s1, s2, s3).
-#
-# Trino is NOT part of this profile: the serving layer is its own phase
-# (infra/profiles/serving.yaml) because the box has 6 GiB and the Spark tier
-# alone needs ~1.8 GiB of container limits. The data the serving layer reads
-# lives in the lakehouse (MinIO + Iceberg), not in a pod, so the phases can be
-# run one after another without losing anything.
-#
-# Bronze is ingested by the s1 CronJob (poc/ingest:0.1.0), silver and gold by
-# the Spark Operator. One writer per table: the Spark bronze job is disabled
-# in s3-batch (jobs.bronzeIngestion.enabled=false) so the two never fight over
-# the same Iceberg table.
-#
-# Target RAM Footprint (container LIMITS, Trino not deployed):
-#   postgres 384 + minio 384 + polaris 1024 + spark-operator 384
-#   + spark driver 896 + spark executor 896 = 3968 MiB
-#   plus the kind control plane, which shares the same 6 GiB.
-# ==============================================================================
+# Batch profile. Each `subsystems.<chart>` is a verbatim Helm values fragment
+# for infra/helm/<chart>. Bronze is written by the s1 CronJob, silver and gold
+# by the Spark Operator, so the Spark bronze job stays disabled.
+
 profile:
   name: "batch"
   description: "Medallion batch ETL on the Spark Operator (bronze via the ingestion CronJob)"
@@ -66,9 +47,7 @@ subsystems:
           memory: "384Mi"
         limits:
           cpu: "600m"
-          # Raised from 512Mi, which is exactly the floor s2-lakehouse documents
-          # as "spends its time in GC and never reaches ready". Limits do not
-          # affect scheduling (only requests do), so this costs nothing.
+          # Below ~1Gi the JVM spends its time in GC and never becomes ready.
           memory: "1024Mi"
 
   s3-batch:
@@ -85,11 +64,7 @@ subsystems:
       driver:
         cores: 1
         coreLimit: "1000m"
-        # `memory` is the JVM heap; the container limit is memory +
-        # memoryOverhead. For a Kubernetes non-JVM (Python) job Spark would
-        # default the overhead factor to 0.40, so it is set explicitly here:
-        # the driver then has 512 MiB of heap and 384 MiB of off-heap room
-        # (JVM overhead + the Python process that runs the medallion).
+        # memory is the JVM heap; the container limit is memory + overhead.
         memory: "512m"
         memoryOverhead: "384m"
       executor:

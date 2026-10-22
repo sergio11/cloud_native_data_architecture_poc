@@ -1,10 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: OLTP source backend selection.
+"""Unit tests: OLTP source backend selection.
 
-Regression tests for the PostgreSQL / synthetic-source contract: a reachable
-PostgreSQL table is authoritative even when it holds zero rows (empty real
-table yields ``[]``, never fabricated records); the synthetic generator
-applies ONLY when PostgreSQL is unconfigured or the connection/query fails.
+A reachable PostgreSQL table is authoritative even when empty; the synthetic
+generator applies only when PostgreSQL is unconfigured or the query fails.
 """
 
 from __future__ import annotations

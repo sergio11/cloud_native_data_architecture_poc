@@ -1,12 +1,8 @@
 {{- if .Values.flinkOperator.enabled }}
 {{- /*
-Namespaces that need a Flink ServiceAccount: one per ENABLED job, taken from the
-job's own namespace. It used to be a single block hardcoded to
-global.computeNamespace (always "sales"), which is why the clickstream job could
-never legitimately live in marketing - the `default "marketing"` in
-flink-deployments.yaml was dead code because computeNamespace is always set, so
-the marketing job was silently deployed into the SALES domain namespace instead,
-against its own data-product definition and the s6-mesh marketing quota.
+Namespaces that need a Flink ServiceAccount, one per enabled job from the job's
+own namespace; hardcoding global.computeNamespace would put the marketing job in
+the sales namespace.
 */}}
 {{- $flinkNamespaces := list }}
 {{- if .Values.flinkJobs.ordersStream.enabled }}

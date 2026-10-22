@@ -20,12 +20,9 @@ class BusinessAggregator:
 
     @staticmethod
     def aggregate_daily_sales(orders: list[dict[str, Any]]) -> list[DailySalesMetrics]:
-        """
-        Rolls up sales orders by (order_date, status).
-        Computes:
-        - gross_revenue (sum of total_amount)
-        - total_orders (count of orders)
-        - average_order_value (gross_revenue / total_orders)
+        """Rolls up sales orders by (order_date, status).
+
+        Computes gross revenue, order count and average order value.
         """
         buckets: dict[tuple[str, str], list[float]] = defaultdict(list)
 
@@ -53,12 +50,9 @@ class BusinessAggregator:
 
     @staticmethod
     def _event_epoch_seconds(event: dict[str, Any]) -> float:
-        """Resolves the event-time epoch seconds for window bucketing (RF-09).
+        """Resolves event-time epoch seconds for window bucketing.
 
-        Resolution order (never raises):
-        1. ``timestamp`` (ISO-8601 string, 'Z' suffix accepted, naive = UTC),
-        2. ``order_date`` interpreted as 00:00:00 UTC,
-        3. current UTC time as a last resort.
+        Order: ``timestamp``, then ``order_date`` (midnight UTC), then now.
         """
         ts_raw = event.get("timestamp")
         if ts_raw:
@@ -85,15 +79,10 @@ class BusinessAggregator:
         events: list[dict[str, Any]],
         window_size_seconds: int = 300,
     ) -> list[dict[str, Any]]:
-        """
-        Aggregates real-time order stream events into fixed tumbling time windows (RF-09).
+        """Aggregates order events into fixed tumbling time windows.
 
-        Bucketing key is ``(window_start_epoch // window_size_seconds, status)``
-        derived from event time, so windows are true tumbling windows aligned to
-        the epoch rather than calendar dates. Output rows carry both the window
-        bounds (``window_start``/``window_end``, UTC ISO, end exclusive) and
-        ``order_date`` (YYYY-MM-DD of ``window_start``) for serving/sort
-        compatibility. Rows are sorted by ``(window_start, status)``.
+        Windows align to the epoch and are keyed by ``(bucket, status)``.
+        Output carries window bounds plus ``order_date``, sorted by window.
         """
         if window_size_seconds <= 0:
             raise ValueError("window_size_seconds must be a positive integer")

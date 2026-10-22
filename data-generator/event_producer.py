@@ -1,11 +1,4 @@
-"""
-event_producer.py - Kafka event producer for e-commerce event streams.
-Produces realistic real-time events to Kafka topics:
-  - sales.orders.events:       order lifecycle state transitions
-  - marketing.clickstream.raw: digital browsing & user session navigation events
-
-All topic names, payload keys, and enums are in English.
-"""
+"""Kafka event producer for e-commerce order and clickstream topics."""
 
 from __future__ import annotations
 

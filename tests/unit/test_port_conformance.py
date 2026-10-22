@@ -1,16 +1,7 @@
 """Unit tests: inbound port conformance (LSP invocability).
 
-Every inbound port must be invocable through its DECLARED signature alone: the
-test instantiates the real ``Container`` (bound to ``tmp_path`` for the
-lakehouse/event/audit files and to the repository root for contracts/suites)
-and executes each port using only parameters from the port contract - no extra
-kwargs smuggled from a concrete implementation.
-
-This catches the S3 defect class: ``CleanseSilverPort.execute`` once declared
-``execute(entity)`` while the implementation required ``suite_path`` (raising
-ValueError when None), so any caller honouring the port contract crashed. A
-static LSP check (implementation must accept every port-declared call) plus a
-live execution of every port through the container guards the regression.
+Every inbound port must be invocable through its declared signature alone, both
+statically and by live execution through the container.
 """
 
 from __future__ import annotations

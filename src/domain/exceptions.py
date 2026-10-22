@@ -1,8 +1,6 @@
-"""
-Modern Data Architecture POC - Domain Exceptions.
-Fail-closed error types raised by the application core when quality suites,
-expectations, or promotion rules are violated.
-Pure domain logic with no external infrastructure dependencies (RF-06).
+"""Modern Data Architecture POC - Domain exceptions.
+
+Fail-closed errors raised when quality suites or promotion rules are violated.
 """
 
 from __future__ import annotations
@@ -14,23 +12,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a runtime import cyc
 
 
 class SuiteNotFoundError(Exception):
-    """Raised when a quality expectation suite file is missing (fail-closed, RF-06).
+    """Raised when a quality expectation suite file is missing (fail-closed).
 
-    A missing suite must never be treated as an implicit pass: the quality gate
-    aborts loudly instead of silently promoting unvalidated data. It deliberately
-    does NOT derive from ``FileNotFoundError``/``OSError``: suite resolution is a
-    governance-level failure, not a filesystem condition callers should catch by
-    accident, and the core holds no filesystem vocabulary.
+    A missing suite aborts the gate instead of silently promoting data.
     """
 
 
 class QualityGateBreachError(ValueError):
-    """Raised when a quality gate fails and promotion must be blocked (RF-06).
+    """Raised when a quality gate fails and promotion must be blocked.
 
-    Carries the measured ``pass_rate`` and the required ``threshold`` so callers
-    can report why the gate was breached without re-running evaluation, plus the
-    full ``evaluation`` when available so CLIs can still render results tables,
-    emit FAIL lineage and persist reports before exiting non-zero.
+    Carries the measured pass rate, required threshold and the evaluation.
     """
 
     pass_rate: float

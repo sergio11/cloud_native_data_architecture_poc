@@ -1,14 +1,7 @@
-"""
-Modern Data Architecture POC - SQL Serving Adapter (Outbound / Driven Side).
-Implements QueryExecutorPort: the application core hands over ANSI SQL and this
-adapter decides which backend serves it, keeping RF-11 unified serving queries
-(Trino when explicitly enabled, embedded SQLite otherwise) out of the core.
+"""Modern Data Architecture POC - SQL Serving Adapter.
 
-No-rewrite contract: the SQL is executed VERBATIM on both backends. The use
-case references ``<physical>_live`` serving views (SSOT:
-``src.domain.naming.serving_view_name``), never dotted logical names, so there
-is no logical-to-physical bridge left in this adapter. Live-row filtering
-(``_row_superseded IS NULL``) lives in the view definitions, not in rewriting.
+Implements QueryExecutorPort, choosing the backend (Trino when enabled,
+embedded SQLite otherwise). SQL is executed verbatim on both backends.
 """
 
 from __future__ import annotations
@@ -24,11 +17,8 @@ from src.ports.outbound import QueryExecutorPort
 
 logger = logging.getLogger("adapter.serving.sql")
 
-# Logical tables behind the serving live-view contract. The views are named
-# ``<physical>_live`` via serving_view_name (deterministic SSOT in
-# src.domain.naming); the use case only queries Gold + stream, while Silver /
-# Bronze twins are provisioned alongside so ad-hoc serving SQL can migrate off
-# dotted names without touching this adapter.
+# Logical tables behind the serving live-view contract. Views are named
+# ``<physical>_live``; Silver/Bronze twins support ad-hoc serving SQL.
 _SERVING_LOGICAL_TABLES: tuple[str, ...] = (
     gold_table("daily_metrics"),
     stream_table(),
@@ -40,15 +30,8 @@ _SERVING_LOGICAL_TABLES: tuple[str, ...] = (
 def _ensure_serving_views(conn: sqlite3.Connection) -> None:
     """Provisions every ``<physical>_live`` serving view idempotently.
 
-    Serving owns this contract (NOT storage: LakehouseStorageAdapter is left
-    untouched, and legacy/raw tables created outside storage still resolve).
-    For each logical table whose physical table exists:
-    - when the SQLite-only versioning column ``_row_superseded`` exists, the
-      view is ``SELECT * FROM <physical> WHERE _row_superseded IS NULL`` so
-      superseded row versions stay excluded from serving reads;
-    - otherwise the view is a plain pass-through ``SELECT * FROM <physical>``.
-    Missing physical tables are skipped: the subsequent query then fails
-    loudly (port contract forbids empty stand-ins for failures).
+    Live rows only: excludes ``_row_superseded`` when that column exists.
+    Missing physical tables are skipped; the query then fails loudly.
     """
     for logical in _SERVING_LOGICAL_TABLES:
         physical = physical_sql_name(logical)
@@ -69,22 +52,10 @@ def _ensure_serving_views(conn: sqlite3.Connection) -> None:
 
 
 class SqlServingAdapter(QueryExecutorPort):
-    """
-    Outbound adapter executing serving queries (RF-11) through QueryExecutorPort.
+    """Outbound adapter executing serving queries through QueryExecutorPort.
 
-    Backend selection is explicit:
-    - TRINO_HOST set  -> query Trino first; on failure log a warning and fall
-      back to embedded SQLite (explicit, logged - never silent).
-    - TRINO_HOST unset -> embedded SQLite only (no hidden network attempts).
-
-    The SQL text is NEVER mutated: it is executed exactly as received on both
-    backends (the ``<physical>_live`` views it references are provisioned by
-    ``_ensure_serving_views`` on SQLite and deployed by
-    ``pipelines/serving/unified_view.sql`` on Trino, where bare view names
-    resolve against the ``serving`` schema via TRINO_SCHEMA).
-
-    Every execution logs ``Serving query executed by backend=...`` and SQL
-    errors RAISE (the port contract forbids returning an empty list on failure).
+    Backend selection: TRINO_HOST queries Trino first and logs a fallback to
+    SQLite on failure; otherwise SQLite only. SQL text is never mutated.
     """
 
     def __init__(self, db_path: str = "data/lakehouse.db") -> None:
@@ -130,8 +101,7 @@ class SqlServingAdapter(QueryExecutorPort):
             conn.close()
 
     def _execute_embedded(self, sql: str) -> list[dict[str, Any]]:
-        # Shared lifecycle helper: commit-on-success, rollback-on-error and
-        # close() in every case (raw sqlite3.connect leaks the handle).
+        # Shared lifecycle helper: commit on success, rollback on error, close.
         with sqlite_connection(self._db_path, row_factory=sqlite3.Row) as conn:
             _ensure_serving_views(conn)
             try:

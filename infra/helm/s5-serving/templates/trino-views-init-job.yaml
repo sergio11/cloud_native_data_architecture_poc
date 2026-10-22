@@ -8,12 +8,10 @@ metadata:
     app: trino-views-bootstrap
     {{- include "s5-serving.labels" . | nindent 4 }}
   annotations:
-    # Same reason polaris-bootstrap-job.yaml is a hook: Job spec.template is
-    # immutable, so a second `helm upgrade` that changes this pod spec fails
-    # with "field is immutable" every time. As an ordinary resource Helm
-    # patches it; as a hook it is deleted and recreated.
-    # post-install, not pre-install: the initContainer waits for the Trino
-    # Service, which this same release creates as an ordinary resource.
+    # Run as a hook: Job spec.template is immutable, so as an ordinary resource a
+    # second `helm upgrade` fails with "field is immutable"; a hook is recreated.
+    # post-install (not pre-install): the initContainer waits for the Trino
+    # Service this same release creates.
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "20"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
@@ -26,8 +24,8 @@ spec:
         app: trino-views-bootstrap
     spec:
       restartPolicy: OnFailure
-      # BestEffort QoS without these: the first pod evicted under pressure,
-      # and this Job is what creates the serving schemas everything queries.
+      # Requests keep this Job from being the first pod evicted under pressure;
+      # it creates the serving schemas everything queries.
       resources:
         requests:
           cpu: "50m"
@@ -36,9 +34,8 @@ spec:
           cpu: "500m"
           memory: "512Mi"
       volumes:
-        # Full serving SQL (mirror of pipelines/serving/unified_view.sql, see
-        # trino-views-configmap.yaml): schemas + VIEW 1 (RF-11) only. Views 2-3
-        # were removed (K5/K8) - no pipeline produces their source tables.
+        # Serving SQL (mirror of pipelines/serving/unified_view.sql): schemas and
+        # the unified view only; views 2-3 have no producing pipeline and are absent.
         - name: views-sql
           configMap:
             name: trino-views-sql
@@ -57,8 +54,8 @@ spec:
             - -c
             - |
               echo "Waiting for Trino coordinator on port 8080..."
-              # Bounded: an unbounded loop never exits, so the Job stays
-              # Running forever and backoffLimit never engages.
+              # Bounded loop: an unbounded wait keeps the Job Running and
+              # backoffLimit never engages.
               DEADLINE=$(($(date +%s) + 300))
               until nc -z -w 2 trino.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local 8080; do
                 if [ "$(date +%s)" -ge "${DEADLINE}" ]; then

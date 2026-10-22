@@ -1,42 +1,12 @@
 -- =============================================================================
--- unified_view.sql - Trino Serving Layer Unified Views
--- Implements RF-11: Unified Batch + Stream Query Interface (no double counting)
+-- Trino serving layer unified views.
 --
--- Purpose:
---   Presents consumers with a single query surface that transparently
---   merges historical batch data (Gold Lakehouse) with real-time stream
---   data (Speed tables) without leaking internal storage architecture.
---   Uses standard 3-part ANSI SQL identifiers: <catalog>.<schema>.<table>
---   Stream windows (5-min tumbling grain) are aggregated to day grain
---   (order_date, status) BEFORE the anti-join so each key appears once.
+-- Single query surface merging batch Gold data with the real-time Speed tables,
+-- using 3-part <catalog>.<schema>.<table> identifiers. Stream windows are
+-- aggregated to day grain before the anti-join so each key appears once.
 --
--- Catalog change (2026-10-11):
---   Three Trino catalogs (iceberg/gold/stream) collapsed into ONE catalog
---   named "iceberg" pointing at the Polaris REST catalog. Tables that were
---   formerly in "gold." and "stream." Trino catalogs are now in Iceberg
---   namespaces "sales" and "stream" respectively, accessed via a single
---   catalog "iceberg":
---     OLD: gold.sales.daily_metrics      → NEW: iceberg.sales.daily_metrics
---     OLD: stream.sales.orders_windowed  → NEW: iceberg.stream.orders_windowed
---
---   The Flink jobs write to:
---     iceberg.sales.orders_windowed      (stream speed-layer table)
---   The Spark gold job writes to:
---     iceberg.sales.daily_metrics        (batch gold table)
---
--- Note (VIEW 1):
---   sales_unified_revenue is the SQL equivalent of
---   src/use_cases/query_serving.py :: QueryServingUseCase.execute,
---   used when Trino is enabled. It expresses the EXACT same Lambda fusion
---   semantics: batch wins on (order_date, status) key collision and stream
---   rows only fill keys absent from batch (NOT EXISTS anti-join), so no key
---   is counted twice.
---
--- Deployed objects in this file: schemas (serving/sales/stream/marketing/finance)
--- + LIVE VIEWS iceberg.serving.<name>_live
--- + VIEW 1 iceberg.serving.sales_unified_revenue (RF-11)
--- Former marketing/finance VIEWS 2-3 were REMOVED (K5/K8): their source
--- tables are produced by no pipeline. Do not re-add them without the pipelines.
+-- One catalog: "iceberg" points at the Polaris REST catalog; Flink writes
+-- iceberg.sales.orders_windowed and Spark writes iceberg.sales.daily_metrics.
 -- =============================================================================
 
 CREATE SCHEMA IF NOT EXISTS iceberg.serving;
@@ -45,23 +15,16 @@ CREATE SCHEMA IF NOT EXISTS iceberg.stream;
 CREATE SCHEMA IF NOT EXISTS iceberg.marketing;
 CREATE SCHEMA IF NOT EXISTS iceberg.finance;
 
--- ---------------------------------------------------------------------------
--- LIVE VIEWS: iceberg.serving.<physical>_live (serving no-rewrite contract)
--- Pure pass-through over Iceberg tables. `_row_superseded` is a SQLite-only
--- versioning concept unknown to Iceberg/Trino — no WHERE clause needed here.
--- ---------------------------------------------------------------------------
+-- LIVE VIEWS: pure pass-through over Iceberg tables; `_row_superseded` is a
+-- SQLite-only versioning concept unknown to Iceberg/Trino.
 CREATE OR REPLACE VIEW iceberg.serving.gold_sales_daily_metrics_live AS
 SELECT * FROM iceberg.sales.daily_metrics;
 
 CREATE OR REPLACE VIEW iceberg.serving.stream_sales_orders_windowed_live AS
 SELECT * FROM iceberg.sales.orders_windowed;
 
--- ---------------------------------------------------------------------------
--- VIEW 1: iceberg.serving.sales_unified_revenue (RF-11)
--- Same semantics as QueryServingUseCase: batch exact values win, stream
--- windows merged to day grain only fill (order_date, status) keys absent
--- from batch - no double counting, no duplicate keys.
--- ---------------------------------------------------------------------------
+-- VIEW 1: same semantics as QueryServingUseCase.execute: batch exact values
+-- win, stream windows merged to day grain fill only keys absent from batch.
 CREATE OR REPLACE VIEW iceberg.serving.sales_unified_revenue AS
 
 SELECT
@@ -72,7 +35,7 @@ SELECT
     avg_order_value,
     source_tier
 FROM (
-    -- 1. Historical Batch Layer (Gold) - exact aggregates, always wins
+    -- Historical batch (Gold): exact aggregates, always wins.
     SELECT
         order_date                                   AS order_date,
         status                                       AS status,
@@ -84,8 +47,7 @@ FROM (
 
     UNION ALL
 
-    -- 2. Near Real-Time Stream Layer (Speed) - windows merged to day grain,
-    -- only keys ABSENT from batch
+    -- Real-time stream (Speed): day grain, only keys absent from batch.
     SELECT
         s.order_date                                 AS order_date,
         s.status                                     AS status,
@@ -106,21 +68,10 @@ FROM (
 ) unified
 ORDER BY order_date DESC, status DESC;
 
--- Consumer usage (mirrors QueryServingUseCase parameters order_date_gte / limit):
---   SELECT * FROM iceberg.serving.sales_unified_revenue
---   WHERE order_date >= '2026-09-20'
---   ORDER BY order_date DESC, status DESC
---   LIMIT 20;
+-- Example: SELECT * FROM iceberg.serving.sales_unified_revenue
+--          WHERE order_date >= CURRENT_DATE - INTERVAL '30' DAY
+--          ORDER BY order_date DESC LIMIT 20;
 
 
--- ---------------------------------------------------------------------------
--- VIEWS 2-3 REMOVED (2026-10-04, K8s remediation K5/K8) - DO NOT RE-ADD
--- WITHOUT A PRODUCING PIPELINE.
--- The former marketing_unified_campaign_performance read
--- iceberg.marketing.campaigns + iceberg.marketing.funnel_metrics and
--- finance_unified_pl_summary read iceberg.finance.financial_closings.
--- NONE of those three tables is produced by any pipeline in this repo.
--- Rewriting the views onto clickstream_windowed / daily_metrics would fake
--- campaign/finance semantics, so there is NO honest equivalent: the views are
--- deleted and only VIEW 1 (RF-11) is deployed.
--- ---------------------------------------------------------------------------
+-- Views 2-3 (marketing/finance) are intentionally absent: no pipeline produces
+-- marketing.campaigns, marketing.funnel_metrics or finance.financial_closings.

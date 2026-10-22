@@ -1,37 +1,7 @@
-"""
-Modern Data Architecture POC - Great Expectations Quality Engine Adapter.
-Implements QualityEnginePort evaluating assertion suites on datasets without heavy C dependencies.
+"""Modern Data Architecture POC - Quality engine adapter.
 
-Fail-closed semantics (RF-06):
-  * Missing suite file        -> raises SuiteNotFoundError (never a silent pass).
-  * Empty records or 0 expectations -> evaluation with passed=False, pass_rate=0.0
-    and a failure entry explaining "no data / no assertions to evaluate".
-  * Unsupported expectation type    -> recorded as a failing assertion AND forces
-    passed=False regardless of the threshold arithmetic.
-
-Null / ``mostly`` policy:
-  * ``mostly`` (default 1.0, i.e. strict) is honoured consistently for not-null,
-    regex, in-set and between checks: the tolerated invalid fraction is
-    ``1 - mostly``.
-  * not-null counts ``None`` and blank/whitespace strings as invalid.
-  * in-set counts ``None`` as invalid unless ``None`` is explicitly part of
-    ``value_set`` (kept from the previous semantics).
-  * between only bounds-checks non-null values; nulls are skipped (not invalid).
-  * unique ignores nulls; duplicates among non-null values fail.
-
-Dimension-rate semantics (per RECORD, not per assertion):
-  * ``dimension_rates[dim] = 1 - (distinct rows failing >= 1 attributable
-    assertion of that dimension) / (total rows)``, rounded to 4 decimals, so
-    contract thresholds declared as record-quality percentages (e.g.
-    ``validity 0.99``) are evaluated on the same basis. ``mostly`` keeps its
-    Great Expectations meaning ONLY for each assertion's boolean verdict and
-    never enters the rate arithmetic.
-  * ``expect_table_row_count_to_be_between`` is not attributable to individual
-    rows: when a dimension is measured ONLY by non-attributable assertions,
-    its rate keeps the legacy assertion ratio (``passed/total``). No shipped
-    suite under ``quality/expectations/`` exercises that case (every
-    completeness block also carries attributable ``not_null`` assertions),
-    but the fallback is kept for robustness.
+Implements QualityEnginePort over Great Expectations JSON suites. Missing
+suites, empty data and unsupported expectations all fail closed.
 """
 
 from __future__ import annotations
@@ -52,9 +22,7 @@ logger = logging.getLogger("adapter.quality.engine")
 
 FAIL_CLOSED_MARKER = "no data / no assertions to evaluate"
 
-# Quality dimension per supported expectation type. Unsupported types map to no
-# dimension: they still force ``passed=False`` (fail-closed) without skewing a
-# dimension ratio.
+# Quality dimension per expectation type. Unsupported types map to no dimension.
 DIMENSION_BY_EXPECTATION: dict[str, str] = {
     "expect_column_values_to_not_be_null": "completeness",
     "expect_table_row_count_to_be_between": "completeness",
@@ -64,12 +32,8 @@ DIMENSION_BY_EXPECTATION: dict[str, str] = {
     "expect_column_values_to_match_regex": "validity",
 }
 
-# Shared signature of every per-type handler:
-# (records, kwargs, mostly, col, col_key)
-#   -> (success, observed, details, column, failed_row_indices).
-# ``failed_row_indices`` holds the 0-based indices of the rows violating the
-# assertion, or ``None`` when the assertion is not attributable to individual
-# rows (currently only ``expect_table_row_count_to_be_between``).
+# Shared handler signature: (records, kwargs, mostly, col, col_key) ->
+# (success, observed, details, column, failed_row_indices).
 _ExpectationHandler = Callable[
     [list[dict[str, Any]], dict[str, Any], float, Any, str],
     tuple[bool, Any, str, Any, set[int] | None],
@@ -77,14 +41,9 @@ _ExpectationHandler = Callable[
 
 
 class ExpectationEngineAdapter(QualityEnginePort):
-    """Evaluates Great Expectations JSON suites against records (fail-closed, RF-06).
+    """Evaluates Great Expectations JSON suites against records (fail-closed).
 
-    Open/Closed design: ``evaluate_suite`` dispatches each expectation through
-    the handler map instead of an if/elif chain. To support a new expectation
-    type, add one small ``_eval_*`` method with the shared handler signature
-    (preserving the null/``mostly``/fail-closed conventions from the module
-    docstring) and register it with one map entry — the core loop is never
-    modified.
+    New expectation types are added by registering one handler in the map.
     """
 
     def evaluate_suite(
@@ -104,7 +63,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
         expectations = suite.get("expectations") or []
         total_assertions = len(expectations)
 
-        # Fail-closed: a gate that cannot evaluate must not approve (RF-06).
+        # Fail-closed: a gate that cannot evaluate must not approve.
         if not records or total_assertions == 0:
             reason = (
                 f"{FAIL_CLOSED_MARKER}: {len(records)} record(s) and "
@@ -180,8 +139,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
                 if success:
                     dimension_passed[dimension] = dimension_passed.get(dimension, 0) + 1
                 if failed_rows is None:
-                    # Non-attributable assertion (row-count): it still votes in
-                    # the assertion arithmetic, but contributes no failing rows.
+                    # Non-attributable assertion (row-count): no failing rows.
                     dimension_attributable.setdefault(dimension, False)
                 else:
                     dimension_attributable[dimension] = True
@@ -202,8 +160,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
                 )
 
         pass_rate = round(passed_count / total_assertions, 4)
-        # Threshold governs the verdict, but fail-closed conditions (unsupported
-        # expectation types) force passed=False regardless of the arithmetic.
+        # Unsupported expectation types force passed=False regardless of arithmetic.
         passed = (pass_rate >= threshold) and not unsupported
         dimension_rates: dict[str, float] = {}
         for dimension, total in dimension_total.items():
@@ -212,10 +169,7 @@ class ExpectationEngineAdapter(QualityEnginePort):
                 failed = len(dimension_failed_rows.get(dimension, set()))
                 dimension_rates[dimension] = round(1.0 - failed / len(records), 4)
             else:
-                # Legacy fallback: the dimension is measured ONLY by
-                # non-row-attributable assertions (e.g. a suite with nothing
-                # but expect_table_row_count_to_be_between), so no failing
-                # rows exist and the assertion ratio is the only signal.
+                # Fallback: dimension measured only by non-attributable assertions.
                 dimension_rates[dimension] = round(dimension_passed.get(dimension, 0) / total, 4)
         return QualityGateEvaluation(
             suite_name=suite_name,

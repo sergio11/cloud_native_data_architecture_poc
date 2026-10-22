@@ -1,4 +1,4 @@
-# Dagster Helm values optimized for 8GB RAM Kubernetes/kind
+# Dagster Helm values for the kind/Kubernetes profile
 dagsterWebserver:
   replicaCount: 1
   resources:

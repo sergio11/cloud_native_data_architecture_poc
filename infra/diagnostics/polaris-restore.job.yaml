@@ -1,16 +1,7 @@
-# ==============================================================================
 # Polaris catalog restore Job
 #
-# Polaris runs with an in-memory metastore, so a restart leaves the catalog
-# empty even though the Iceberg metadata and the parquet files are still in
-# MinIO. This Job recreates the catalog, its namespaces and re-registers the
-# existing tables by pointing Polaris at the metadata files that are already
-# in the bucket.
-#
-# It never drops a catalog that already holds tables: the drop path is only
-# reachable for an empty catalog whose base location does not match the
-# expected one.
-# ==============================================================================
+# Polaris keeps its metastore in memory, so after a restart this Job recreates the
+# catalog, its namespaces and re-registers existing tables from their metadata.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -27,9 +18,7 @@ spec:
         app: polaris-restore
     spec:
       restartPolicy: Never
-      # Not BestEffort: under memory pressure the first pods evicted are the
-      # ones without limits, and a restore that dies half-way leaves the
-      # catalogue with a namespace but without its tables.
+      # Limits keep the pod from being the first evicted under memory pressure.
       resources:
         requests:
           cpu: "50m"
@@ -37,9 +26,7 @@ spec:
         limits:
           cpu: "500m"
           memory: "384Mi"
-      # The compute node: it is where the poc/ingest image is loaded, and the
-      # restore has to be able to run while the heavy increment has the
-      # "worker" node stopped (which is where it used to be pinned).
+      # Compute node: the image is loaded here and it stays up while the worker node is stopped.
       nodeSelector:
         kubernetes.io/hostname: poc-data-platform-worker2
       volumes:
@@ -68,16 +55,8 @@ spec:
               value: us-east-1
             - name: NAMESPACES
               value: sales,marketing,finance
-            # The tables to re-register, as "namespace.table=metadata-location".
-            #
-            # Each metadata location is the Iceberg metadata JSON that is
-            # already in MinIO, and it MUST be the current one: a table that
-            # was written twice keeps two histories under its metadata/
-            # directory, and the right file is the one with the highest
-            # "last-updated-ms". They can be listed with
-            #   kubectl exec -n platform deploy/minio -- \
-            #     /opt/bitnami/minio-client/bin/mc --config-dir /tmp/mc \
-            #     ls local/warehouse/sales/<table>/metadata/
+            # Tables to re-register as "namespace.table=metadata-location". Use the
+            # current metadata JSON in MinIO (highest "last-updated-ms").
             - name: TABLES
               value: >-
                 sales.bronze_orders=s3://warehouse/sales/bronze_orders/metadata/00001-12787326-27bf-4372-ba0c-219ebfa77106.metadata.json,

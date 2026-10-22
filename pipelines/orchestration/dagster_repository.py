@@ -1,8 +1,6 @@
 """
-Modern Data Architecture POC - Dagster Software-Defined Assets & Jobs
-Implements Medallion pipeline orchestration (Bronze -> Silver -> Gold),
-Quality gates execution, and Kappa streaming replay triggers.
-All asset names, tables, and job definitions are in English.
+Dagster software-defined assets and jobs for the Medallion pipeline
+(Bronze -> Silver -> Gold), quality gates and Kappa streaming replay triggers.
 """
 
 from __future__ import annotations

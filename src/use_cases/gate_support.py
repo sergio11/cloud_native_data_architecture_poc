@@ -1,18 +1,7 @@
-"""
-Modern Data Architecture POC - Shared fail-closed gate enforcement (application layer).
+"""Modern Data Architecture POC - Shared fail-closed gate enforcement.
 
-Single collaborator used by the Silver (``CleanseSilverUseCase``) and Gold
-(``AggregateGoldUseCase``) tiers so both apply identical promotion rules
-(RF-06): resolve the governing contract thresholds, evaluate the expectation
-suite through the engine port, assess the verdict through the pure domain
-policy (:func:`src.domain.quality_gate.assess_gate`), emit a FAIL lineage
-event and raise ``QualityGateBreachError`` on breach — always BEFORE any
-write for the target. Both use cases stay thin orchestrators delegating here.
-
-This module owns every application concern the pure domain policy must not:
-OpenLineage emission, ``QualityGateBreachError`` raising, and the
-``data-products/<entity>/`` contract-location convention (resolved through
-the catalog port, never by the domain).
+Used by Silver and Gold so both apply identical promotion rules: resolve
+contract thresholds, evaluate, emit FAIL lineage and raise on breach.
 """
 
 from __future__ import annotations
@@ -33,12 +22,9 @@ def find_contract_thresholds(
     catalog: ContractCatalogPort | None,
     entity: str,
 ) -> dict[str, float] | None:
-    """Locates the contract governing ``entity`` and returns its quality thresholds.
+    """Returns the quality thresholds of the contract governing ``entity``.
 
-    The contract is the ``list_contracts()`` entry whose path contains the
-    ``data-products/<entity>/`` segment (first match in path order wins).
-    Returns None when there is no catalog, no matching contract, or the
-    contract declares no thresholds (caller falls back to explicit/default).
+    Returns None when no catalog, no matching contract, or no declared thresholds.
     """
     if catalog is None:
         return None
@@ -66,12 +52,9 @@ def enforce_quality_gate(
     entity: str,
     quality_threshold: float | None = None,
 ) -> float:
-    """Enforces the shared Silver/Gold promotion policy, returning the approved pass rate.
+    """Enforces the shared Silver/Gold promotion policy; returns the pass rate.
 
-    Contract thresholds (``data-products/<entity>/``) govern per dimension and
-    ignore the global threshold; the explicit threshold (or its
-    ``DEFAULT_QUALITY_THRESHOLD`` default) is only a fallback when the
-    contract is silent.
+    Contract thresholds govern per dimension; the explicit threshold is a fallback.
     """
     contract_thresholds = find_contract_thresholds(catalog, entity)
     if contract_thresholds is not None and quality_threshold is not None:
@@ -99,7 +82,7 @@ def enforce_quality_gate(
             table_name,
             verdict.reason,
         )
-        # RF-06 owner notification trail: record the FAILED run before raising.
+        # Owner notification trail: record the FAILED run before raising.
         lineage.emit_job_event(
             job_name=job_name,
             inputs=list(inputs),
@@ -110,10 +93,7 @@ def enforce_quality_gate(
             f"Quality gate breached for {table_name} ({verdict.reason})",
             pass_rate=verdict.rate if verdict.rate is not None else evaluation.pass_rate,
             threshold=verdict.required if verdict.required is not None else effective_threshold,
-            # The breach carries the FAILED verdict: force ``passed=False`` so
-            # consumers rendering/inspecting the attached evaluation never read
-            # the engine's global-threshold arithmetic as a PASS while contract
-            # dimensions blocked promotion.
+            # Breach carries the FAILED verdict (``passed=False``).
             evaluation=replace(evaluation, passed=False),
         )
     logger.info("Quality gate PASSED for '%s' (%s)", table_name, verdict.reason)

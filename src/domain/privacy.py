@@ -1,8 +1,6 @@
-"""
-Modern Data Architecture POC - GDPR & Privacy Domain Policies.
-Implements GDPR Article 25 (Data protection by design and by default):
-- Irreversible cryptographic SHA-256 pseudonymization for email addresses.
-- Name masking (First Name + Last Initial).
+"""Modern Data Architecture POC - GDPR and privacy domain policies.
+
+Irreversible SHA-256 email pseudonymization and name masking.
 """
 
 from __future__ import annotations
@@ -10,22 +8,15 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-#: Default salt for PII email pseudonymization when no salt is provided
-#: explicitly. Demo-grade (public constant, not a secret): it only guarantees
-#: that two deployments configuring different salts obtain different hashes.
-#: Any deployment with real PII must configure ``PII_HASH_SALT`` at the
-#: composition root (``src/container.py``), which injects it as an explicit
-#: argument - the domain layer itself never reads the environment (DIP).
+#: Default demo salt for PII pseudonymization. Deployments with real PII must
+#: configure ``PII_HASH_SALT`` at the composition root.
 DEFAULT_PII_HASH_SALT = "poc-demo-salt-v1"
 
 
 def pseudonymize_email(email: str, salt: str = DEFAULT_PII_HASH_SALT) -> str:
     """Computes the deterministic salted SHA-256 hex digest of an email address.
 
-    Pure function (no environment access): the digest covers
-    ``f"{salt}:{normalized_email}"`` where the email is
-    ``strip().lower()``-normalised. Same email + same salt always yields the
-    same 64-char hex value; a different salt yields a different value.
+    Pure function: the digest covers ``f"{salt}:{normalized_email}"``.
     """
     if not email:
         return ""
@@ -43,11 +34,7 @@ class PrivacyPolicy:
 
     @staticmethod
     def hash_email(email: str, salt: str = DEFAULT_PII_HASH_SALT) -> str:
-        """Legacy entry point, kept for backward compatibility.
-
-        Delegates to :meth:`pseudonymize_email` with the given (or default)
-        salt, so historical callers transparently gain salting.
-        """
+        """Alias of :meth:`pseudonymize_email`."""
         return pseudonymize_email(email, salt=salt)
 
     @staticmethod

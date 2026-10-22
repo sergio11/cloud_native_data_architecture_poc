@@ -1,12 +1,5 @@
-"""
-Modern Data Architecture POC - Integration Tests: SRS §9 Acceptance Criteria.
-
-Hermetic Given/When/Then proofs for RF-06, RF-07, RF-09, RF-10, RF-11, RF-15
-and RF-19 run against the REAL adapters (SQLite lakehouse, SQLite event log,
-JSONL lineage audit, expectation engine, SQL serving) wired inside tmp_path by
-``tests/integration/conftest.py``. No network (Marquez POST is stubbed to fail
-instantly), no repository ``data/`` writes, no randomness: every timestamp and
-row is fixed so the suite is reproducible.
+"""Acceptance tests for the quality gate, time travel, streaming windows,
+replay, unified serving, governance and lineage against the real adapters.
 """
 
 from __future__ import annotations
@@ -43,10 +36,9 @@ def _copy_suite(tmp_path: Path, suite_path: str, name: str) -> str:
 
 
 def _bronze_orders_with_null_status(null_count: int = 3, total: int = 20) -> list[dict[str, Any]]:
-    """Raw Bronze rows where ~15% of ``status`` are null/blank (RF-06 Given).
+    """Raw Bronze rows where ~15% of ``status`` are null/blank.
 
-    Includes ``_``-prefixed audit columns exactly like real Bronze output;
-    the cleansing use case must strip them before quality evaluation.
+    Includes ``_``-prefixed audit columns exactly like real Bronze output.
     """
     statuses = ["confirmed", "pending", "shipped", "cancelled"]
     null_variants = [None, "", "   "]
@@ -82,7 +74,7 @@ def _stream_event(order_id: int, timestamp: str, amount: float, date: str) -> di
 
 
 def _stored(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Expected on-disk representation (native RF-04 types: int/float preserved)."""
+    """Expected on-disk representation (native types: int/float preserved)."""
     return [dict(row) for row in rows]
 
 
@@ -91,7 +83,7 @@ def _window_sort_key(row: dict[str, Any]) -> Any:
 
 
 def _run_governance_cli(repo_root: Path) -> subprocess.CompletedProcess:
-    """The exact CLI entry point the Rakefile / demo.sh invoke (RF-15)."""
+    """The exact CLI entry point the Rakefile / demo.sh invoke."""
     return subprocess.run(
         [sys.executable, str(CLI_PATH), "--repo-root", str(repo_root)],
         capture_output=True,
@@ -102,15 +94,12 @@ def _run_governance_cli(repo_root: Path) -> subprocess.CompletedProcess:
 
 
 # ---------------------------------------------------------------------------
-# RF-06 - Quality gate blocks Silver promotion on 15% nulls
+# Quality gate blocks Silver promotion on 15% nulls
 # ---------------------------------------------------------------------------
 
 
 def test_rf06_null_breach_blocks_silver_and_alerts_via_lineage(world, tmp_path: Path) -> None:
-    """Given 15% null/blank ``status`` in Bronze, When the gate runs with the
-    real silver orders suite at threshold 0.95, Then promotion raises
-    QualityGateBreachError, Silver stays untouched and a FAIL lineage event
-    (the owner alert trail) is appended to the audit file."""
+    """A 15% null ``status`` breach blocks Silver promotion and emits a FAIL event."""
     suite_path = _copy_suite(tmp_path, world.orders_suite, "silver_orders_suite.json")
     world.storage.write_table("bronze.sales.orders", _bronze_orders_with_null_status(), mode="append")
 
@@ -128,7 +117,7 @@ def test_rf06_null_breach_blocks_silver_and_alerts_via_lineage(world, tmp_path: 
     assert world.storage.table_exists("silver.sales.orders") is False
     assert world.storage.read_table("silver.sales.orders") == []
 
-    # Then: the FAIL run is on the audit trail (RF-06 alert).
+    # Then: the FAIL run is on the audit trail (alert).
     fail_events = [e for e in world.lineage_events() if e["eventType"] == "FAIL"]
     assert len(fail_events) == 1
     assert fail_events[0]["job"]["name"] == "silver_clean_orders"
@@ -136,8 +125,7 @@ def test_rf06_null_breach_blocks_silver_and_alerts_via_lineage(world, tmp_path: 
 
 
 def test_rf06_clean_rows_pass_gate_and_reach_silver(world, tmp_path: Path) -> None:
-    """Given clean Bronze rows, When the gate runs at 0.95, Then promotion
-    succeeds, Silver holds every row and a COMPLETE lineage event is recorded."""
+    """Clean Bronze rows pass the gate and reach Silver with a COMPLETE event."""
     suite_path = _copy_suite(tmp_path, world.orders_suite, "silver_orders_suite.json")
 
     ingest = world.ingest_bronze.execute("orders")
@@ -163,15 +151,12 @@ def test_rf06_clean_rows_pass_gate_and_reach_silver(world, tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# RF-07 - Gold time travel returns the prior version unaltered
+# Gold time travel returns the prior version unaltered
 # ---------------------------------------------------------------------------
 
 
 def test_rf07_time_travel_returns_previous_gold_version_unchanged(world) -> None:
-    """Given gold.sales.daily_metrics written as version 1 and then overwritten
-    with version 2, When reading version 1, Then the historical snapshot comes
-    back byte-for-byte unaltered while the current read returns version 2 and
-    list_versions() reports both snapshots with the right row counts."""
+    """Reading the previous Gold version returns it byte-for-byte unchanged."""
     storage = world.storage
     version_1 = [
         {
@@ -232,14 +217,12 @@ def test_rf07_time_travel_returns_previous_gold_version_unchanged(world) -> None
 
 
 # ---------------------------------------------------------------------------
-# RF-09 - Event-time tumbling windows land in serving right after processing
+# Event-time tumbling windows land in serving right after processing
 # ---------------------------------------------------------------------------
 
 
 def test_rf09_five_minute_windows_reflect_events_immediately(world) -> None:
-    """Given events at 10:00:00, 10:03:00 and 10:07:00 UTC, When
-    ProcessStreamUseCase runs, Then they bucket into 10:00-10:05 (2 events) and
-    10:05-10:10 (1 event), readable the moment execute() returns."""
+    """Events bucket into event-time tumbling windows readable immediately."""
     events = [
         _stream_event(1, "2026-09-26T10:00:00+00:00", 100.0, "2026-09-26"),
         _stream_event(2, "2026-09-26T10:03:00+00:00", 200.0, "2026-09-26"),
@@ -273,14 +256,12 @@ def test_rf09_five_minute_windows_reflect_events_immediately(world) -> None:
 
 
 # ---------------------------------------------------------------------------
-# RF-10 - Full replay is deterministic and ignores the consumer cursor
+# Full replay is deterministic and ignores the consumer cursor
 # ---------------------------------------------------------------------------
 
 
 def test_rf10_replay_is_deterministic_and_ignores_consumer_cursor(world) -> None:
-    """Given a seeded log already consumed in incremental mode, When
-    execute(replay=True) runs twice, Then both runs reprocess ALL events
-    (the speed-layer cursor is ignored) and produce identical table contents."""
+    """Replay ignores the consumer cursor and reproduces identical table contents."""
     events = [
         _stream_event(1, "2026-09-26T10:00:00+00:00", 100.0, "2026-09-26"),
         _stream_event(2, "2026-09-26T10:03:00+00:00", 200.0, "2026-09-26"),
@@ -313,16 +294,12 @@ def test_rf10_replay_is_deterministic_and_ignores_consumer_cursor(world) -> None
 
 
 # ---------------------------------------------------------------------------
-# RF-11 - One coherent query over batch Gold + stream Speed, no double count
+# One coherent query over batch Gold + Stream Speed, no double count
 # ---------------------------------------------------------------------------
 
 
 def test_rf11_batch_wins_and_stream_fills_gaps_in_single_query(world) -> None:
-    """Given batch gold rows for D1 (confirmed) and stream rows for D1 (same key,
-    different numbers) plus D2, When execute() runs once,
-    Then D1/confirmed appears EXACTLY ONCE with the batch values and
-    source_tier=batch_historical, D2 comes from stream_speed, all in a single
-    coherent list."""
+    """Batch Gold wins over its stream twin while stream fills the gaps in one query."""
     gold_rows = [
         {
             "order_date": "2026-09-25",
@@ -374,17 +351,14 @@ def test_rf11_batch_wins_and_stream_fills_gaps_in_single_query(world) -> None:
 
 
 # ---------------------------------------------------------------------------
-# RF-15 - Governance CLI blocks a protected-field rename in CI
+# Governance CLI blocks a protected-field rename in CI
 # ---------------------------------------------------------------------------
 
 
 def test_rf15_governance_cli_blocks_field_rename_and_passes_clean_tree(
     tmp_path: Path,
 ) -> None:
-    """Given a domains tree whose contract renames a protected field (status ->
-    status_code) while its sibling schema.json still declares ``status``, When
-    the real governance CLI runs, Then the exit code is 1; given a fully
-    compatible tree, Then the exit code is 0 (publication allowed)."""
+    """The governance CLI rejects a protected-field rename and passes a clean tree."""
     schema_fields = [
         {"name": "id", "type": "integer"},
         {"name": "status", "type": "string"},
@@ -416,15 +390,12 @@ def test_rf15_governance_cli_blocks_field_rename_and_passes_clean_tree(
 
 
 # ---------------------------------------------------------------------------
-# RF-19 - Lineage: connected bronze -> silver -> gold chain
+# Lineage: connected bronze -> silver -> gold chain
 # ---------------------------------------------------------------------------
 
 
 def test_rf19_lineage_records_connected_bronze_to_gold_chain(world) -> None:
-    """Given the medallion flow executed (ingest x2, cleanse x2, aggregate all),
-    Then the audit file holds bronze -> silver -> gold job events in order with
-    inputs/outputs forming a connected chain (bronze output == silver input,
-    silver output == gold input)."""
+    """The lineage audit records a connected bronze -> silver -> gold chain."""
     assert world.ingest_bronze.execute("orders")["status"] == "SUCCESS"
     assert world.ingest_bronze.execute("customers")["status"] == "SUCCESS"
 

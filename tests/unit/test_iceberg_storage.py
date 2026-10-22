@@ -1,18 +1,7 @@
-"""
-Tests for the Iceberg lakehouse adapter.
+"""Tests for the Iceberg lakehouse adapter.
 
-The catalog is a DOUBLE, not a real one: the adapter talks to a small set of
-catalog operations, and a double keeps these tests hermetic (no network, no
-PyIceberg installed) while still exercising the parts that carry the contract:
-
-* RF-01 content-hash idempotency: the same batch twice writes once.
-* RF-07 time travel: an older snapshot still reads the rows it had.
-* The port's ordering guarantee: rows come back oldest write first.
-* The identifier mapping: published tiers drop the tier, internal tiers keep it.
-
-The double keeps the rows of every snapshot, which is exactly what Iceberg
-does, so the tests assert against Iceberg's real semantics rather than a
-simplification of them.
+The catalog is a double, keeping the tests hermetic while exercising
+idempotent writes, time travel, ordering and identifier mapping.
 """
 
 from __future__ import annotations
@@ -374,7 +363,7 @@ def test_read_strips_the_internal_columns(adapter: IcebergLakehouseStorageAdapte
 
 
 def test_re_writing_the_same_batch_writes_nothing(adapter: IcebergLakehouseStorageAdapter) -> None:
-    """RF-01: re-executing identical content must not duplicate rows."""
+    """Re-executing identical content must not duplicate rows."""
     batch = _orders()
     assert adapter.write_table("gold.sales.daily_metrics", batch) == 3
     assert adapter.write_table("gold.sales.daily_metrics", batch) == 0
@@ -395,7 +384,7 @@ def test_overwrite_replaces_the_live_content(adapter: IcebergLakehouseStorageAda
 
 
 def test_the_previous_snapshot_is_still_readable(adapter: IcebergLakehouseStorageAdapter) -> None:
-    """RF-07: the prior snapshot stays readable, that is time travel."""
+    """The prior snapshot stays readable, that is time travel."""
     adapter.write_table("gold.sales.daily_metrics", _orders(3))
     first = adapter.list_versions("gold.sales.daily_metrics")[0]["snapshot_version"]
     adapter.write_table("gold.sales.daily_metrics", _orders(2), mode="overwrite")
@@ -442,7 +431,7 @@ def test_an_unsupported_write_mode_is_rejected(adapter: IcebergLakehouseStorageA
 
 
 def test_overwrite_with_an_empty_set_clears_the_table(adapter: IcebergLakehouseStorageAdapter) -> None:
-    """RF-10: a replayed empty log must clear the table, not leave stale rows."""
+    """A replayed empty log must clear the table, not leave stale rows."""
     adapter.write_table("gold.sales.daily_metrics", _orders(3))
     assert adapter.write_table("gold.sales.daily_metrics", [], mode="overwrite") == 0
     assert adapter.read_table("gold.sales.daily_metrics") == []
@@ -451,10 +440,10 @@ def test_overwrite_with_an_empty_set_clears_the_table(adapter: IcebergLakehouseS
 def test_writing_to_a_table_created_outside_the_adapter_evolves_it(
     adapter: IcebergLakehouseStorageAdapter,
 ) -> None:
-    """The catalogue registration creates the published tables, and it creates
-    them with the business schema only. The payload always carries the two
-    internal columns, so without the evolution the write died with
-    "PyArrow table contains more columns: _content_hash, _row_seq"."""
+    """The catalogue registers published tables with the business schema only.
+
+    The adapter evolves them to add the internal audit columns.
+    """
     catalog = adapter._catalog  # noqa: SLF001 - the double is the test's own
     catalog.namespaces.add("sales")
     catalog.tables["sales.daily_metrics"] = _FakeTable(

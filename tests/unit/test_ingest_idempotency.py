@@ -1,8 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: RF-01 Idempotent Bronze Ingestion.
-Verifies append-only Bronze writes with content-hash idempotency, audit columns,
-lineage emission and SQL identifier validation.
-Adapters and use cases are constructed directly (never via src.container).
+"""Unit tests: idempotent Bronze ingestion.
+
+Verifies content-hash idempotency, audit columns, lineage emission and SQL
+identifier validation.
 """
 
 from __future__ import annotations
@@ -108,7 +107,7 @@ def test_ingest_bronze_idempotent(tmp_path):
     assert lineage.events[1]["job_name"] == "bronze_ingest_orders"
 
     count2 = len(storage.read_table("bronze.sales.orders"))
-    # RF-01: re-running ingestion over an identical snapshot is idempotent —
+    # Re-running ingestion over an identical snapshot is idempotent —
     # the content hash excludes audit columns (_batch_id/_ingested_at), so
     # byte-identical business content must write 0 rows (idempotent_hit).
     assert res2["rows_ingested"] == 0, (

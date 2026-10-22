@@ -1,12 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: serving executes SQL verbatim (P1).
+"""Unit tests: serving executes SQL verbatim.
 
-Locks the live-view contract that replaced the interim logical-name bridge:
-- the use case references ``<physical>_live`` views (SSOT
-  ``src.domain.naming.serving_view_name``), never dotted logical names;
-- ``SqlServingAdapter`` executes that SQL byte-identical on both backends
-  (no ``_rewrite_logical_names`` / ``_LOGICAL_TO_PHYSICAL`` left);
-- superseded row versions stay excluded end-to-end through the views.
+The use case references ``<physical>_live`` views and the adapter executes the
+SQL byte-identical on both backends.
 """
 
 from __future__ import annotations
@@ -219,11 +214,10 @@ def test_trino_artifacts_declare_pass_through_live_views() -> None:
         assert view in unified
         assert view in configmap
     # Trino twins are pure pass-through over the versioned sources.
-    # Catalog consolidation (2026-10-11): single "iceberg" catalog replaces
-    # deprecated "gold" and "stream" Trino catalog names.
+    # Single "iceberg" catalog replaces the deprecated "gold" and "stream" names.
     assert "SELECT * FROM iceberg.sales.daily_metrics;" in unified
     assert "SELECT * FROM iceberg.sales.orders_windowed;" in unified
-    # VIEW 1 (RF-11) keeps its semantics: same anti-join on the same keys.
+    # VIEW 1 keeps its semantics: same anti-join on the same keys.
     assert "WHERE NOT EXISTS (" in unified
     assert "b.order_date = s.order_date" in unified
     assert "b.status = s.status" in unified

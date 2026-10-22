@@ -31,10 +31,7 @@ spec:
               value: "5000"
             - name: MARQUEZ_ADMIN_PORT
               value: "5001"
-            # The catalogue lives in PostgreSQL and the image reads these
-            # variables (the same ones the upstream chart's subchart
-            # provides). Without them the server dies in the Flyway
-            # migration with "UnknownHostException: postgres".
+            # Catalog host; without it the server dies in the Flyway migration.
             - name: POSTGRES_HOST
               value: "marquez-postgresql"
             - name: POSTGRES_PORT
@@ -48,24 +45,12 @@ spec:
             # The first migration of a fresh database otherwise fails.
             - name: FLYWAY_BASELINE_ON_MIGRATE
               value: "true"
-            # The JVM sizes its heap from the container limit, and 512 Mi of
-            # container does not leave room for the default 1/4-of-RAM heap
-            # plus the metaspace: the pod was OOM-killed on boot.
+            # The default 1/4-of-RAM heap does not fit this container's limit.
             - name: JAVA_OPTS
               value: "-Xms128m -Xmx320m -XX:+UseG1GC"
           resources:
             {{- toYaml .Values.marquez.resources | nindent 12 }}
-          # Marquez is a Dropwizard/Jetty JVM and was the only workload in the
-          # repo with no probes at all. Two consequences, both bad:
-          #   * nothing gated the Service endpoints, so a pod stuck in
-          #     CrashLoopBackOff kept receiving traffic and the NodePort
-          #     answered with connection resets instead of a 503;
-          #   * with no startupProbe, a liveness probe would fire during boot
-          #     and SIGTERM the JVM (exit 143) before it ever became healthy -
-          #     the exact loop already documented in
-          #     s4-stream/templates/flink-operator-deployment.yaml.
-          # So: startupProbe buys 5 minutes of boot, then liveness, then
-          # readiness takes the pod out of the endpoints.
+          # Probes gate the Service endpoints and give the JVM 5 minutes to boot.
           startupProbe:
             httpGet:
               path: /api/marquez/version

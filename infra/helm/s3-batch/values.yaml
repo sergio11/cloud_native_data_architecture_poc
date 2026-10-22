@@ -1,7 +1,4 @@
-# ==============================================================================
-# Subsystem S3: Batch Processing Layer - Values Configuration
-# File: infra/helm/s3-batch/values.yaml
-# ==============================================================================
+# Batch layer: Spark Operator and the medallion jobs.
 
 global:
   namespace: platform
@@ -11,7 +8,7 @@ sparkOperator:
   enabled: true
   replicaCount: 1
   image:
-    # v1beta2-1.6.2-3.5.0 = latest v1beta2 CRD API compatible with Spark 3.5.x.
+    # Latest v1beta2 CRD API compatible with Spark 3.5.
     repository: kubeflow/spark-operator
     tag: "v1beta2-1.6.2-3.5.0"
     pullPolicy: IfNotPresent
@@ -24,8 +21,7 @@ sparkOperator:
       cpu: 250m
       memory: 256Mi
 
-  # Empty by default so single-node clusters schedule anywhere (multi-node:
-  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/compute).
   nodeSelector: {}
 
   tolerations: []
@@ -33,27 +29,20 @@ sparkOperator:
 
 sparkDefaults:
   image:
-    # Built from repo root: docker build -f infra/docker/spark.Dockerfile -t poc/spark-medallion:0.1.0 .
+    # Built from the repo root with infra/docker/spark.Dockerfile.
     repository: poc/spark-medallion
     tag: "0.1.0"
     pullPolicy: IfNotPresent
 
-  # What the medallion tiers process. The Spark Operator (v1beta2) cannot
-  # pass arguments to the main file (`args` is not in the CRD schema), so the
-  # entity travels in the environment: the scripts read MEDALLION_ENTITY, and
-  # "all" means every entity of the tier.
+  # The v1beta2 operator cannot pass arguments to the main file, so the entity travels as MEDALLION_ENTITY.
   entity: "all"
 
   driver:
     cores: 1
     coreLimit: "1000m"
     memory: "512m"
-    # Off-heap memory of the driver container: the JVM outside its heap plus
-    # the Python worker that runs next to it. The pod limit is
-    # memory + memoryOverhead, so this is the room the driver actually has
-    # besides the heap. Set it explicitly: Spark's default factor for a
-    # Kubernetes non-JVM (Python) job is 0.40, and with the heap alone
-    # filling the container the first allocation gets the pod OOM-killed.
+    # Room outside the JVM heap for the JVM and Python worker. The pod limit is
+    # memory + memoryOverhead; Spark's Python default (0.40) leaves too little.
     memoryOverhead: "384m"
     labels:
       version: "3.5.1"
@@ -70,39 +59,25 @@ sparkDefaults:
       version: "3.5.1"
       role: executor
 
-  # Empty by default so single-node clusters schedule anywhere (multi-node:
-  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/compute).
   nodeSelector: {}
 
   iceberg:
     catalogName: "polaris"
-    # MUST include the /api/catalog path segment: Polaris serves the Iceberg
-    # REST API at /api/catalog/v1/*, so a bare host made the client request
-    # /v1/config and get a 404. s4-stream and s5-serving already carry it.
+    # Must include /api/catalog: Polaris serves the REST API under it.
     catalogUrl: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
-    # This is the CATALOG NAME, not the S3 location, and that distinction is
-    # the whole bug. An Iceberg REST client identifies its catalog through
-    # GET <uri>/v1/config?warehouse=<this value>, and Polaris resolves it by
-    # name - so "s3a://warehouse/" produced
-    #   RESTException: Unable to find warehouse s3a://warehouse/
-    # even though the catalog existed with exactly that base location.
-    # The S3 base location stays in s2-lakehouse -> polaris.config.warehouseLocation.
+    # Catalog name, not the S3 location: REST clients look it up through
+    # ?warehouse=<this value>; the base location lives in s2-lakehouse.
     warehouse: "polaris"
-    # The scope Polaris demands on the token request. The Iceberg client's own
-    # default is "catalog" and Polaris rejects it with
-    #   invalid_scope: The scope is invalid
+    # Polaris rejects the Iceberg client's default scope.
     oauth2Scope: "PRINCIPAL_ROLE:ALL"
-    # Which implementation of the lakehouse port the medallion persists
-    # through: "iceberg" writes the tier tables to the real lakehouse (Polaris
-    # catalog, MinIO data files), "sqlite" keeps them in a local file.
+    # Lakehouse port implementation: iceberg writes to the real lakehouse, sqlite to a file.
     lakehouseBackend: "iceberg"
     s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
     s3Region: "us-east-1"
     accessKey: "minioadmin"
     secretKey: "minioadmin"
-    # OAuth2 credential for Polaris 1.x. Format "client_id:client_secret";
-    # must match polaris.clientId/clientSecret in s2-lakehouse/values.yaml.
-    # Without it Polaris answers 401 and no Iceberg table is reachable.
+    # client_id:client_secret; must match s2-lakehouse or Polaris answers 401.
     oauth2Credential: "poc-admin:poc-admin-secret"
 
   openLineage:
@@ -110,9 +85,7 @@ sparkDefaults:
     namespace: "poc_data_engineering"
 
   database:
-    # host/port/name are what the code reads (oltp_source.py builds the
-    # connection with psycopg2 from PGHOST/PGPORT/PGDATABASE). jdbcUrl is kept
-    # for the JVM side, which cannot use libpq.
+    # host/port/name feed psycopg2; jdbcUrl is for the JVM side.
     host: "postgres-oltp.platform.svc.cluster.local"
     port: "5432"
     name: "poc_oltp"
@@ -122,12 +95,7 @@ sparkDefaults:
 
 jobs:
   bronzeIngestion:
-    # OFF by default. Bronze is ingested by the s1 CronJob
-    # (medallion-bronze-ingestion-cron, image poc/ingest:0.1.0) and NOT by
-    # Spark: with both enabled the same Iceberg table had two writers, one
-    # every 15 minutes and one at 02:00, which is a commit conflict waiting to
-    # happen. One path per profile. Flip this to true to move bronze back to
-    # Spark (and ingestionRunner.enabled to false in s1).
+    # Off: bronze is ingested by the s1 CronJob; two writers on one Iceberg table conflict.
     enabled: false
     schedule: "0 2 * * *"
   silverTransform:

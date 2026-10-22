@@ -26,12 +26,8 @@ rules:
   - apiGroups: ["sparkoperator.k8s.io"]
     resources: ["sparkapplications", "scheduledsparkapplications"]
     verbs: ["*"]
-  # The STATUS subresource is a different resource as far as RBAC is
-  # concerned. Without this rule the operator could submit the application
-  # but not record what happened to it, and every SparkApplication stayed
-  # with an empty status:
-  #   cannot update resource "sparkapplications/status" in API group
-  #   "sparkoperator.k8s.io" in the namespace "sales"
+  # The STATUS subresource is a different RBAC resource; without it the operator
+  # submits applications but cannot record their status.
   - apiGroups: ["sparkoperator.k8s.io"]
     resources: ["sparkapplications/status", "scheduledsparkapplications/status"]
     verbs: ["get", "update", "patch"]

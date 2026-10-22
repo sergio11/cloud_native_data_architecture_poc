@@ -1,9 +1,6 @@
-"""
-Modern Data Architecture POC - Unit Tests: RF-15 Data Contract Validation.
-Hermetic: every test builds its own domains/ tree under tmp_path and never
-scans the real repository. Covers structure rules, BACKWARD compatibility
-blocking (removed field / new required field / type change), the dual-shape
-field normaliser, and the governance CLI delegator exit codes.
+"""Unit tests: data contract validation.
+
+Hermetic: every test builds its own domains/ tree under tmp_path.
 """
 
 from __future__ import annotations
@@ -411,7 +408,7 @@ def test_cli_legacy_two_file_mode(
 
 
 # ---------------------------------------------------------------------------
-# Governance JSON-schema validation is fail-closed (RF-15)
+# Governance JSON-schema validation is fail-closed
 # ---------------------------------------------------------------------------
 
 
@@ -444,7 +441,7 @@ def _use_case_with_schema(schema: dict[str, Any] | None) -> ValidateContractUseC
 def test_invalid_governance_schema_blocks_instead_of_silently_passing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: a broken governance schema must surface as an error (RF-15),
+    """Regression: a broken governance schema must surface as an error,
     never degrade to 'no errors' with a mere warning."""
 
     def explode(schema: dict[str, Any]):

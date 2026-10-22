@@ -1,32 +1,9 @@
-# ==============================================================================
-# Modern Data Architecture POC - Startup Profile: Demo (RF-24 Full Suite)
-# File: infra/profiles/demo.yaml
-# CONTRACT (K-B): `subsystems.<chart>` is a verbatim Helm values fragment for
-# infra/helm/<chart> (keys verified 1:1 against each chart's values.yaml).
-# scripts/profile-up.sh extracts each section with python3/PyYAML to a temp
-# file and passes it as `helm upgrade --install <chart> <chartdir> -f <tmp>`.
-# Only charts this profile deploys have a section (all 8 here).
-# S8 scope: prometheus+grafana only (dagster/metabase have no templates).
-# S4 note: demo enables ordersStream only; clickstreamStream is explicitly
-# disabled to stay within the RAM ceiling.
-# RAM WARNING (RNF-01 / RC-02): with the Flink job enabled the sum of container
-# LIMITS is ~8000 MB, ABOVE the old 7.5 GB ceiling. Cause is not tuning: the
-# Flink operator rejects a JobManager under 768 MB, so the stream tier alone
-# needs ~1.8 GB. RC-02's own mitigation (ADR-004) applies: run the heavy
-# engines (Spark batch, Flink stream) SEQUENTIALLY. targetRamMb below is the
-# real figure, not an aspirational one.
-#
-# THIS PROFILE IS THE COMPLETE TOPOLOGY, NOT A RUNNABLE ONE. On the 6 GiB
-# development box it does not fit and the kube-scheduler ends up losing its
-# lease. The runnable end-to-end demo is the SEQUENCE of phases
-# (`rake demo:phases`): platform -> batch -> stream -> serving -> fabric ->
-# ops -> governance, each one on its own, which is what RC-02 and AD-4
-# ("Demo por perfiles") ask for. Keep this file as the description of the
-# whole platform.
-# ==============================================================================
+# Full topology: every subsystem. `subsystems.<chart>` is a verbatim Helm values
+# fragment for infra/helm/<chart>. The runnable end-to-end demo is the sequence
+# of phases (`rake demo:phases`), which keeps Spark and Flink from running together.
 profile:
   name: "demo"
-  description: "RF-24 Full Architecture Demo - all subsystems, heavy engines run sequentially"
+  description: "Full architecture demo - all subsystems, heavy engines run sequentially"
   targetRamMb: 8000
   targetCpuCores: 6.0
 
@@ -63,11 +40,7 @@ subsystems:
           memory: "384Mi"
     polaris:
       enabled: true
-      # The 384Mi limit this profile used to set is below the floor the chart
-      # itself documents (s2-lakehouse/values.yaml: Quarkus runs with
-      # -XX:MaxRAMPercentage=80, and at 512Mi the JVM spends its time in GC and
-      # never reaches ready). 384Mi is worse, so the startupProbe failed after
-      # 600s and the catalog went CrashLoopBackOff.
+      # Below ~1Gi the Quarkus JVM spends its time in GC and never becomes ready.
       resources:
         requests:
           cpu: "150m"
@@ -121,12 +94,7 @@ subsystems:
     flinkOperator:
       enabled: true
       replicaCount: 1
-      # Was 300m / 256Mi. The Flink Kubernetes Operator is a Quarkus JVM:
-      # 256Mi cannot hold a heap plus metaspace plus Netty direct buffers, so it
-      # was OOMKilled and the demo reported "jobs never go RUNNING" instead of
-      # an error. The 400m CPU floor is documented in
-      # s4-stream/templates/flink-operator-deployment.yaml: below it the
-      # operator was CPU-throttled into missing its own health endpoint.
+      # Quarkus JVM: needs ~512Mi and CPU headroom for its health endpoint.
       resources:
         requests:
           cpu: "200m"
@@ -151,11 +119,7 @@ subsystems:
   s5-serving:
     trino:
       enabled: true
-      # Heap must leave room for metaspace and direct buffers inside the
-      # container limit. 1024M in 1280Mi is exactly the combination
-      # s5-serving/values.yaml calls out as an OOM risk, and the chart runs with
-      # -XX:+ExitOnOutOfMemoryError, so the first heap excursion kills the pod.
-      # 896M gives ~384MiB of headroom, which is what the chart ships.
+      # Heap must leave room for metaspace and direct buffers inside the limit.
       resources:
         requests:
           cpu: "400m"

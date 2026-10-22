@@ -1,30 +1,6 @@
-# ==============================================================================
-# DataContract CRD (subystem S6: Data Mesh)
-#
-# Lives in crds/, NOT templates/. Helm installs crds/ before anything else and
-# never templates it, which is what CRDs need: from templates/ they were
-# three-way-merged on every upgrade and DELETED by `helm uninstall`, taking
-# every DataContract instance in the cluster with them. s3-batch and s4-stream
-# already use crds/ for the same reason.
-#
-# The schema describes the contract documents this repo actually ships
-# (domains/<domain>/data-products/<product>/contract.yaml). Two things the
-# previous version got wrong and that cost real data:
-#
-#   1. It declared a `metadata` block inside openAPIV3Schema. The API server
-#      rejects that unconditionally:
-#        spec.versions[0].schema.openAPIV3Schema.properties[metadata]: Forbidden:
-#        must not specify anything other than name and generateName, but
-#        metadata is implicitly specified
-#      so `helm install s6-mesh` aborted before any other resource was created.
-#   2. Sub-schemas declared as a bare `type: object` (quality, sla,
-#      schema.fields items) are structural and carry NO properties, so the
-#      API server PRUNES every child field. A DataContract applied against
-#      them kept its name and lost its thresholds, assertions and fields,
-#      with no error anywhere. Every object below is now enumerated, or
-#      carries x-kubernetes-preserve-unknown-fields where the shape is
-#      genuinely open.
-# ==============================================================================
+# DataContract CRD. Lives in crds/, not templates/: Helm installs crds/ first and
+# never templates it, so upgrades do not merge it and `helm uninstall` keeps instances.
+# Sub-schemas are enumerated because a bare `type: object` prunes its children.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -131,7 +107,7 @@ spec:
                         type: string
                       purpose:
                         type: string
-      # Optional: the CRs are also written straight from the domain manifests.
+      # The CRs are also written straight from the domain manifests.
       additionalPrinterColumns:
         - name: Version
           type: string

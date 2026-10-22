@@ -1,9 +1,8 @@
 """
-silver_transform.py - Silver layer transformation, conformance, and quality gate pipeline.
-Driving Adapter invoking CleanseSilverUseCase via Hexagonal Architecture container.
-Applies deduplication, type casting, schema validation, and Great Expectations quality gates.
-A breached quality gate raises QualityGateBreachError and blocks promotion (RF-06);
-a missing expectation suite propagates SuiteNotFoundError and also aborts the run.
+silver_transform.py - Silver layer transformation, conformance and quality gate.
+
+Applies deduplication, type casting and schema validation; a breached quality
+gate raises QualityGateBreachError and blocks promotion. A missing suite aborts.
 """
 
 from __future__ import annotations
@@ -31,11 +30,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Silver Layer Cleaning & Quality Gate Pipeline (Hexagonal)")
     parser.add_argument(
         "--entity",
-        # The Spark Operator (v1beta2) cannot pass arguments to the main
-        # file, so the entity travels in the environment (the chart sets
-        # MEDALLION_ENTITY). The default is "all" because a tier that only
-        # cleanses "orders" leaves the Gold tier without customers to
-        # publish, and the Gold quality gate then blocks the whole run.
+        # The Spark Operator cannot pass arguments to the main file, so the
+        # entity travels in MEDALLION_ENTITY. Default "all": Gold needs
+        # customers as well.
         default=os.environ.get("MEDALLION_ENTITY", "all"),
         choices=["orders", "customers", "all"],
         help="Entity to cleanse and promote to Silver tier",

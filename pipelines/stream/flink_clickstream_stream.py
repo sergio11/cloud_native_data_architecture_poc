@@ -1,20 +1,9 @@
 """
 flink_clickstream_stream.py - Apache Flink 1.18 speed-layer job for clickstream.
 
-Submitted by the Flink Kubernetes Operator with the PyFlink ``PythonDriver``.
-No CLI fallback: if PyFlink, the cluster or the configuration is missing the job
-fails rather than running something else.
-
-    Kafka (marketing.clickstream.raw) -> dead-letter -> event-time watermarks
-      -> 4 s tumbling windows keyed by funnel stage
-      -> event_count and COUNT(DISTINCT session_id) per (window, event_type)
-      -> upsert into Iceberg stream.marketing.clickstream_windowed
-
-Sessions are counted incrementally (the accumulator keeps the set of sessions
-seen in keyed state), so memory is bounded by window width, not event count.
-
-Same "Mixing DataStream and Table" approach as flink_orders_stream.py, because
-PyFlink ships no DataStream binding for the Iceberg connector.
+Kafka (marketing.clickstream.raw) -> event-time watermarks -> 4 s tumbling
+windows keyed by event_type -> event_count and distinct sessions per window ->
+upsert into Iceberg stream.marketing.clickstream_windowed.
 """
 
 from __future__ import annotations
@@ -97,17 +86,16 @@ class JobConfig:
     s3_endpoint: str
     s3_access_key: str
     s3_secret_key: str
-    # OAuth2 credential for Polaris 1.x REST catalog.
-    # Format: "client_id:client_secret". Injected via POLARIS_OAUTH2_CREDENTIAL
-    # env var in the FlinkDeployment (s4-stream/templates/flink-deployments.yaml).
+    # OAuth2 credential for the Polaris 1.x REST catalog, "client_id:client_secret",
+    # injected via POLARIS_OAUTH2_CREDENTIAL in the FlinkDeployment.
     oauth2_credential: str
 
     @property
     def oauth2_server_uri(self) -> str:
         """Polaris token endpoint, derived from the catalog URI.
 
-        See the orders job: without it Iceberg calls GET /v1/config
-        unauthenticated and Polaris answers 404 "Unable to find warehouse".
+        Without it Iceberg calls GET /v1/config unauthenticated and Polaris
+        answers 404 "Unable to find warehouse".
         """
         return f"{self.catalog_uri.rstrip('/')}/v1/oauth/tokens"
 
@@ -210,10 +198,8 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
         .set_topics(config.topic)
         .set_group_id(config.group_id)
         .set_starting_offsets(offsets)
-        # Mandatory: without a deserialization schema KafkaSourceBuilder.build()
-        # fails job submission with "Deserialization schema is required but not
-        # provided". The value is the JSON payload decoded to str, which is
-        # exactly what window_logic.decode_payload expects.
+        # Mandatory: KafkaSourceBuilder.build() fails without a deserialization
+        # schema. SimpleStringSchema decodes the JSON payload to str.
         .set_value_only_deserializer(SimpleStringSchema())
         .build()
     )
@@ -301,10 +287,8 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
     Both statements are idempotent, so the job owns its own table definition and
     a restart never depends on out-of-band provisioning.
     """
-    # Flink 1.18's parser rejects "CREATE CATALOG IF NOT EXISTS" with
-    # ParseException: Encountered "NOT". The idempotency is therefore explicit:
-    # ask for the registered catalogs and only issue the statement when ours is
-    # missing. (CREATE TABLE IF NOT EXISTS below IS supported and stays.)
+    # Flink 1.18 rejects "CREATE CATALOG IF NOT EXISTS", so check the registered
+    # catalogs and only create ours when missing. (CREATE TABLE IF NOT EXISTS works.)
     if config.catalog_name not in table_env.list_catalogs():
         table_env.execute_sql(
             f"""
@@ -370,9 +354,8 @@ def main() -> None:
     table_env = StreamTableEnvironment.create(env)
     table_env.get_config().set("table.exec.timezone", "UTC")
     register_iceberg_catalog(table_env, config)
-    # from_data_stream WITHOUT a schema, Schema handed to create_temporary_view:
-    # PyFlink 1.18 derives positional fields (f0..f7), so named columns passed to
-    # from_data_stream are rejected ("Unable to find a field named ...").
+    # from_data_stream without a schema; the Schema goes to create_temporary_view
+    # because PyFlink 1.18 derives positional fields (f0..f7).
     table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed), window_schema())
 
     result = table_env.execute_sql(

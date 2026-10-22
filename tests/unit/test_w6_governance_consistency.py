@@ -1,14 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: W6 governance/domain/infra consistency.
+"""W6 governance/domain/infra consistency tests.
 
-Covers the cross-check added to the governance CLI (product.yaml ``spec.quality``
-vs the authoritative contract thresholds), the repo-wide URI-scheme
-standardisation of the data product manifests, and the internal consistency of
-the classification enum / naming rule across the JSON schema, the Kyverno
-policies, the DataProduct CRD and the federation standards.
-
-The Kyverno policies are declarative assets only (Kyverno is not installed in
-this environment), so they are asserted textually/structurally.
+Covers the quality-threshold cross-check, manifest URI schemes and the
+classification/naming consistency across schema, policies and CRD.
 """
 
 from __future__ import annotations

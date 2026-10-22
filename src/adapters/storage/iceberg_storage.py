@@ -1,43 +1,7 @@
-"""
-Iceberg-backed lakehouse storage.
+"""Iceberg-backed lakehouse storage.
 
-This is the second implementation of :class:`~src.ports.outbound.LakehouseStoragePort`.
-The first one, :class:`~src.adapters.storage.lakehouse_storage.LakehouseStorageAdapter`,
-is SQLite and is what the local profile and the 301 unit tests run against. This
-one is the cluster's real lakehouse: Iceberg tables in a Polaris REST catalog,
-with the data files in MinIO.
-
-Why the port has two implementations at all
---------------------------------------------
-
-The port is the seam the hexagonal architecture exists for. ``container.storage``
-picks one of them, and the application core never learns which. The medallion
-drivers compute with the core and persist through the port, so the same
-business logic that the unit tests exercise also runs against Iceberg.
-
-What Iceberg gives for free
-----------------------------
-
-* **ACID and snapshots.** Every write is a new snapshot; the previous one stays
-  readable. That is exactly the port's "overwrite marks prior rows superseded
-  rather than physically deleting them, so the prior snapshot stays readable
-  via time travel" (RF-07), and it is why this adapter needs no
-  ``_row_superseded`` bookkeeping column.
-* **Schema evolution.** A column added later is a metadata change, not a
-  rewrite (RF-07).
-* **The catalog.** Polaris holds the table entries; the MinIO bucket holds the
-  files. The catalog is what makes a table visible to every engine, which is
-  why the registration Job exists.
-
-What this adapter has to add
------------------------------
-
-* **Content-hash idempotency (RF-01).** Iceberg appends; it does not
-  deduplicate. Re-running the same batch must not duplicate rows, so the
-  adapter hashes each record and skips the ones already present.
-* **Insertion order.** The port promises rows come back oldest-write-first
-  and that ``limit`` is applied after that ordering. Iceberg does not promise
-  an order, so the adapter carries a monotonic sequence column and sorts on it.
+Second implementation of LakehouseStoragePort: Iceberg tables in a Polaris
+REST catalog with data files in MinIO.
 """
 
 from __future__ import annotations
@@ -62,49 +26,24 @@ INTERNAL_COLUMNS: tuple[str, ...] = ("_content_hash", "_row_seq")
 class IcebergLakehouseStorageAdapter:
     """Lakehouse storage backed by Iceberg tables in a Polaris REST catalog.
 
-    The catalog is injected rather than built here, so the adapter can be
-    unit-tested against a double and so the connection details (URI, OAuth2
-    credentials, S3 endpoint) stay in the composition root.
-
-    Args:
-        catalog: A PyIceberg ``RestCatalog`` (or a double with the same shape).
-        namespace_resolver: Maps a logical table name to its
-            ``(namespace, table)`` identifier. Defaults to
-            :func:`src.domain.naming.iceberg_identifier`.
+    The catalog is injected so connection details stay in the composition root.
     """
 
     def __init__(self, catalog: Any, namespace_resolver: Any = None) -> None:
         self._catalog = catalog
         self._resolve = namespace_resolver or iceberg_identifier
 
-    # ------------------------------------------------------------------
     # Writing
-    # ------------------------------------------------------------------
     def write_table(
         self,
         table_name: str,
         records: list[dict[str, Any]],
         mode: str = "append",
     ) -> int:
-        """Writes records with RF-01 content-hash idempotency and RF-07 versioning.
+        """Writes records with content-hash idempotency and versioning.
 
-        ``mode="append"`` inserts only the rows whose content hash is not
-        already in the table, so re-running an identical batch returns 0 and
-        creates no snapshot. ``mode="overwrite"`` replaces the live content:
-        the new snapshot does not contain the previous rows, and the previous
-        snapshot still does, which is the port's "marks prior rows superseded
-        rather than physically deleting them".
-
-        Args:
-            table_name: Logical table name (``bronze.sales.orders``).
-            records: Rows to write.
-            mode: ``"append"`` or ``"overwrite"``.
-
-        Returns:
-            The number of rows written.
-
-        Raises:
-            ValueError: If ``mode`` is not supported.
+        Append inserts only rows whose hash is new; overwrite replaces live
+        content while keeping the previous snapshot readable.
         """
         if mode not in ("append", "overwrite"):
             raise ValueError(f"Unsupported write mode '{mode}'. Expected 'append' or 'overwrite'.")
@@ -115,9 +54,8 @@ class IcebergLakehouseStorageAdapter:
         self._ensure_namespace(namespace)
 
         if not records:
-            # Overwrite with an empty set reconciles the table to empty
-            # (RF-10: a replayed empty log must clear the speed table instead
-            # of leaving stale rows). A missing table stays missing.
+            # Overwrite with an empty set reconciles the table to empty;
+            # a missing table stays missing.
             if not self.table_exists(table_name):
                 return 0
             table = self._load(namespace, table_id)
@@ -164,20 +102,16 @@ class IcebergLakehouseStorageAdapter:
         )
         return len(rows)
 
-    # ------------------------------------------------------------------
     # Reading
-    # ------------------------------------------------------------------
     def read_table(
         self,
         table_name: str,
         limit: int | None = None,
         version: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Reads live rows (``version=None``) or the state at ``version`` (RF-07).
+        """Reads live rows (``version=None``) or the state at ``version``.
 
-        Rows are ordered by the adapter's sequence column, so the output is
-        deterministic and ``limit`` is applied after the ordering. The internal
-        columns are stripped; the business audit columns are kept.
+        Rows are ordered by the sequence column; internal columns are stripped.
         """
         namespace, table_id = self._resolve(table_name)
         if not self._table_exists(namespace, table_id):
@@ -207,9 +141,7 @@ class IcebergLakehouseStorageAdapter:
         _ = columns  # the column order is carried by the arrow table itself
         return results
 
-    # ------------------------------------------------------------------
     # Metadata
-    # ------------------------------------------------------------------
     def table_exists(self, table_name: str) -> bool:
         """Checks whether the table exists in the catalog."""
         namespace, table_id = self._resolve(table_name)
@@ -224,11 +156,7 @@ class IcebergLakehouseStorageAdapter:
         return [field.name for field in table.schema().fields if field.name not in INTERNAL_COLUMNS]
 
     def list_versions(self, table_name: str) -> list[dict[str, Any]]:
-        """Lists every snapshot available for time travel (RF-07).
-
-        Returns one dict per snapshot with ``snapshot_version`` (the Iceberg
-        snapshot id, an int), ``row_count`` and ``created_at``, oldest first.
-        """
+        """Lists every snapshot available for time travel, oldest first."""
         namespace, table_id = self._resolve(table_name)
         if not self._table_exists(namespace, table_id):
             return []
@@ -246,17 +174,10 @@ class IcebergLakehouseStorageAdapter:
         versions.sort(key=lambda item: item["snapshot_version"])
         return versions
 
-    # ------------------------------------------------------------------
     # Internals
-    # ------------------------------------------------------------------
     @staticmethod
     def _content_hash(record: dict[str, Any]) -> str:
-        """Hashes a record's business content, ignoring the adapter's columns.
-
-        The payload is canonicalised the same way the SQLite adapter does it, so
-        the same record hashes the same value in both implementations and a
-        table can be moved between them without losing its idempotency.
-        """
+        """Hashes a record's business content, ignoring adapter columns."""
         payload = {key: value for key, value in record.items() if not key.startswith("_")}
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -318,15 +239,9 @@ class IcebergLakehouseStorageAdapter:
 
     @staticmethod
     def _ensure_columns(table: Any, rows: list[dict[str, Any]]) -> None:
-        """Adds the business columns a new batch introduced (RF-07 evolution).
+        """Adds the business and internal columns a new batch introduced.
 
-        The INTERNAL columns are added too when the table does not have them.
-        A table created outside this adapter - the catalog registration job
-        creates the published tables in Polaris so the catalogue lists them -
-        carries the business schema only, and the payload ALWAYS has the two
-        internal columns, so the write died with
-        `ValueError: PyArrow table contains more columns: _content_hash,
-        _row_seq` instead of evolving the table.
+        Tables created outside this adapter carry the business schema only.
         """
         import pyarrow as pa
 
@@ -360,17 +275,9 @@ class IcebergLakehouseStorageAdapter:
 
     @staticmethod
     def _to_arrow(table: Any, rows: list[dict[str, Any]], hashes: list[str], sequence: int) -> Any:
-        """Builds the arrow table to write, with the internal columns filled.
+        """Builds the arrow table to write, with internal columns filled.
 
-        The SCHEMA OF THE TABLE wins, not the types inferred from the rows:
-        a table that the catalog registration created carries the declared
-        types of the product (a `date` for `order_date`, a `long` for the
-        counters), and Iceberg refuses a write whose types differ
-        ("cannot change column type: date to string"). So the arrow schema is
-        the table's schema and the values are cast to it.
-
-        When the table does not exist yet it was just created by this
-        adapter, and its schema IS the inferred one.
+        The table's declared schema wins; values are cast to it.
         """
         import pyarrow as pa
 
@@ -407,9 +314,7 @@ class IcebergLakehouseStorageAdapter:
                         arrow_type = _arrow_type(rows, field.name)
                     else:
                         arrow_type = _iceberg_to_arrow_type(iceberg_type)
-                # A required Iceberg column needs a required arrow field: the
-                # two have to agree, or the write is refused ("required date"
-                # vs "optional date").
+                # A required Iceberg column needs a required arrow field.
                 required = bool(getattr(field, "required", False))
                 fields.append(pa.field(field.name, arrow_type, nullable=not required))
             return fields
@@ -439,13 +344,7 @@ class IcebergLakehouseStorageAdapter:
 
 
 def _arrow_type(rows: list[dict[str, Any]], name: str) -> Any:
-    """Infers the arrow type of a column from the Python types it holds.
-
-    A column holding any string or complex value is a string; else any float
-    makes it a double; else any int or bool makes it an int64; a column that is
-    null everywhere is a string. It mirrors the SQLite adapter's affinity
-    inference, so the same batch lands with the same types in both.
-    """
+    """Infers the arrow type of a column from the Python types it holds."""
     import pyarrow as pa
 
     has_text = False
@@ -483,11 +382,7 @@ _ICEBERG_TYPE_CLASSES = {
 
 
 def _schema_fields(schema: Any) -> list[Any]:
-    """The fields of a schema, as a list.
-
-    In pyarrow `Schema.fields` is a property; the double used by the unit
-    tests exposes it as a method, so both are accepted.
-    """
+    """Returns the fields of a schema as a list."""
     fields = getattr(schema, "fields", [])
     return list(fields() if callable(fields) else fields)
 
@@ -502,14 +397,7 @@ def _iceberg_type_name_to_type(name: str) -> Any:
 
 
 def _iceberg_type(arrow_type: Any) -> Any:
-    """The Iceberg type of an arrow type.
-
-    PyIceberg's UpdateSchema.add_column takes an IcebergType, not the NAME
-    of one: a plain "string" fails with "Cannot visit non-type: string".
-    The import is lazy because the development environment does not have
-    PyIceberg installed (the unit tests exercise the adapter with a double
-    of the catalogue), and there the name is enough.
-    """
+    """Returns the Iceberg type of an arrow type."""
     import pyarrow as pa
 
     name = "string"

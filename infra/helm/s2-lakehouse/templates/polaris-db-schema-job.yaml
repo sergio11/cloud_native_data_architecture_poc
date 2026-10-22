@@ -1,12 +1,6 @@
 {{- if and .Values.polaris.enabled (ne .Values.polaris.persistence.type "in-memory") }}
-# ---------------------------------------------------------------------------
-# Applies the relational schema before Polaris (and the catalog bootstrap) come
-# up. Hook weight 5 puts it ahead of polaris-catalog-bootstrap (weight 10).
-#
-# Runs on the same image the cluster already has for PostgreSQL so it needs
-# psql and nothing else; it talks to the database over the Service, never to a
-# PVC, so it cannot corrupt the data directory.
-# ---------------------------------------------------------------------------
+# Applies the relational schema before Polaris comes up (weight 5, before the
+# catalog bootstrap at weight 10), over the Service rather than the PVC.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -16,12 +10,7 @@ metadata:
     app: polaris-db-schema
     {{- include "s2-lakehouse.labels" . | nindent 4 }}
   annotations:
-    # post-install for the same reason as polaris-bootstrap-job.yaml: this Job
-    # waits for PostgreSQL, which is an ordinary resource of ANOTHER release
-    # (s1-ingestion -> postgres-oltp). A pre-install hook runs before Helm has
-    # created anything, so it waited out its 60 attempts and failed the whole
-    # s2 upgrade. The loop exits 1 rather than hanging, so installing s2 without
-    # s1 now fails loudly instead of stalling.
+    # post-install: PostgreSQL belongs to another release, so it would not exist yet.
     helm.sh/hook: post-install,pre-upgrade
     helm.sh/hook-weight: "5"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
@@ -74,8 +63,7 @@ spec:
             - |
               set -e
               echo "Applying the Polaris relational schema (idempotent)..."
-              # ON_ERROR_STOP so a real failure fails the hook instead of
-              # scrolling past and leaving a half-created schema behind.
+              # ON_ERROR_STOP so a real failure fails the hook.
               psql -v ON_ERROR_STOP=1 -f /schema/postgres-schema.sql
               echo "Verifying the tables Polaris needs exist..."
               for T in version entities grant_records principal_authentication_data; do

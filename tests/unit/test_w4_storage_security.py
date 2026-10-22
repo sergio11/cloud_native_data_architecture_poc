@@ -1,6 +1,6 @@
 """W4 storage/security hardening: lazy DB init, atomic dedup, anchored SQL, CORS.
 
-Also guards the pruned lineage requirements pins (confirmed-unused deps).
+    Also guards the lineage requirements pins (confirmed-unused deps).
 """
 
 from __future__ import annotations

@@ -1,13 +1,7 @@
-# ==============================================================================
-# Kyverno ClusterPolicies for the Data Mesh (Subsystem S6).
-# Gate: .Values.kyverno.policiesEnabled (default true). Kyverno itself is a
-# PREREQUISITE installed out-of-band (see values.yaml/Chart.yaml comments);
-# this file only APPLIES policies translated faithfully from
-# governance/policies/*.yaml. Existing templates (domain-quotas,
-# domain-network-policies, CRDs) are untouched.
-# ==============================================================================
+# Kyverno ClusterPolicies for the Data Mesh. Kyverno itself is installed
+# out-of-band (see values.yaml); gate: .Values.kyverno.policiesEnabled.
 {{- if .Values.kyverno.policiesEnabled }}
-# --- Source: governance/policies/require-owner.yaml (validate; verbatim) ---
+# Source: governance/policies/require-owner.yaml
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -38,14 +32,8 @@ spec:
               annotations:
                 =(dataplatform.io/owner): "?*@?*.?*"
 ---
-# --- Source: governance/policies/require-pii-classification.yaml (validate; verbatim) ---
-# NOTE (K-B, not invented): the source description also says "mandate masking
-# policies when classified as PII or confidential", but the source file contains
-# NO rule implementing it and the DataProduct CRD
-# (crds/dataproduct-crd.yaml) has NO masking field to key such a rule
-# on. Only the classification-enum rule below is expressible from the source, so
-# only it is rendered; the masking mandate stays unimplemented until the CRD and
-# governance agree on a field (e.g. spec.maskingPolicy).
+# Source: governance/policies/require-pii-classification.yaml
+# The source also mandates PII masking, but there is no rule or CRD field for it.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -73,12 +61,8 @@ spec:
           spec:
             classification: "public | internal | confidential | restricted | pii"
 ---
-# --- Source: governance/policies/naming-convention.yaml (validate; verbatim
-# except Helm escaping) ---
-# NOTE (K-B): Kyverno's regex_match expression uses Go-template delimiters,
-# which collide with Helm's. It is emitted via quoted brace actions on the
-# key line below, so Helm renders the literal Kyverno expression instead
-# of evaluating it.
+# Source: governance/policies/naming-convention.yaml
+# Brace actions keep Helm from evaluating the Kyverno expression.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:

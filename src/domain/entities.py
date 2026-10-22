@@ -1,7 +1,6 @@
-"""
-Modern Data Architecture POC - Domain Entities & Value Objects.
-Pure Python implementations with no external infrastructure dependencies.
-Follows GRASP Information Expert and SOLID principles.
+"""Modern Data Architecture POC - Domain entities and value objects.
+
+Pure Python, with no external infrastructure dependencies.
 """
 
 from __future__ import annotations
@@ -12,14 +11,10 @@ from typing import Any, Literal
 
 @dataclass(frozen=True)
 class ExtractionResult:
-    """Records extracted from an operational source plus their honest origin.
+    """Records extracted from a source plus their honest origin.
 
-    ``origin`` is the provenance of ``records`` as observed during extraction:
-    ``"postgresql"`` means the rows came from a real query (an empty real table
-    still yields ``records=[]`` with this origin), while ``"synthetic"`` means
-    the source was unavailable and the rows were fabricated by the embedded
-    demo generator. Downstream audit columns and lineage events must report the
-    origin verbatim instead of assuming a live database.
+    ``origin`` is ``"postgresql"`` for real queries or ``"synthetic"`` for
+    generated fallback rows.
     """
 
     records: list[dict[str, Any]]
@@ -70,9 +65,7 @@ class QualityGateEvaluation:
     threshold: float
     passed: bool
     failures: list[QualityAssertionResult] = field(default_factory=list)
-    # Pass ratio per quality dimension present in the suite (e.g. completeness).
+    # Pass ratio per quality dimension present in the suite.
     dimension_rates: dict[str, float] = field(default_factory=dict)
-    # Engine fail-closed veto: True when the suite contained expectation types
-    # the engine cannot verify. A vetoed evaluation must block promotion even
-    # when the pass-rate arithmetic would otherwise approve (RF-06).
+    # Engine veto: unsupported expectation types block promotion.
     unsupported: bool = False

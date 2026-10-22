@@ -1,8 +1,6 @@
-"""Hermetic tests proving alert-rules.yaml drives RuleEngine decisions (RF-20).
+"""Hermetic tests proving alert-rules.yaml drives RuleEngine decisions.
 
 No network, no repo data: YAML rules and SQLite DBs live in tmp_path.
-Module import is deferred until after chdir to tmp_path so the service's
-module-level StorageManager() side effect never touches the repo.
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ def _make_event(svc, **kwargs):
 
 
 def test_yaml_min_pass_rate_drives_quality_alert(monkeypatch, tmp_path):
-    """A passRate BELOW the YAML threshold but ABOVE the old hardcoded 0.95 alerts."""
+    """A passRate below the YAML threshold still alerts."""
     svc = _load_service(monkeypatch, tmp_path)
     rules_path = _write_rules(
         tmp_path,
@@ -92,7 +90,7 @@ def test_yaml_min_pass_rate_drives_quality_alert(monkeypatch, tmp_path):
 
 
 def test_disabled_rule_does_not_alert(monkeypatch, tmp_path):
-    """A FAIL event produces no alert when RF20-RULE-003 is disabled in YAML."""
+    """A FAIL event produces no alert when the pipeline-failure rule is disabled in YAML."""
     svc = _load_service(monkeypatch, tmp_path)
     rules_path = _write_rules(
         tmp_path,

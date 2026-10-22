@@ -1,20 +1,6 @@
 {{- if and .Values.polaris.enabled (ne .Values.polaris.persistence.type "in-memory") }}
-# ---------------------------------------------------------------------------
-# Relational schema for the Polaris metastore.
-#
-# apache/polaris:1.8.0 CANNOT create this schema by itself. Its installed
-# Quarkus features are [agroal, cdi, jdbc-postgresql, ...] - there is no
-# hibernate-orm and no flyway - and no .sql ships in the image. With the
-# metastore set to relational-jdbc and no schema present, Polaris boots,
-# connects to PostgreSQL and then fails every single query with
-#   ERROR: relation "entities" does not exist
-#
-# So the DDL has to be applied. It is the official schema of the matching
-# version, extracted verbatim from polaris-relational-jdbc-1.8.0.jar
-# (postgres/schema-v6.sql), and it is idempotent (CREATE TABLE IF NOT EXISTS),
-# so re-applying it on every deploy is safe. When Polaris is upgraded, replace
-# this file with the schema of the new version from its own jar.
-# ---------------------------------------------------------------------------
+# Relational schema for the Polaris metastore (the image cannot create it). It is
+# the official idempotent schema; on a Polaris upgrade replace it with the new one.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -24,11 +10,7 @@ metadata:
     app: polaris-db-schema
     {{- include "s2-lakehouse.labels" . | nindent 4 }}
   annotations:
-    # A hook, not a plain resource. polaris-db-schema-job.yaml is a
-    # pre-install/pre-upgrade hook, and hooks run BEFORE ordinary resources are
-    # created - so a plain ConfigMap did not exist yet and the Job failed with
-    # MountVolume.SetUp failed: configmap "polaris-db-schema" not found.
-    # Weight 4 puts it ahead of the Job (weight 5).
+    # A hook: the Job that mounts it runs as a pre-install hook; weight 4 is ahead of it.
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "4"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded

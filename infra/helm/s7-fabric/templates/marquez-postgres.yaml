@@ -1,16 +1,5 @@
 {{- if .Values.marquezPostgres.enabled }}
-# ==============================================================================
-# The database Marquez needs.
-#
-# Marquez 0.45 is a Dropwizard/Jetty server whose catalogue lives in
-# PostgreSQL: without a reachable database it dies in the Flyway migration
-# with
-#   java.net.UnknownHostException: postgres
-# because the image's default configuration points at a host called
-# "postgres" (the name the upstream chart's subchart gives it). The upstream
-# chart ships that subchart; this one does not, so the database is here:
-# one pod, one PVC, and the same POSTGRES_* variables the image reads.
-# ==============================================================================
+# The PostgreSQL database Marquez keeps its catalogue in (the upstream subchart stand-in).
 apiVersion: v1
 kind: Service
 metadata:
@@ -27,14 +16,7 @@ spec:
   selector:
     app: marquez-postgresql
 ---
-# The alias the IMAGE looks for.
-#
-# The Marquez image does not read POSTGRES_HOST: its configuration names
-# the host "postgres" literally, and the server dies in the Flyway migration
-# with "UnknownHostException: postgres" when that name does not resolve. The
-# upstream chart works around it by mounting a whole marquez.yml ConfigMap;
-# here the same name is simply given to the Service, which is one object
-# instead of a configuration file that has to be kept in sync with the image.
+# The Marquez image names the database host "postgres" literally, so this Service aliases it.
 apiVersion: v1
 kind: Service
 metadata:
@@ -62,8 +44,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # Recreate, not RollingUpdate: two pods would fight over the same
-    # volume, and the second one would fail to initialise the cluster.
+    # Recreate: two pods would fight over the same volume.
     type: Recreate
   selector:
     matchLabels:

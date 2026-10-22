@@ -13,20 +13,9 @@ S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://minio.platform.svc.cluster.l
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 NAMESPACES = [n for n in os.environ.get("NAMESPACES", "sales,marketing,finance").split(",") if n]
 
-# The tables to re-register, as "namespace.table=metadata-location" entries
-# separated by commas.
-#
-# The metadata location is the Iceberg metadata JSON that is ALREADY in
-# MinIO. Polaris keeps the catalogue in memory, so a restart leaves the
-# catalogue empty even though the tables and their data are still in the
-# bucket; re-registering against the metadata they were written with brings
-# them back without touching a single row.
-#
-# The location has to be the CURRENT one: a table that was written twice
-# keeps two histories under its metadata/ directory, and the right file is
-# the one with the highest "last-updated-ms". The medallion writes one
-# version per commit, so the highest number is the latest commit of the
-# latest incarnation.
+# Tables to re-register, as "namespace.table=metadata-location" entries. Each
+# location is the current Iceberg metadata JSON in MinIO (highest
+# "last-updated-ms"); re-registering restores tables without touching data.
 TABLE_SPECS = os.environ.get("TABLES", "")
 TABLES = []
 for _spec in TABLE_SPECS.split(","):
@@ -94,9 +83,7 @@ def list_tables(namespace):
         timeout=30,
     )
     if response.status_code == 200:
-        # Polaris answers {"identifiers": [{"namespace": ["sales"], "name":
-        # "daily_metrics"}]}, so the name is a field of the entry and not an
-        # "identifier" string.
+        # Polaris returns {"identifiers": [{"namespace": ["sales"], "name": ...}]}.
         return [entry.get("name") for entry in response.json().get("identifiers", [])]
     if response.status_code == 404:
         return []
@@ -260,15 +247,12 @@ def main():
         tables = list_tables("sales")
         print(f"Existing catalog '{CATALOG}' base location: {base_location}")
         if not tables and base_location != WAREHOUSE:
-            # An EMPTY catalogue whose base location differs would refuse
-            # every table, because the tables live under WAREHOUSE.
+            # An empty catalog with a different base location would refuse every table.
             print("Existing catalog is empty but its base location differs; recreating it.")
             drop_catalog()
             create_catalog()
         elif tables:
-            # A catalogue that already holds tables is NEVER dropped: the
-            # restore re-registers the tables it was given and leaves the
-            # others alone.
+            # A catalog that already holds tables is never dropped.
             print(f"Catalog already holds tables {tables}; they are re-registered below.")
         else:
             print(f"Catalog '{CATALOG}' exists, is empty and matches the expected base location.")

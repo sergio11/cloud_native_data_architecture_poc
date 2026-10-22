@@ -27,8 +27,7 @@ spec:
         - name: flink-operator
           image: "{{ .Values.flinkOperator.image.repository }}:{{ .Values.flinkOperator.image.tag }}"
           imagePullPolicy: {{ .Values.flinkOperator.image.pullPolicy }}
-          # The upstream image entrypoint requires the role as first argument
-          # (operator|webhook); without it the container exits immediately.
+          # The upstream entrypoint requires the role as first argument (operator|webhook).
           args:
             - operator
           env:
@@ -42,18 +41,13 @@ spec:
               value: "true"
           resources:
             {{- toYaml .Values.flinkOperator.resources | nindent 12 }}
-          # The operator is a JVM that needs well over a minute to bind 8085 on
-          # a 4-CPU node. Without a startupProbe the livenessProbe fires while it
-          # is still booting and kubelet SIGTERMs it (exit 143) before it ever
-          # becomes healthy, so it restarts forever. The startupProbe suspends
-          # both probes until the JVM answers, which is the only place a Java
-          # cold start can be given real time.
+          # The operator is a JVM that takes over a minute to bind 8085; a startupProbe
+          # suspends liveness and readiness until it answers.
           startupProbe:
             httpGet:
               path: /healthz
               port: 8085
-            # Explicit: the Kubernetes default of 1s is shorter than a GC pause
-            # on a loaded JVM (see polaris-deployment.yaml for the full note).
+            # The default 1s is shorter than a GC pause on a loaded JVM.
             timeoutSeconds: 10
             periodSeconds: 5
             failureThreshold: 60

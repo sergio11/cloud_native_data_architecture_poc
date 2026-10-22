@@ -24,8 +24,7 @@ spec:
             - name: ingestion-runner
               image: "{{ .Values.ingestionRunner.image.repository }}:{{ .Values.ingestionRunner.image.tag }}"
               imagePullPolicy: {{ .Values.ingestionRunner.image.pullPolicy }}
-              # Real pipeline: image poc/ingest bakes the repo at /app (see
-              # infra/docker/ingest.Dockerfile), so the repo-relative entrypoint resolves.
+              # Real pipeline: the poc/ingest image bakes the repo at /app (see infra/docker/ingest.Dockerfile).
               command:
                 - python
                 - pipelines/medallion/bronze_ingestion.py

@@ -1,17 +1,7 @@
-"""
-Modern Data Architecture POC - Data Contracts & Data Products Domain Logic.
-Implements Bitol Open Data Contract Standard (ODCS) verification and
-strict BACKWARD compatibility rules.
+"""Modern Data Architecture POC - Data contracts and data products.
 
-Pure domain: no I/O, no filesystem knowledge. Field dictionaries are accepted
-in either real repository shape and normalised transparently:
-
-  * contract.yaml entries (``spec.schema.fields``): ``{name, type, required}``
-    with warehouse types such as ``integer``, ``decimal(18,2)``, ``long``,
-    ``date``, ``timestamp``.
-  * JSON-Schema entries (``schema.json``): ``properties``/``required`` at the
-    document root, where ``type`` may be a JSON-Schema type or a list such as
-    ``["integer", "null"]`` and ``format`` carries ``date``/``date-time``.
+Implements ODCS verification and strict BACKWARD compatibility rules.
+Pure domain: no I/O.
 """
 
 from __future__ import annotations
@@ -29,8 +19,7 @@ class CompatibilityMode(StrEnum):
 
 SUPPORTED_COMPATIBILITY_MODES: list[str] = [mode.value for mode in CompatibilityMode]
 
-# Maps raw type spellings (lower-cased, precision suffix stripped) to a
-# canonical family so warehouse and JSON-Schema vocabularies compare equal.
+# Maps raw type spellings to canonical families for cross-vocabulary comparison.
 _TYPE_ALIASES: dict[str, str] = {
     "int": "integer",
     "integer": "integer",
@@ -82,9 +71,7 @@ _TYPE_ALIASES: dict[str, str] = {
     "blob": "bytes",
 }
 
-# Sub-type qualifier appended to the family (canonical form ``family:subtype``)
-# for temporal types, letting ``date`` differ from ``timestamp`` while both
-# still live in the ``string`` family used by JSON-Schema documents.
+# Sub-type qualifier for temporal types (canonical form ``family:subtype``).
 _TYPE_SUBTYPES: dict[str, str] = {
     "date": "date",
     "datetime": "datetime",
@@ -131,11 +118,8 @@ def _display_type(raw_type: Any) -> str:
 def _normalise_fields(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Produces canonical ``{name, type, required, raw_type}`` dicts.
 
-    Accepts contract.yaml field entries (``type``/``data_type`` warehouse
-    spellings, ``required`` or inverse ``nullable``) and JSON-Schema property
-    entries (``type`` possibly a list, optional ``format``) transparently.
-    Entries without a ``name`` are dropped; ``raw_type`` preserves the source
-    spelling for human-readable violation messages. Idempotent.
+    Accepts contract and JSON-Schema field shapes; entries without a name are
+    dropped. Idempotent.
     """
     normalised: list[dict[str, Any]] = []
     for field_def in fields or []:
@@ -164,9 +148,7 @@ def _normalise_fields(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _types_compatible(old_type: str, new_type: str) -> bool:
     """Family equality with optional sub-type refinement.
 
-    ``string`` (bare family) is compatible with ``string:date`` in either
-    direction (loosening/specialising a format is not a breaking type change);
-    two different sub-types (``string:date`` vs ``string:datetime``) are not.
+    A bare family is compatible with any sub-type; two distinct sub-types are not.
     """
     old_family, _, old_sub = old_type.partition(":")
     new_family, _, new_sub = new_type.partition(":")
@@ -202,14 +184,10 @@ def extract_contract_fields(contract_data: dict[str, Any]) -> list[dict[str, Any
 
 
 def resolve_contract_field_types(contract_data: dict[str, Any]) -> dict[str, str]:
-    """Returns field name -> canonical type family for a contract.yaml document.
+    """Returns field name -> canonical type family for a contract document.
 
-    Pure domain (no I/O): extracts schema fields via :func:`extract_contract_fields`,
-    normalises warehouse/JSON-Schema spellings via :func:`_normalise_fields`, and keeps
-    only the family prefix (``integer``, ``number``, ``boolean``, ``string``, ...),
-    dropping temporal subtypes (``string:date`` -> ``string``) so Silver typing treats
-    dates as TEXT (SQLite standard). Unknown/empty types map to ``""`` (callers must
-    leave such values untouched).
+    Keeps only the family prefix so Silver treats dates as TEXT. Unknown types
+    map to ``""`` and are left untouched.
     """
     families: dict[str, str] = {}
     for field_def in _normalise_fields(extract_contract_fields(contract_data)):
@@ -219,12 +197,9 @@ def resolve_contract_field_types(contract_data: dict[str, Any]) -> dict[str, str
 
 
 def extract_schema_fields(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extracts raw field dicts from a schema.json document (pure navigation).
+    """Extracts raw field dicts from a schema.json document.
 
-    Supports the repository's JSON-Schema shape (``properties`` + root
-    ``required`` list, per-property ``type``/``format``) and falls back to the
-    ``spec.schema.fields``/``schema.fields`` field-list shape. Required flags
-    come from the container ``required`` list or a per-property boolean.
+    Supports JSON-Schema ``properties`` + ``required`` and the field-list shape.
     """
     if not isinstance(schema_data, dict):
         return []
@@ -248,9 +223,7 @@ def extract_schema_fields(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
 def resolve_compatibility_mode(contract_data: dict[str, Any]) -> str | None:
     """Returns the declared compatibility mode (upper-cased) or None.
 
-    Searches ``spec.compatibility_mode``, ``spec.compatibility.mode/policy``
-    and root ``compatibility.mode/policy`` (shapes observed in the repo and
-    the legacy governance CLI).
+    Searches ``spec.compatibility_mode``, ``spec.compatibility`` and root forms.
     """
     if not isinstance(contract_data, dict):
         return None
@@ -288,16 +261,10 @@ def validate_compatibility_mode(contract_data: dict[str, Any]) -> tuple[bool, li
 
 
 def extract_quality_thresholds(contract_data: dict[str, Any]) -> dict[str, float] | None:
-    """Extracts declared per-dimension quality thresholds from a contract document.
+    """Extracts declared per-dimension quality thresholds from a contract.
 
-    Reads ``spec.quality.thresholds`` and returns only the declared keys of
-    ``{"completeness", "uniqueness", "validity"}`` as floats in [0, 1].
-    Unknown keys are ignored. Returns None when the quality/thresholds block
-    is absent or declares none of the known dimensions. A declared threshold
-    block that is not a mapping, or a declared dimension value that is not a
-    number in [0, 1] (booleans never count as numbers), raises ``ValueError``:
-    misconfigured governance must fail loudly at gate time instead of
-    silently degrading to the global fallback (fail-closed, RF-06/RF-15).
+    Returns completeness/uniqueness/validity rates in [0, 1], or None when
+    absent. Invalid values raise ``ValueError`` (fail-closed).
     """
     if not isinstance(contract_data, dict):
         return None
@@ -340,18 +307,10 @@ class ContractCompatibilityEvaluator:
         prev_fields: list[dict[str, Any]],
         new_fields: list[dict[str, Any]],
     ) -> tuple[bool, list[str]]:
-        """
-        Enforces BACKWARD compatibility:
-        1. Existing fields cannot be deleted or renamed.
-        2. Newly added fields cannot be marked as required (must be optional).
-        3. Data types of existing fields cannot be altered incompatibly.
+        """Enforces BACKWARD compatibility.
 
-        Field dicts are normalised first, so contract.yaml shapes
-        (``type``/``data_type``, ``required``/``nullable``) and JSON-Schema
-        shapes (``type`` list, ``format``) are accepted transparently;
-        equivalent spellings (``decimal(18,2)`` vs ``number``, ``long`` vs
-        ``integer``, ``timestamp`` vs ``string`` + ``format: date-time``)
-        compare equal. Violation messages quote the original type spellings.
+        Existing fields cannot be deleted or renamed, new fields must be
+        optional, and existing types cannot change incompatibly.
         """
         violations: list[str] = []
         old_map = {f["name"]: f for f in _normalise_fields(prev_fields)}

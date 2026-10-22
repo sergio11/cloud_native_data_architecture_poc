@@ -142,7 +142,7 @@ def test_kappa_streaming_and_serving(temp_lakehouse):
     assert rerun["status"] == "NO_EVENTS"
     assert len(storage.read_table("stream.sales.orders_windowed")) == len(stream_records)
 
-    # 2. Batch Gold tier for the Lambda fusion (RF-11): historical day (yesterday),
+    # 2. Batch Gold tier for the Lambda fusion: historical day (yesterday),
     # so today's stream window adds a DISTINCT key instead of colliding.
     storage.write_table(
         "gold.sales.daily_metrics",
@@ -158,7 +158,7 @@ def test_kappa_streaming_and_serving(temp_lakehouse):
         mode="append",
     )
 
-    # 3. Unified Serving Layer Query (RF-11) via the outbound QueryExecutorPort
+    # 3. Unified Serving Layer Query via the outbound QueryExecutorPort
     serving_uc = QueryServingUseCase(query_executor=SqlServingAdapter(db_path=temp_lakehouse["db_path"]))
     unified = serving_uc.execute()
     assert len(unified) > 0
@@ -176,11 +176,10 @@ def test_contract_validation_use_case():
 
 
 def test_cleanse_silver_empty_returns_driver_compatible_contract(temp_lakehouse):
-    """Regression: the EMPTY result must carry every key drivers index.
+    """The EMPTY result must carry every key the driver indexes.
 
-    ``pipelines/medallion/silver_transform.py`` reads ``target_table``,
-    ``rows_promoted`` and ``quality_pass_rate`` unconditionally; an EMPTY
-    shape without them crashed the driver with ``KeyError``.
+    ``silver_transform.py`` reads ``target_table``, ``rows_promoted`` and
+    ``quality_pass_rate`` unconditionally.
     """
     storage = temp_lakehouse["storage"]
     lineage = temp_lakehouse["lineage"]

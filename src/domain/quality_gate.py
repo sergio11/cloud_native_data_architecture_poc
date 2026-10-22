@@ -1,20 +1,7 @@
-"""
-Modern Data Architecture POC - Shared fail-closed quality gate policy.
+"""Modern Data Architecture POC - Shared fail-closed quality gate policy.
 
-Pure domain policy for the Silver, Gold and standalone quality-gate paths
-(RF-06): :func:`assess_gate` evaluates an engine result against the global
-pass-rate threshold plus (when provided) per-dimension contract thresholds and
-returns a :class:`GateVerdict`. It performs no I/O and mutates no state — its
-only observable output besides the verdict is a warning log when declared
-contract dimensions are not measured by the suite. Application concerns
-(emitting lineage events, raising ``QualityGateBreachError``, resolving
-contracts from a catalog) live in the shared application collaborator
-(``src.use_cases.gate_support``), never here, so this module depends only on
-domain entities and the standard library.
-
-Contract thresholds come from the agreed ``extract_quality_thresholds``
-domain API; per-dimension pass ratios come from the evaluation's
-``dimension_rates`` attribute filled by the engine.
+:func:`assess_gate` evaluates an engine result against the global threshold
+and optional per-dimension contract thresholds.
 """
 
 from __future__ import annotations
@@ -30,21 +17,15 @@ logger = logging.getLogger("domain.quality_gate")
 #: Fallback global threshold when neither the caller nor a contract says otherwise.
 DEFAULT_QUALITY_THRESHOLD = 0.95
 
-#: Rule name the quality engine assigns to the fail-closed "no records /
-#: no assertions to evaluate" failure (RF-06). Part of the
-#: ``QualityEnginePort`` contract so drivers can recognise the empty-dataset
-#: condition without importing a concrete adapter.
+#: Rule name for the fail-closed "no records / no assertions" failure.
 FAIL_CLOSED_RULE = "fail_closed"
 
 
 @dataclass(frozen=True)
 class GateVerdict:
-    """Pure outcome of the gate policy assessment (no I/O performed).
+    """Pure outcome of the gate policy assessment.
 
-    ``approved`` is the policy decision. On rejection, ``rate`` carries the
-    measured rate relevant to the breach and ``required`` the threshold it
-    failed against, so the application layer can report and raise without
-    re-running the evaluation.
+    On rejection, ``rate`` and ``required`` describe the breached threshold.
     """
 
     approved: bool
@@ -52,11 +33,7 @@ class GateVerdict:
     dimension: str | None = None
     rate: float | None = None
     required: float | None = None
-    # Effective threshold applied per measured dimension: the governing
-    # contract thresholds when they apply, otherwise the fallback ``threshold``
-    # repeated for every measured dimension. Lets drivers (e.g. the quality-gate
-    # CLI summary panel) display the thresholds that actually governed instead
-    # of always rendering the fallback.
+    # Effective threshold applied per measured dimension.
     thresholds: dict[str, float] = field(default_factory=dict)
 
 
@@ -65,21 +42,10 @@ def assess_gate(
     contract_thresholds: dict[str, float] | None,
     threshold: float,
 ) -> GateVerdict:
-    """Assesses the gate verdict performing no I/O and mutating no state.
+    """Assesses the gate verdict with no I/O and no state mutation.
 
-    The only side effect is a warning log when contract thresholds are
-    declared but none of those dimensions is measured by the suite. A missing
-    suite raises SuiteNotFoundError from the engine and propagates
-    (never a silent pass). When ``contract_thresholds`` are declared and the
-    evaluation measures at least one of those dimensions (via its
-    engine-filled ``dimension_rates``), the contract dimensions govern the
-    verdict: any measured ``dimension_rates[d] < contract[d]`` rejects, naming
-    the dimension, and the global threshold arithmetic is ignored. An engine
-    fail-closed veto (``evaluation.unsupported``) always rejects, even when
-    the contract dimensions pass. Contract dimensions the suite does not
-    measure are skipped - the engine only reports measured dimensions. When no
-    declared dimension is measurable the global ``pass_rate >= threshold``
-    rule applies as a fallback.
+    Measured contract dimensions govern; the global threshold is the fallback.
+    An engine fail-closed veto always rejects.
     """
     rates: dict[str, Any] = evaluation.dimension_rates
 
@@ -98,13 +64,7 @@ def assess_gate(
                         required=required,
                         thresholds=effective,
                     )
-            # Contract dimensions govern: the global arithmetic is ignored once
-            # they all pass - unless the engine vetoed fail-closed (unsupported
-            # expectation types still block even when the arithmetic passes).
-            # The veto is read from the explicit ``unsupported`` flag: a
-            # ``pass_rate < threshold`` heuristic could not distinguish an
-            # ignorable arithmetic shortfall from a veto and silently approved
-            # the latter.
+            # Contract dimensions govern; the engine veto still blocks.
             if evaluation.unsupported:
                 return GateVerdict(
                     approved=False,

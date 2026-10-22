@@ -32,7 +32,7 @@ logger = logging.getLogger("dagster.resources")
 class SparkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
     """Resource to dispatch pipeline scripts for Spark jobs.
 
-    The K8s profile would submit to the cluster; the LOCAL profile (RF-22)
+    The K8s profile would submit to the cluster; the LOCAL profile
     dispatches the equivalent local pipeline script in a subprocess via
     :mod:`pipelines.orchestration.local_dispatch`.
     """
@@ -47,7 +47,7 @@ class SparkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster 
 
 
 class FlinkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster Generic base
-    """Resource to drive the Apache Flink speed layer on the cluster (RF-10).
+    """Resource to drive the Apache Flink speed layer on the cluster.
 
     The speed layer is a REAL Flink job submitted by the Flink Kubernetes
     Operator (``FlinkDeployment`` in the s4-stream chart). It has no local
@@ -92,7 +92,7 @@ class FlinkResource(ConfigurableResource):  # type: ignore[type-arg]  # dagster 
         deployment_name: str = "flink-orders-stream",
         earliest_offset: bool = True,
     ) -> bool:
-        """Triggers a Kappa replay of a speed-layer deployment (RF-10).
+        """Triggers a Kappa replay of a speed-layer deployment.
 
         Rotates the Kafka consumer group and rewinds the read offset so the job
         re-reads the whole topic log from offset 0 and re-emits every window;

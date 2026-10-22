@@ -1,26 +1,8 @@
 """
-Proves that the Iceberg lakehouse adapter really reaches the lakehouse.
+Proves that the Iceberg lakehouse adapter reaches the real lakehouse.
 
-Run it with `rake lakehouse:probe`. It is the answer to "can the batch layer
-write to the lakehouse, or does it still write to a local SQLite file?", and it
-answers it by doing the write, not by reading the configuration.
-
-It exercises the COMPOSITION ROOT, not just the adapter: the container is built
-with LAKEHOUSE_BACKEND=iceberg, so what gets tested is the same wiring the
-medallion drivers use in the cluster.
-
-What it proves
---------------
-
-* the container resolves the Iceberg implementation of the lakehouse port;
-* the catalog authenticates against Polaris with the OAuth2 scope it demands;
-* a table is created in the catalog and its data files land in MinIO;
-* re-writing the same batch writes NOTHING (RF-01 content-hash idempotency);
-* the rows come back, and the snapshot list is populated (RF-07 time travel).
-
-The table it writes is `sales.probe_metrics`, and it is left behind on purpose:
-the catalogue and the warehouse are the evidence, and deleting them would make
-the next run look like the first one.
+Run with `rake lakehouse:probe`; it writes through the composition root
+(LAKEHOUSE_BACKEND=iceberg) and leaves `sales.probe_metrics` behind as evidence.
 """
 
 from __future__ import annotations
@@ -40,8 +22,7 @@ REPO_ROOT = os.environ.get("POC_REPO_ROOT", "/app")
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-#: The table the probe writes. It lives in the `sales` namespace because that
-#: is the namespace the Polaris bootstrap creates and grants on.
+#: Table the probe writes; the `sales` namespace is granted by the Polaris bootstrap.
 PROBE_TABLE = "gold.sales.probe_metrics"
 
 PROBE_ROWS = [
@@ -85,9 +66,7 @@ def main() -> int:
         print("FALLO: el container no resolvió el adaptador Iceberg (LAKEHOUSE_BACKEND).")
         return 1
 
-    # The probe table survives between runs, and that is deliberate: the
-    # catalogue and the warehouse are the evidence. So the first write appends
-    # only what is not there yet, and a re-run writes NOTHING.
+    # The probe table persists between runs, so a re-run appends only missing rows.
     existed = storage.table_exists(PROBE_TABLE)
     print(f"la tabla ya existia: {existed}")
 
@@ -108,8 +87,7 @@ def main() -> int:
     print("existe:", storage.table_exists(PROBE_TABLE))
 
     problems: list[str] = []
-    # A fresh table takes the whole batch; an existing one takes none, because
-    # the content is already there.
+    # A fresh table takes the whole batch; an existing one takes none.
     expected_first = 0 if existed else len(PROBE_ROWS)
     if written != expected_first:
         problems.append(

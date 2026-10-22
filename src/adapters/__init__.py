@@ -1,7 +1,6 @@
-"""
-Modern Data Architecture POC - Adapters Package.
-Contains secondary adapters for Lakehouse storage, OLTP sources,
-event streaming, OpenLineage metadata, and serving queries.
+"""Modern Data Architecture POC - Adapters package.
+
+Storage, source, streaming, lineage and serving adapters.
 """
 
 from src.adapters.lineage.marquez_lineage import MarquezLineageAdapter

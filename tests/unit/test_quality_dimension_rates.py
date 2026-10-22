@@ -1,8 +1,6 @@
-"""
-Modern Data Architecture POC - Unit Tests: quality dimension rates & contract thresholds.
-Covers the expectation engine ``dimension_rates`` breakdown per quality dimension
-(completeness / uniqueness / validity) and the ``extract_quality_thresholds``
-contract helper. Hermetic: suites are written under tmp_path, never under data/.
+"""Unit tests: quality dimension rates and contract thresholds.
+
+Covers the expectation engine dimension breakdown and the contract helper.
 """
 
 from __future__ import annotations
@@ -165,7 +163,7 @@ def test_dimension_rates_per_record_union_across_assertions(tmp_path: Any) -> No
 
 
 def test_dimension_rate_falls_back_to_assertion_ratio_when_not_attributable(tmp_path: Any) -> None:
-    """A dimension measured ONLY by row-count keeps the legacy assertion ratio."""
+    """A dimension measured only by row-count keeps the assertion ratio."""
     suite_path = _write_suite(
         tmp_path,
         "row_count_only_suite",

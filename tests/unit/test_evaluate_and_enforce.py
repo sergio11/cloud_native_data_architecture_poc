@@ -1,13 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: shared fail-closed gate enforcement.
+"""Unit tests: shared fail-closed gate enforcement.
 
-Direct regression tests for the gate collaboration (RF-06): the pure domain
-policy (:func:`src.domain.quality_gate.assess_gate`) and the shared
-application collaborator (:func:`src.use_cases.gate_support.enforce_quality_gate`)
-used by the Silver and Gold promotion paths. In particular these tests pin the
-engine fail-closed veto: an unsupported expectation type must block promotion
-even when the declared contract dimensions all pass and regardless of the
-global pass-rate arithmetic.
+The domain policy and the Silver/Gold promotion collaborator must block
+promotion when the engine vetoes or the pass rate breaches the threshold.
 """
 
 from __future__ import annotations

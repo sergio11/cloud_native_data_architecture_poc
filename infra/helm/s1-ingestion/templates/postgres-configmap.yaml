@@ -8,7 +8,7 @@ metadata:
     {{- include "s1-ingestion.labels" . | nindent 4 }}
 data:
   01-init-schema.sql: |
-    -- Modern Data Architecture POC - OLTP Database Initial Schema
+    -- OLTP database initial schema
     CREATE TABLE IF NOT EXISTS customers (
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL,

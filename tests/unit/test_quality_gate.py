@@ -1,8 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: Quality Gate (RF-06 fail-closed).
-Covers the expectation engine, the Silver promotion gate and the quality gate
-runner use case with inline stub adapters (src.container is never imported and
-no network/Marquez adapter is used).
+"""Unit tests: quality gate (fail-closed).
+
+Covers the expectation engine, Silver promotion gate and gate runner with
+inline stub adapters.
 """
 
 from __future__ import annotations
@@ -212,7 +211,7 @@ def test_run_quality_gate_empty_table_fails(tmp_path):
         catalog=EmptyContractCatalog(),
     )
 
-    # Fail-closed (RF-06): a failing verdict raises carrying the evaluation.
+    # Fail-closed: a failing verdict raises carrying the evaluation.
     with pytest.raises(QualityGateBreachError) as exc_info:
         use_case.execute("silver.sales.orders", suite_path, threshold=0.95)
     evaluation = exc_info.value.evaluation

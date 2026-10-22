@@ -1,7 +1,4 @@
-# ==============================================================================
-# Subsystem S4: Stream Processing Layer - Values Configuration
-# File: infra/helm/s4-stream/values.yaml
-# ==============================================================================
+# Stream processing subsystem: Kafka, Flink operator and the Flink jobs.
 
 global:
   namespace: platform
@@ -16,19 +13,10 @@ kafka:
     tag: "3.7.0"
     pullPolicy: IfNotPresent
 
-  # In-cluster bootstrap advertised to the Flink jobs. Without it the pods fall
-  # back to localhost:9092 and find no broker.
+  # In-cluster address; outside the cluster this name does not resolve.
   bootstrapServers: "kafka.platform.svc.cluster.local:9092"
 
-  # JVM options of the broker. It is a VALUE and not a constant in the
-  # template because the heap is what the container actually reserves: the
-  # broker's RSS is heap + direct buffers + metaspace, so lowering
-  # kafka.resources.limits.memory WITHOUT lowering this only makes the kubelet
-  # kill a broker that is happily using more than its limit.
-  #
-  # The default (512m heap + 128m direct) needs a 768Mi container. The
-  # stream profile lowers both to 256m/64m because the broker shares the box
-  # with Flink and only carries two topics with three partitions each.
+  # Broker RSS is heap plus direct buffers; keep heapOpts within limits.memory.
   heapOpts: "-Xms384m -Xmx512m -XX:MaxDirectMemorySize=128m"
 
   service:
@@ -48,14 +36,11 @@ kafka:
       cpu: 800m
       memory: 768Mi
 
-  # Empty by default so single-node clusters schedule anywhere (multi-node:
-  # nodeSelector: {node-role.kubernetes.io/storage: "true"}).
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/storage).
   nodeSelector: {}
 
 kafkaUi:
-  # OFF by default: a 768Mi container for a UI nobody needs while diagnosing.
-  # Same 6 GiB budget as flinkJobs.clickstreamStream.enabled - re-enable it
-  # when there is room, it is a browser tab, not part of the data path.
+  # Off by default: it is a UI, not part of the data path.
   enabled: false
   replicaCount: 1
   image:
@@ -66,9 +51,7 @@ kafkaUi:
   service:
     type: NodePort
     port: 8090
-    # Must match the 8090 containerPort kind forwards to the host, otherwise
-    # http://localhost:8090 (documented in infra/kind/setup-cluster.sh) is a
-    # dead port: 30090 is only reachable from inside the cluster.
+    # Must match the 8090 port kind forwards to the host.
     nodePort: 8090
 
   resources:
@@ -87,42 +70,8 @@ topics:
     partitions: 3
     replicationFactor: 1
 
-# ------------------------------------------------------------------------------
-# Flink logging (log4j2 syntax), rendered into spec.logConfiguration.
-#
-# THIS IS NOT OPTIONAL COSMETICS - it is the reason failures were undiagnosable.
-#
-# The operator mounts its own ConfigMap over /opt/flink/conf, and a ConfigMap
-# volume REPLACES THE WHOLE DIRECTORY, so the log4j configuration inside the
-# flink:1.18 image is shadowed and does not exist in the pod. log4j2 then finds
-# no configuration and falls back to its built-in default, which emits only
-# ERROR. Flink reports everything that matters - JobManager binding its REST
-# port, task slots registering, checkpoint outcomes, Iceberg sink failures - at
-# INFO, so a JobManager could restart every few minutes leaving precisely four
-# lines of output, none of them from Flink:
-#
-#   ERROR StatusLogger Reconfiguration failed: No configuration found for '4f2410ac'
-#
-# which is not the failure; it is the absence of the configuration that would
-# have named it. Everything above this block was debugged blind until this was
-# restored.
-#
-# It goes in spec.logConfiguration rather than in an extra ConfigMap mounted at
-# /opt/flink/conf/log4j.properties, for two reasons found the hard way:
-#
-#  1. A file cannot be bind-mounted INTO the read-only directory the operator
-#     already mounted at /opt/flink/conf. The attempt fails before the container
-#     starts, with
-#       OCI runtime create failed: ... error mounting .../log4j.properties
-#       flags=MS_RDONLY|MS_BIND|MS_REC: not a directory
-#     and the pod sits in ContainerCreating forever (StartError, exit 128).
-#
-#  2. spec.logConfiguration is a map whose KEY is a FILE NAME and whose VALUE is
-#     that file's content - not a map of loose log4j properties. The operator
-#     rejects anything else and marks the FlinkDeployment FAILED:
-#       Validation failed: Invalid log config key: appender.console.layout.pattern.
-#       Allowed keys are [logback-console.xml, log4j-console.properties]
-# ------------------------------------------------------------------------------
+# Flink logging rendered into spec.logConfiguration: the operator's ConfigMap
+# shadows the image log4j config, so without this the JVMs only emit errors.
 flinkLogConfiguration:
   log4j-console.properties: |
     rootLogger.level = INFO
@@ -132,37 +81,30 @@ flinkLogConfiguration:
     appender.console.type = CONSOLE
     appender.console.target = SYSTEM_OUT
     appender.console.layout.type = PatternLayout
-    # %c is truncated because the Iceberg/Hadoop class names are long and only
-    # the tail is informative.
+    # %c is truncated: the Iceberg/Hadoop class names are long.
     appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss,SSS} %-5p %-60c - %m%n
 
-    # Flink's own lifecycle: whether the JobManager bound its REST port, which
-    # task slots registered, and why a checkpoint or the sink failed.
+    # Flink lifecycle: REST binding, slot registration, checkpoint and sink failures.
     logger.flink.name = org.apache.flink
     logger.flink.level = INFO
 
-    # Iceberg and Polaris failures are reported under these, NOT under
-    # org.apache.flink, so the default level hides the warehouse errors.
+    # Iceberg and Polaris log outside org.apache.flink.
     logger.iceberg.name = org.apache.iceberg
     logger.iceberg.level = INFO
     logger.icebergRest.name = org.apache.iceberg.rest
     logger.icebergRest.level = INFO
 
-    # The Kafka connector is the speed layer's source: group assignment, offset
-    # commits, and the "committed offsets are already at the end" message that
-    # decides whether the job reads anything at all.
+    # Kafka source: group assignment and offset commits.
     logger.kafka.name = org.apache.kafka
     logger.kafka.level = INFO
 
-    # Hadoop's S3A logs its effective configuration and how it resolved
-    # credentials at INFO - the only place the answer to "why is the s3a://
-    # checkpoint failing" ever appears.
+    # S3A logs its effective configuration and credential resolution at INFO.
     logger.hadoop.name = org.apache.hadoop
     logger.hadoop.level = INFO
     logger.hdfs.name = org.apache.hadoop.hdfs
     logger.hdfs.level = WARN
 
-    # Noise that never carries information in a POC run.
+    # Noise.
     logger.zookeeper.name = org.apache.zookeeper
     logger.zookeeper.level = WARN
     logger.netty.name = org.apache.flink.shaded.netty.akka.org.jboss.netty
@@ -183,19 +125,15 @@ flinkOperator:
       cpu: 200m
       memory: 256Mi
     limits:
-      # The operator reconciles every FlinkDeployment on a 4-CPU node shared
-      # with MinIO, Kafka, Trino and Spark; at 400m it was CPU-throttled into
-      # missing its own health endpoint.
+      # Below 400m CPU the operator misses its own health endpoint.
       cpu: 800m
       memory: 512Mi
 
-  # Empty by default so single-node clusters schedule anywhere (multi-node:
-  # nodeSelector: {node-role.kubernetes.io/compute: "true"}).
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/compute).
   nodeSelector: {}
 
-# warehouse MUST match the Polaris defaultBaseLocation
-# (s2-lakehouse/values.yaml -> polaris.config.warehouseLocation), else Flink and
-# Polaris disagree about where the table files live.
+# warehouse must match polaris.config.warehouseLocation in s2-lakehouse, or
+# Flink and Polaris disagree about where the table files live.
 icebergCatalog:
   name: "polaris"
   uri: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
@@ -203,62 +141,37 @@ icebergCatalog:
   s3Endpoint: "http://minio.platform.svc.cluster.local:9000"
   s3AccessKey: "minioadmin"
   s3SecretKey: "minioadmin"
-  # OAuth2 credential for Polaris 1.x REST catalog authentication.
-  # Format "client_id:client_secret" — must match polaris.clientId/clientSecret
-  # in s2-lakehouse/values.yaml and POLARIS_BOOTSTRAP_CREDENTIALS.
+  # client_id:client_secret; must match polaris.clientId/clientSecret in s2-lakehouse.
   oauth2Credential: "poc-admin:poc-admin-secret"
 
 flinkJobs:
   ordersStream:
     enabled: true
-    # Domain namespace this job runs in. Declared per job rather than taken
-    # from global.computeNamespace, which is a single value for a single
-    # compute node and cannot express two jobs in two domains.
+    # Per job: global.computeNamespace cannot express two domains.
     namespace: "sales"
-    # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
+    # Built from the repo root with infra/docker/flink.Dockerfile.
     image: poc/flink-stream:0.1.0
-    # Where the JobManager and the TaskManager run. Empty by default so the
-    # job can be scheduled anywhere. Pinning it matters on this box: the
-    # Flink image is 1.7 GB and loading it into every kind node is several
-    # GB of writes, and the filesystem (a WSL2 rootfs on the Windows one)
-    # does not take that without starving etcd.
+    # Empty schedules anywhere; pinning avoids loading the image on every node.
     nodeSelector: {}
-    # Flink process memory must exceed JVM heap + metaspace + overhead;
-    # 256m is rejected by the operator, 768m is the smallest workable value.
+    # Process memory must exceed heap + metaspace + overhead; the operator rejects less than 768m.
     jobManager:
       memory: "768m"
       cpu: 0.3
     taskManager:
       memory: "1024m"
       cpu: 0.4
-      # Must live under taskManager: the template reads
-      # flinkJobs.<job>.taskManager.replicas (a job-level value renders empty
-      # and the CRD rejects it as null).
+      # Must stay under taskManager: a job-level value renders empty.
       replicas: 1
     topic: "sales.orders.events"
     kafkaGroupId: "flink-orders-speed-group"
-    # 'earliest' re-reads the whole topic log from offset 0 (RF-10 Kappa
-    # replay). It only replays from 0 when the consumer group has no committed
-    # offsets, so a replay must also override kafkaGroupId with a fresh value.
+    # 'earliest' only replays from offset 0 for a consumer group without committed offsets.
     kafkaStartOffset: "latest"
   clickstreamStream:
-    # OFF by default, deliberately, and this is a capacity decision rather than
-    # a correctness one. One Flink job costs 768m (JobManager) + 1024m
-    # (TaskManager) = 1792 MB, so the two jobs together are 3584 MB of process
-    # memory. The podman machine backing kind is 6 GiB TOTAL across all three
-    # nodes (each node *reports* ~5.79 GiB allocatable because they share one
-    # VM, so the scheduler will happily overcommit ~17 GiB and the kubelet then
-    # evicts whatever is unlucky - which is what made failures look random).
-    # With MinIO, Polaris, Kafka, Postgres and both operators also on the box,
-    # two Flink jobs do not fit. Enable it with a profile that gives the machine
-    # room, or run it as its own phase.
+    # Off: two Flink jobs (JM + TM each) do not fit on this VM.
     enabled: false
-    # marketing, not sales: this is the clickstream funnel job and
-    # domains/marketing/data-products/leads/product.yaml defines it there. It
-    # used to render into global.computeNamespace (always "sales") because the
-    # `default "marketing"` was shadowed by a key that is always present.
+    # marketing: this is the clickstream funnel job.
     namespace: "marketing"
-    # Built from repo root: docker build -f infra/docker/flink.Dockerfile -t poc/flink-stream:0.1.0 .
+    # Built from the repo root with infra/docker/flink.Dockerfile.
     image: poc/flink-stream:0.1.0
     nodeSelector: {}
     jobManager:

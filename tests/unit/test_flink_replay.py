@@ -1,8 +1,6 @@
-"""
-Kappa replay semantics for the Flink speed layer (RF-10).
+"""Kappa replay semantics for the Flink speed layer.
 
-The replay logic lives in :mod:`pipelines.orchestration.flink_replay` as pure
-functions precisely so it can be tested here without a Kubernetes cluster.
+Replay logic lives in ``pipelines.orchestration.flink_replay`` as pure functions.
 """
 
 from __future__ import annotations

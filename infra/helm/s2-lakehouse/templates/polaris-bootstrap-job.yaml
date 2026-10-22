@@ -1,30 +1,8 @@
 {{- if .Values.polaris.enabled }}
-# =============================================================================
-# polaris-bootstrap-job.yaml
+# Idempotent Polaris catalog bootstrap, run after every Polaris (re)start.
 #
-# Idempotent Polaris catalog bootstrap. Runs after every Polaris restart.
-#
-# Problem: Polaris 1.8 with the in-memory metastore loses all catalog state on
-# restart. The Iceberg table *files* survive in MinIO but the catalog entries
-# (namespace "sales" + table "orders_windowed") disappear, making every engine
-# blind to them. This Job re-creates the catalog after each boot.
-#
-# Design:
-#   1. Wait for Polaris management port /q/health/ready (same target as the
-#      startupProbe — guarantees the server accepted its credentials).
-#   2. Obtain an OAuth2 token from the Polaris token endpoint using the fixed
-#      root credentials from values.yaml (realm POLARIS, client_id poc-admin).
-#   3. Create the catalog "polaris" pointing at MinIO if it does not already
-#      exist (idempotent: HTTP 409 Conflict is treated as success).
-#   4. Create the "sales" and "marketing" namespaces inside the catalog
-#      (idempotent: 409 is treated as success).
-#
-# The Job runs with restartPolicy: OnFailure and backoffLimit: 20 so that
-# transient Polaris boot delays do not leave the catalog unpopulated.
-#
-# Credentials are read from values.yaml (polaris.realm / clientId / clientSecret)
-# and must match POLARIS_BOOTSTRAP_CREDENTIALS set in polaris-deployment.yaml.
-# =============================================================================
+# The in-memory metastore loses catalog entries on restart while the Iceberg files
+# survive in MinIO; this recreates the catalog, namespaces and catalog_admin grant.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -34,45 +12,19 @@ metadata:
     app: polaris-catalog-bootstrap
     {{- include "s2-lakehouse.labels" . | nindent 4 }}
   annotations:
-    # A real hook, not just a weight: hook-weight alone does nothing without
-    # helm.sh/hook, and without the hook the Job is an ordinary resource that
-    # Helm patches - and spec.template is immutable, so the second upgrade failed
-    # with "field is immutable" every time this script changed.
-    #
-    # before-hook-creation + hook-succeeded means every upgrade runs a fresh Job
-    # (it is deleted as soon as it succeeds, so it never lingers either).
-    #
-    # post-install, NOT pre-install: the initContainer waits for
-    # polaris.platform.svc.cluster.local:8182, and on a first install that
-    # Service and its Deployment are ordinary (non-hook) resources that Helm has
-    # not created yet. As a pre-install hook the Job waited forever and the whole
-    # `helm install s2-lakehouse` hung until its timeout, taking the platform
-    # profile with it. post-install guarantees the Polaris pod exists first.
-    #
-    # post-install AND post-upgrade, never pre-upgrade: the catalogue lives in
-    # the Polaris POD's memory, so a bootstrap that runs BEFORE the upgrade is
-    # creating the catalogue in the pod that the upgrade is about to replace.
-    # After a pod roll the catalogue is simply gone, and the registration job
-    # (weight 25, so it runs after this one) would fail with "catalog not
-    # found". Running it after the upgrade re-creates the catalogue in the
-    # pod that is actually serving.
+    # Post-install/post-upgrade only: Polaris must already exist, and the pod template is immutable.
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    # The default hook timeout is 5 minutes. On a 6 GiB box this job takes 6 to
-    # 11 minutes (the whole cluster is swapping while it runs), and the upgrade
-    # failed with "pre-upgrade hooks failed: resource Job/... not ready: status:
-    # InProgress" until the timeout was raised.
+    # The default 5m is too short for this job on a loaded box.
     helm.sh/hook-timeout: 20m
 
 spec:
   # Keep completed pods for 10 minutes so logs are readable after success.
   ttlSecondsAfterFinished: 600
   backoffLimit: 20
-  # backoffLimit alone cannot rescue a hang: the initContainer below sleeps in a
-  # loop and never exits, so the pod stays Running and backoffLimit never
-  # engages. This is the hard ceiling that turns "waiting forever" into a
-  # failure Helm reports instead of an install that never finishes.
+  # Hard ceiling: the initContainer can wait forever, and backoffLimit does not
+  # apply to a running pod.
   activeDeadlineSeconds: 900
   template:
     metadata:
@@ -80,9 +32,7 @@ spec:
         app: polaris-catalog-bootstrap
     spec:
       restartPolicy: OnFailure
-      # No resources meant BestEffort QoS: under memory pressure these are the
-      # first pods evicted, and a bootstrap that dies mid-run leaves the
-      # catalog half-created.
+      # Requests keep this pod out of BestEffort: it is evicted first otherwise.
       resources:
         requests:
           cpu: "50m"
@@ -91,9 +41,7 @@ spec:
           cpu: "250m"
           memory: "192Mi"
       initContainers:
-        # Step 1: wait until Polaris is genuinely healthy (not just port-open).
-        # Uses the management port 8182 which serves /q/health/ready without
-        # authentication (same endpoint as the startupProbe).
+        # Wait on /q/health/ready: the management port serves it unauthenticated.
         - name: wait-for-polaris
           image: curlimages/curl:8.9.1
           resources:
@@ -111,9 +59,7 @@ spec:
               ATTEMPT=0
               until curl -sf http://polaris.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local:8182/q/health/ready; do
                 ATTEMPT=$((ATTEMPT + 1))
-                # 120 attempts x 5s = 10 min. Same ceiling as
-                # activeDeadlineSeconds, so the reason for the failure is printed
-                # in the log rather than only "DeadlineExceeded" from kubelet.
+                # 120 x 5s: fail with a readable message before kubelet reports DeadlineExceeded.
                 if [ "${ATTEMPT}" -ge 120 ]; then
                   echo "ERROR: Polaris still not ready after ${ATTEMPT} attempts (~10 min)."
                   echo "       Check: kubectl logs -n {{ .Values.global.namespace | default "platform" }} deploy/polaris"
@@ -139,11 +85,7 @@ spec:
               value: {{ .Values.polaris.config.defaultCatalog | quote }}
             - name: WAREHOUSE_LOCATION
               value: {{ .Values.polaris.config.warehouseLocation | quote }}
-            # URL-encoded form of WAREHOUSE_LOCATION, for the ?warehouse= query
-            # parameter of the Iceberg REST config endpoint (s3://warehouse/ ->
-            # s3%3A%2F%2Fwarehouse%2F). POSIX sh has no URL encoder, so the two
-            # characters that actually need escaping are replaced here and the
-            # rest of the value is expected to be safe.
+            # URL-encoded warehouse for ?warehouse=; sh has no URL encoder.
             - name: WAREHOUSE_ENCODED
               value: {{ .Values.polaris.config.warehouseLocation | replace "/" "%2F" | replace ":" "%3A" | quote }}
             - name: S3_ENDPOINT
@@ -157,11 +99,7 @@ spec:
               echo "=== Polaris Catalog Bootstrap ==="
               echo "Realm: ${POLARIS_REALM}  Catalog: ${CATALOG_NAME}"
 
-              # -----------------------------------------------------------------
-              # Step 2: obtain an OAuth2 bearer token
-              # Endpoint: /api/catalog/v1/oauth/tokens
-              # Polaris 1.8 management API requires a token even for admin calls.
-              # -----------------------------------------------------------------
+              # OAuth2 token: the management API requires one even for admin calls.
               TOKEN=$(curl -sf \
                 -X POST "${POLARIS_BASE_URL}/api/catalog/v1/oauth/tokens" \
                 -H "Content-Type: application/x-www-form-urlencoded" \
@@ -177,32 +115,14 @@ spec:
 
               AUTH="Authorization: Bearer ${TOKEN}"
 
-              # -----------------------------------------------------------------
-              # Step 3: recreate the catalog.
-              #
-              # Delete first, on purpose. Treating 409 as success is what made
-              # this silently rot: a catalog created days ago with a different
-              # default-base-location was never corrected, so Polaris answered
-              # POST /catalogs with 409 (it exists) while the Iceberg REST
-              # lookup answered 404 "Unable to find warehouse <the one in
-              # values>" - because it resolves catalogs BY base location and the
-              # old one no longer matched. Recreating makes the catalog always
-              # match these values. Polaris keeps the catalog in memory, so this
-              # is also how a restarted Polaris gets its catalog back.
-              # Management API endpoint: /api/management/v1/catalogs
-              # -----------------------------------------------------------------
+              # Recreate the catalog so a stale base-location cannot survive a 409-tolerant create.
               echo "Dropping catalog '${CATALOG_NAME}' if present (keeps it in sync with these values)..."
-              # Printed first: when the catalog refuses to drop ("it is not
-              # empty") this line is the only way to see the base location it
-              # actually carries, which is what the Iceberg REST clients resolve.
+              # Print the current definition to see any base location a failed drop leaves behind.
               echo "Existing catalog definition:"
               curl -s "${POLARIS_BASE_URL}/api/management/v1/catalogs/${CATALOG_NAME}" -H "${AUTH}" || true
               echo ""
               {{- if ne .Values.polaris.persistence.type "in-memory" }}
-              # NOT dropped with a persistent metastore. The catalog now survives
-              # a Polaris restart on its own, and dropping it would throw away the
-              # Iceberg table metadata on every deploy. 409 from the create below
-              # is then the correct, expected answer.
+              # A persistent metastore keeps the catalog across restarts; dropping it loses metadata.
               echo "Metastore is persistent: keeping the existing catalog as-is."
               {{- else }}
               DROP=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -213,23 +133,13 @@ spec:
               elif [ "${DROP}" = "404" ]; then
                 echo "No catalog to drop (HTTP 404), creating it."
               else
-                # Non-fatal: a catalog Polaris refuses to drop is still usable if
-                # its base location already matches. The verification below is
-                # what decides whether the run is a success.
+                # Non-fatal: the verification below decides whether the run succeeded.
                 echo "WARN: dropping the catalog returned HTTP ${DROP}; continuing."
               fi
               {{- end }}
 
               echo "Creating catalog '${CATALOG_NAME}'..."
-              # NO -f here. This runs under `sh -ce`, so a curl that exits
-              # non-zero aborts the whole script before the status is ever
-              # inspected. 409 "Catalog already exists" is an EXPECTED outcome
-              # - it is the normal case when the drop above was refused
-              # ("Catalog 'polaris' cannot be dropped, it is not empty") - and
-              # the branch two lines below already treats 409 as success. With
-              # -f, that expected answer became a hard failure and this Job
-              # failed on every upgrade that followed a populated catalog.
-              # The status code is the contract here, not curl's exit code.
+              # No -f: under `sh -ce` a non-zero exit would abort before checking the status.
               STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
                 -X POST "${POLARIS_BASE_URL}/api/management/v1/catalogs" \
                 -H "${AUTH}" \
@@ -259,18 +169,8 @@ spec:
                 exit 1
               fi
 
-              # -----------------------------------------------------------------
-              # Step 3a: grant the job principal a role ON the catalog.
-              #
-              # Creating a catalog does not grant anything on it. Polaris resolves
-              # an Iceberg REST client to a catalog per principal, so a client
-              # whose service account holds no role sees nothing and GET
-              # /v1/config?warehouse=... answers 404 "Unable to find warehouse" -
-              # even though the catalog exists with exactly that base location
-              # and the very same token works on the catalog API (a different
-              # code path). Granting catalog_admin is what makes it visible.
-              # Management API: /api/management/v1/catalogs/{catalog}/catalog-roles
-              # -----------------------------------------------------------------
+              # Creating the catalog grants nothing on it: without catalog_admin, REST
+              # clients get 404 "Unable to find warehouse".
               echo "Granting catalog_admin on '${CATALOG_NAME}' to service role '${POLARIS_CLIENT_ID}'..."
               GRANT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
                 -X POST "${POLARIS_BASE_URL}/api/management/v1/catalogs/${CATALOG_NAME}/catalog-roles" \
@@ -289,15 +189,10 @@ spec:
                 exit 1
               fi
 
-              # -----------------------------------------------------------------
-              # Step 4: create namespaces inside the catalog (idempotent)
-              # Catalog API endpoint: /api/catalog/v1/{catalog}/namespaces
-              # -----------------------------------------------------------------
+              # Namespaces are idempotent: 200 and 409 both mean "ready".
               for NS in sales marketing finance; do
                 echo "Creating namespace '${NS}' in catalog '${CATALOG_NAME}'..."
-                # Same reason as the catalog POST above: 409 is an accepted
-                # outcome handled by the branch below, and -f under `set -e`
-                # would abort before that branch is ever reached.
+                # 409 is expected; -f under `set -e` would abort before it is read.
                 NS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
                   -X POST "${POLARIS_BASE_URL}/api/catalog/v1/${CATALOG_NAME}/namespaces" \
                   -H "${AUTH}" \
@@ -312,19 +207,7 @@ spec:
                 fi
               done
 
-              # -----------------------------------------------------------------
-              # Step 5: verify the catalog resolves the way clients will ask.
-              #
-              # Polaris identifies a catalog for an Iceberg REST client BY NAME:
-              # the call is GET /api/catalog/v1/config?warehouse=<catalog name>,
-              # NOT by the S3 base location. A bootstrap that treats the catalog
-              # POST returning 409 as success used to look completely healthy while
-              # every Flink/Trino job failed with "Unable to find warehouse
-              # s3://warehouse/" - because it never checked the lookup at all.
-              #
-              # Runs after the namespaces on purpose: a failing assertion here must
-              # not leave the catalog without them.
-              # -----------------------------------------------------------------
+              # Final check: REST clients look the catalog up by name, after namespaces exist.
               echo "Verifying Polaris resolves catalog '${CATALOG_NAME}' for REST clients..."
               CONFIG_STATUS=000
               ATTEMPT=1

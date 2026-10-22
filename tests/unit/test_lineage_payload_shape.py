@@ -1,12 +1,7 @@
-"""A1: the Marquez adapter payload must satisfy the webhook service model.
+"""The Marquez adapter payload must satisfy the webhook service model.
 
-The service validates ``OpenLineageEvent`` with a mandatory ``run: Run``
-(``Run.runId: str``). This test builds the adapter on a temp audit path,
-captures the HTTP POST body, emits one event, and asserts BOTH the local
-JSONL line and the POST body carry a non-empty ``run.runId`` plus the keys
-the service requires (``eventType``, ``eventTime``, ``run.runId``,
-``job.name``). It also round-trips the payload through the service's
-pydantic model as end-to-end evidence.
+Both the local JSONL line and the HTTP POST body must carry the mandatory
+``run.runId`` and the keys required by the service.
 """
 
 from __future__ import annotations

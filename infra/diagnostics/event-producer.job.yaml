@@ -1,17 +1,6 @@
-# ==============================================================================
-# Event producer Job
-#
-# The speed layer is fed from INSIDE the cluster. It cannot be fed from the
-# workstation:
-#
-#   * the broker advertises kafka.platform.svc.cluster.local:9092, a name
-#     that does not resolve outside the cluster, so a producer pointed at
-#     localhost:9092 through a port-forward is redirected to a name it
-#     cannot resolve;
-#   * the workstation's Python does not have confluent-kafka installed.
-#
-# The image is the ingestion one (it carries data-generator/ and the client).
-# ==============================================================================
+# Event producer Job: feeds the speed layer from inside the cluster, because the
+# broker's advertised name does not resolve from the workstation and local Python
+# lacks confluent-kafka.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -21,8 +10,7 @@ metadata:
     app: event-producer
 spec:
   backoffLimit: 2
-  # The producer runs for --duration seconds; the deadline is a backstop for
-  # a producer that hangs on a broker that never acknowledges.
+  # Runs for --duration seconds; the deadline is a backstop for a hung producer.
   activeDeadlineSeconds: 300
   template:
     metadata:
@@ -30,9 +18,7 @@ spec:
         app: event-producer
     spec:
       restartPolicy: Never
-      # The compute node: it is where the image is loaded (loading a 410 MB
-      # image into every node is several hundred MB of writes this box does
-      # not need) and where the Flink operator and the speed layer run.
+      # Compute node: the image is loaded here and the speed layer runs here.
       nodeSelector:
         kubernetes.io/hostname: poc-data-platform-worker2
       resources:

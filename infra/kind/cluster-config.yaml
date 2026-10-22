@@ -1,10 +1,5 @@
-# ==============================================================================
-# Modern Data Architecture POC - Kind Cluster Configuration
-# File: infra/kind/cluster-config.yaml
-# Description: Multi-node Kind cluster definition (1 control-plane, 2 workers)
-#              with host port mappings for web interfaces and APIs, host path
-#              persistence under /data, and dedicated node roles.
-# ==============================================================================
+# kind cluster: one control plane and two workers, host port mappings for the
+# web UIs and APIs, and a hostPath bind mount per node under ./data.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: poc-data-platform
@@ -13,30 +8,9 @@ networking:
   apiServerAddress: "127.0.0.1"
   apiServerPort: 6443
 nodes:
-  # ----------------------------------------------------------------------------
-  # Control Plane Node
-  # Hosts Kubernetes control components and routes ingress / NodePort mappings
-  #
-  # NOTE ON NODE LABELS: do NOT set `labels:` here. kind turns them into the
-  # kubelet's --node-labels flag, and since Kubernetes 1.36 the kubelet REFUSES
-  # to start when that flag carries a kubernetes.io/ or k8s.io/ namespace label
-  # outside a small allow-list. Both node-role.kubernetes.io/* and
-  # topology.kubernetes.io/* are rejected:
-  #
-  #   failed to validate kubelet flags: unknown 'kubernetes.io' or 'k8s.io'
-  #   labels specified with --node-labels:
-  #   [node-role.kubernetes.io/storage node-role.kubernetes.io/worker]
-  #
-  # The kubelet then crash-loops, the worker never joins the cluster, and
-  # `kind create` fails with "error execution phase kubelet-wait-bootstrap:
-  # failed while waiting for the kubelet to start". That is the origin of the
-  # restart churn and the etcd/apiserver pressure: two nodes permanently
-  # failing to boot on a 6 GB machine.
-  #
-  # The domain roles are applied AFTER the nodes are Ready, by
-  # `rake cluster:create` (label_worker_roles), which is the only point where
-  # they can be set safely.
-  # ----------------------------------------------------------------------------
+  # Do not set `labels:` on kind nodes: they become kubelet --node-labels and the
+  # kubelet refuses kubernetes.io/ or k8s.io/ namespaced labels, so the node never
+  # joins. `rake cluster:create` applies the domain roles once nodes are Ready.
   - role: control-plane
     kubeadmConfigPatches:
       - |
@@ -45,47 +19,47 @@ nodes:
           extraArgs:
             service-node-port-range: "1-65535"
     extraPortMappings:
-      # Port 3000: Grafana Metrics & Observability Dashboard
+      # Grafana
       - containerPort: 3000
         hostPort: 3000
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 3001: Dagster Web UI (Dagit Orchestrator)
+      # Dagster
       - containerPort: 3001
         hostPort: 3001
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 3002: Marquez Lineage & Metadata Web UI
+      # Marquez
       - containerPort: 3002
         hostPort: 3002
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 3003: Metabase Business Intelligence
+      # Metabase
       - containerPort: 3003
         hostPort: 3003
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 8080: Trino Distributed SQL Query Coordinator
+      # Trino
       - containerPort: 8080
         hostPort: 8080
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 8090: Kafka UI / AKHQ Topic Explorer
+      # Kafka UI
       - containerPort: 8090
         hostPort: 8090
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 9000: MinIO S3 API Endpoint
+      # MinIO S3 API
       - containerPort: 9000
         hostPort: 9000
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 9001: MinIO Console Web UI
+      # MinIO console
       - containerPort: 9001
         hostPort: 9001
         protocol: TCP
         listenAddress: "0.0.0.0"
-      # Port 8181: Apache Polaris REST Catalog API
+      # Polaris REST catalog
       - containerPort: 8181
         hostPort: 8181
         protocol: TCP
@@ -95,20 +69,14 @@ nodes:
         containerPath: /data
         readOnly: false
 
-  # ----------------------------------------------------------------------------
-  # Worker Node 1: Storage Layer
-  # Hosts MinIO Object Store, PostgreSQL OLTP, Kafka Brokers, and Polaris Catalog
-  # ----------------------------------------------------------------------------
+  # Storage node: MinIO, PostgreSQL, Kafka and Polaris.
   - role: worker
     extraMounts:
       - hostPath: ./data/worker-storage
         containerPath: /data
         readOnly: false
 
-  # ----------------------------------------------------------------------------
-  # Worker Node 2: Compute Layer
-  # Hosts Spark Batch Drivers/Executors, Flink Stream Processors, Trino Engine
-  # ----------------------------------------------------------------------------
+  # Compute node: Spark, Flink and Trino.
   - role: worker
     extraMounts:
       - hostPath: ./data/worker-compute

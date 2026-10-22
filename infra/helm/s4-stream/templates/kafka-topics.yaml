@@ -8,40 +8,17 @@ metadata:
     app: kafka-topic-creator
     {{- include "s4-stream.labels" . | nindent 4 }}
   annotations:
-    # Run as a hook so `helm upgrade` replaces the Job instead of patching it:
-    # Job spec.template is immutable and a server-side apply of a changed
-    # template fails (see s4 upgrade failure). before-hook-creation deletes
-    # the previous hook Job before the new one is created.
-    #
-    # post-install AND post-upgrade, never pre-install and never pre-upgrade:
-    # the initContainer waits for kafka.platform.svc.cluster.local:9092, which
-    # is created by kafka.yaml in this same release as an ordinary
-    # (non-hook) resource. A pre-install hook runs before Helm has created
-    # anything, so the loop below burned its 300 s and the whole
-    # `helm install s4-stream` failed - taking Kafka, the Flink operator and
-    # both FlinkDeployments down with it.
-    #
-    # pre-upgrade has the SAME problem from the other side: the broker is an
-    # ordinary resource of this release, so a pre-upgrade hook runs before
-    # Helm has reconciled it, and when the previous phase had scaled Kafka
-    # down (which the ramp increments do, to fit in the RAM) there is no
-    # broker to talk to at all:
-    #   pre-upgrade hooks failed: resource Job/platform/kafka-topic-creator
-    #   not ready. status: Failed, message: Job Failed. failed: 1/1
-    # The price of running afterwards is that the Flink job may be applied
-    # before its topic exists; the KafkaSource retries until it does.
+    # A hook, because a Job spec.template is immutable and cannot be applied over an
+    # existing Job. Post-install/post-upgrade only, after the broker exists.
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "-5"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    # The default hook timeout is 5 minutes, and on a 6 GiB box the broker
-    # needs longer to accept the topic requests while the cluster is swapping.
+    # The broker needs longer than the 5m default on a loaded box.
     helm.sh/hook-timeout: 20m
 
 spec:
   backoffLimit: 10
-  # The initContainer already gives up after 300s, so the Job fails rather than
-  # hangs; this bounds the retries too (backoffLimit x 300s is otherwise ~50
-  # min of a Helm install that looks stuck).
+  # Bounds retries: the initContainer gives up after 300s.
   activeDeadlineSeconds: 600
   template:
     metadata:

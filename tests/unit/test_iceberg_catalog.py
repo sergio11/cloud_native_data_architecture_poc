@@ -1,14 +1,7 @@
-"""
-Tests for the environment contract of the Iceberg lakehouse adapter.
+"""Tests for the environment contract of the Iceberg lakehouse adapter.
 
-The adapter reads its connection from the environment so the Helm chart is the
-single source of truth, and that contract is invisible until a pod runs: a
-mismatched variable name is not a test failure, it is a medallion that dies in
-the cluster with "ICEBERG_CATALOG_URI is required for the Iceberg lakehouse
-backend" while the chart was setting ICEBERG_CATALOG_URL.
-
-So the spellings are pinned here, including the alias, so the next mismatch is
-a red test instead of a broken pod.
+The adapter reads its connection from the environment; variable spellings and
+the URL alias are pinned here so a chart mismatch fails as a red test.
 """
 
 from __future__ import annotations
@@ -45,7 +38,7 @@ def test_canonical_uri_is_used(iceberg_env: None) -> None:
 
 
 def test_url_spelling_is_accepted_as_an_alias(monkeypatch: pytest.MonkeyPatch, iceberg_env: None) -> None:
-    """The charts used to set ICEBERG_CATALOG_URL while the code read the URI."""
+    """ICEBERG_CATALOG_URL is accepted as an alias for the canonical variable."""
     monkeypatch.delenv("ICEBERG_CATALOG_URI", raising=False)
     monkeypatch.setenv("ICEBERG_CATALOG_URL", CATALOG_URI)
     properties = iceberg_catalog_properties()

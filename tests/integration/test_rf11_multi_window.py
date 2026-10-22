@@ -1,10 +1,7 @@
-"""
-Modern Data Architecture POC - Integration Tests: RF-11 multi-window merge.
+"""Integration test: multi-window merge in the unified serving query.
 
-Proves the unified serving query aggregates stream tumbling windows to day
-grain BEFORE the batch anti-join, so one (order_date, status) key yields
-exactly one row. Hermetic: uses the ``world`` fixture (tmp SQLite lakehouse,
-offline Marquez stub, TRINO_HOST unset) - no repo-root data/, no network.
+Stream tumbling windows are aggregated to day grain before the batch anti-join,
+so one (order_date, status) key yields exactly one row.
 """
 
 from __future__ import annotations

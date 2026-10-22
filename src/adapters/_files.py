@@ -1,8 +1,6 @@
-"""
-Modern Data Architecture POC - Shared filesystem bootstrap helper.
+"""Modern Data Architecture POC - Shared filesystem helper.
 
-Single home for the "ensure the parent directory exists" one-liner repeated
-across adapters, so every adapter creates its directories the same way.
+Ensures adapters create parent directories consistently.
 """
 
 from __future__ import annotations

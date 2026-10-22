@@ -1,13 +1,10 @@
-# ==============================================================================
-# Subsystem S1: Ingestion Layer - Values Configuration
-# File: infra/helm/s1-ingestion/values.yaml
-# ==============================================================================
+# Ingestion layer: the PostgreSQL source and the bronze ingestion CronJob.
 
 global:
   namespace: platform
   storageClass: "standard"
 
-# PostgreSQL OLTP Demo Source Configuration
+# PostgreSQL source.
 postgresql:
   enabled: true
   replicaCount: 1
@@ -40,8 +37,7 @@ postgresql:
       cpu: 500m
       memory: 384Mi
 
-  # Probe timings tolerant enough for single-node kind under load (the
-  # default 1s exec timeout flaps and restarts PostgreSQL needlessly).
+  # Tolerant on purpose: the default 1s timeout flaps under load.
   probes:
     readiness:
       initialDelaySeconds: 10
@@ -54,22 +50,20 @@ postgresql:
       timeoutSeconds: 5
       failureThreshold: 6
 
-  # Empty by default so single-node clusters (kind, demo profile) schedule
-  # PostgreSQL anywhere; pin to storage nodes in multi-node setups, e.g.
-  # nodeSelector: {node-role.kubernetes.io/storage: "true"}.
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/storage).
   nodeSelector: {}
 
   tolerations: []
   affinity: {}
 
-# Ingestion Runner / Scheduled CDC Syncer
+# Bronze ingestion CronJob.
 ingestionRunner:
   enabled: true
   schedule: "*/15 * * * *"  # Run every 15 minutes
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   image:
-    # Built from repo root: docker build -f infra/docker/ingest.Dockerfile -t poc/ingest:0.1.0 .
+    # Built from the repo root with infra/docker/ingest.Dockerfile.
     repository: poc/ingest
     tag: "0.1.0"
     pullPolicy: IfNotPresent
@@ -81,31 +75,18 @@ ingestionRunner:
       cpu: 250m
       memory: 192Mi
   env:
-    # Names must match what the code reads, not what reads nicely in YAML.
-    # src/adapters/source/oltp_source.py:38,70,101-103 resolves the OLTP source
-    # from PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD, and the previous
-    # JDBC_URL/JDBC_USER/JDBC_PASSWORD here were read by NOTHING - so the
-    # CronJob silently fell back to the embedded synthetic dataset (see
-    # oltp_source.py:70-76, 'PGPASSWORD not set') and PostgreSQL was never
-    # touched, with no error anywhere.
+    # Names must match what src/adapters/source/oltp_source.py reads; unmatched
+    # names make the CronJob fall back to the synthetic dataset.
     PGHOST: "postgres-oltp.platform.svc.cluster.local"
     PGPORT: "5432"
     PGDATABASE: "poc_oltp"
     PGUSER: "postgres"
     PGPASSWORD: "oltp_password_secret"
-    # src/container.py:67 and src/adapters/lineage/marquez_lineage.py:32 read
-    # MARQUEZ_URL; the previous OPENLINEAGE_URL was read by nothing, so lineage
-    # was never published to Marquez.
+    # Read by src/container.py and the lineage adapter.
     MARQUEZ_URL: "http://marquez.platform.svc.cluster.local:5000"
-    # The lakehouse port has two implementations and the environment picks one.
-    # "iceberg" writes the Bronze tables to the real lakehouse (Polaris catalog,
-    # MinIO data files) through the Iceberg adapter; "sqlite" keeps them in a
-    # local file. The same four variables name the same things as in s3-batch.
+    # Lakehouse port implementation: iceberg writes to Polaris and MinIO, sqlite to a file.
     LAKEHOUSE_BACKEND: "iceberg"
-    # The name the code reads (src/adapters/storage/iceberg_catalog.py:39).
-    # It used to be ICEBERG_CATALOG_URL here and in s3-batch, and nothing
-    # read that spelling: the medallion died in the pod with
-    # "ICEBERG_CATALOG_URI is required for the Iceberg lakehouse backend".
+    # Name required by src/adapters/storage/iceberg_catalog.py.
     ICEBERG_CATALOG_URI: "http://polaris.platform.svc.cluster.local:8181/api/catalog"
     ICEBERG_CATALOG_NAME: "polaris"
     ICEBERG_WAREHOUSE: "polaris"
@@ -114,9 +95,9 @@ ingestionRunner:
     MINIO_ENDPOINT: "http://minio.platform.svc.cluster.local:9000"
     MINIO_ACCESS_KEY: "minioadmin"
     MINIO_SECRET_KEY: "minioadmin"
-    # Iceberg's S3 client needs a region even against MinIO.
+    # The S3 client needs a region even against MinIO.
     MINIO_REGION: "us-east-1"
-    # Trino, for the serving adapter (src/adapters/serving/sql_serving.py:119-122).
+    # Used by the Trino serving adapter.
     TRINO_HOST: "trino.platform.svc.cluster.local"
     TRINO_PORT: "8080"
     TRINO_USER: "trino"

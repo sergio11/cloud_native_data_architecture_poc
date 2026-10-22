@@ -1,14 +1,7 @@
-# ==============================================================================
 # Lakehouse rows probe Job (rake lakehouse:rows)
 #
-# One pod that reads the Iceberg catalogue and the medallion tables, and
-# reports how many rows each tier really has. It is the acceptance check for
-# the batch phase: "bronze, silver and gold have rows in the lakehouse",
-# read from the lakehouse itself and not from a log line.
-#
-# The script travels in a ConfigMap so it can be corrected without paying the
-# image rebuild and per-node load cycle.
-# ==============================================================================
+# One pod that reads the Iceberg catalogue and medallion tables and reports how
+# many rows each tier really has, straight from the lakehouse.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -25,10 +18,7 @@ spec:
         app: lakehouse-rows-probe
     spec:
       restartPolicy: Never
-      # Pinned on purpose: the probe must run where the image was loaded, so a
-      # missing image cannot be mistaken for a failure of the probe.
-      # The compute node, which is where the ingestion image is loaded and
-      # which stays up while the "worker" node is stopped.
+      # Pinned to the compute node, where the ingestion image is loaded and which stays up.
       nodeSelector:
         kubernetes.io/hostname: poc-data-platform-worker2
       volumes:
@@ -52,9 +42,7 @@ spec:
               value: polaris
             - name: POLARIS_OAUTH2_CREDENTIAL
               value: poc-admin:poc-admin-secret
-            # Without this scope the Iceberg client sends its own default,
-            # "catalog", and Polaris rejects it with
-            #   invalid_scope: The scope is invalid
+            # Polaris requires this scope; the client default "catalog" is rejected.
             - name: POLARIS_OAUTH2_SCOPE
               value: PRINCIPAL_ROLE:ALL
             - name: MINIO_ENDPOINT
@@ -65,8 +53,7 @@ spec:
               value: minioadmin
             - name: MINIO_REGION
               value: us-east-1
-            # Which tiers have to have rows for the probe to pass. The stream
-            # tier is a different phase, so it is not required here.
+            # Tiers required to pass; the stream tier belongs to another phase.
             - name: EXPECTED_TIERS
               value: bronze,silver,gold
           volumeMounts:

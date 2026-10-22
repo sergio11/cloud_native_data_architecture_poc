@@ -1,13 +1,7 @@
-"""
-Modern Data Architecture POC - Shared hermetic test fixture (root conftest).
+"""Shared hermetic test fixture (root conftest).
 
-Strictest variant unified here so every suite (unit + integration) runs
-offline: Marquez HTTP POST fails instantly instead of burning the adapter's
-socket timeout on every lineage emit, and the Trino / PostgreSQL backends can
-never trigger (``TRINO_HOST`` / ``PGPASSWORD`` are stripped for the test).
-
-Local ``_hermetic_environment`` duplicates were removed from the individual
-modules; they all resolve to this single autouse fixture.
+Keeps every suite offline: Marquez POST fails instantly and the Trino /
+PostgreSQL backends are disabled by stripping ``TRINO_HOST`` / ``PGPASSWORD``.
 """
 
 from __future__ import annotations

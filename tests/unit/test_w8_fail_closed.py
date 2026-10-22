@@ -1,22 +1,7 @@
-"""
-W8 fail-closed coverage: guards whose failure paths no other test exercises.
+"""W8 fail-closed coverage: guards whose failure paths no other test exercises.
 
-1. ``ValidateContractUseCase.execute`` empty-discovery guard
-   (src/use_cases/validate_contract.py:78-87): a catalog advertising neither
-   products nor contracts must yield ``passed is False`` with a Discovery
-   error instead of an empty success - otherwise a mis-pointed repo root (or a
-   broken discovery implementation) would silently "validate" zero files.
-
-2. ``MarquezLineageAdapter.emit_job_event`` failure paths
-   (src/adapters/lineage/marquez_lineage.py):
-     * local audit write failure -> returns False (fail-closed: the audit
-       trail is the source of truth, so no audit means the emit failed);
-     * audit OK + Marquez HTTP non-2xx -> returns True (documented contract:
-       the local audit trail is the source of truth and the POST is best
-       effort - see the method docstring); with the audit ALSO failing it
-       returns False.
-   The root conftest monkeypatches ``requests.post`` to RAISE, so the non-2xx
-   tests re-patch it locally to return a 500 response object.
+Covers empty contract discovery and both failure paths of the Marquez lineage
+adapter's ``emit_job_event``.
 """
 
 from __future__ import annotations
@@ -61,7 +46,7 @@ class _CatalogStub:
 
 
 def test_empty_discovery_fails_closed_with_discovery_error() -> None:
-    """No products AND no contracts => passed=False + Discovery error (RF-15)."""
+    """No products AND no contracts => passed=False + Discovery error."""
     results = ValidateContractUseCase(catalog=_CatalogStub()).execute()
 
     assert results["passed"] is False
@@ -143,7 +128,7 @@ def test_emit_with_http_500_still_returns_true_when_audit_written(
 def test_emit_returns_false_when_audit_fails_and_http_returns_500(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both channels unhappy => False (the fail-closed case, RF-19)."""
+    """Both channels unhappy => False (the fail-closed case)."""
     blocked = tmp_path / "audit_blocked"
     blocked.mkdir()
     adapter = MarquezLineageAdapter(

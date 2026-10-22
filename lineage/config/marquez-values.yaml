@@ -1,9 +1,4 @@
-# ==============================================================================
-# Helm Values for Marquez API & Marquez Web UI on Kubernetes
-# ==============================================================================
-# Deploys Marquez metadata server, web UI, and dedicated PostgreSQL database
-# within the 'lineage' Kubernetes namespace for OpenLineage event ingestion.
-# ==============================================================================
+# Helm values for Marquez API, web UI and its PostgreSQL database in the lineage namespace.
 
 global:
   nameOverride: "marquez"
@@ -11,9 +6,7 @@ global:
   namespace: "lineage"
   imagePullSecrets: []
 
-# ------------------------------------------------------------------------------
-# Marquez Core API Service
-# ------------------------------------------------------------------------------
+# Marquez core API service
 api:
   enabled: true
   replicaCount: 2
@@ -119,9 +112,7 @@ api:
     - name: MARQUEZ_LOG_LEVEL
       value: "INFO"
 
-# ------------------------------------------------------------------------------
-# Marquez Web UI Service
-# ------------------------------------------------------------------------------
+# Marquez web UI service
 web:
   enabled: true
   replicaCount: 2
@@ -195,9 +186,7 @@ web:
     - name: MARQUEZ_PORT
       value: "5000"
 
-# ------------------------------------------------------------------------------
-# PostgreSQL Sub-Chart Configuration
-# ------------------------------------------------------------------------------
+# PostgreSQL sub-chart configuration
 postgresql:
   enabled: true
   image:
@@ -239,9 +228,7 @@ postgresql:
       namespace: "monitoring"
       interval: 30s
 
-# ------------------------------------------------------------------------------
-# Cluster Scheduling & Resilience
-# ------------------------------------------------------------------------------
+# Cluster scheduling and resilience
 affinity:
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:

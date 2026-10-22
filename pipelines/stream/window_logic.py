@@ -1,17 +1,9 @@
 """
-window_logic.py - Event-time windowing contract shared by the Flink jobs (RF-09).
+window_logic.py - Event-time windowing contract shared by the Flink jobs.
 
-Pure Python, no PyFlink imports, so the contract the streaming jobs honour is
-unit-testable without a cluster. Row builders are kept byte-identical to
-``BusinessAggregator.aggregate_tumbling_window``; tests/unit/test_stream_window_parity.py
-locks that in.
-
-Two rules that differ from the batch reference implementation, on purpose:
-
-* Event time is never invented. A payload without a usable ``timestamp`` is
-  dead-lettered, whereas the batch code falls back to ``order_date`` and then to
-  wall clock. Guessing here would place events in the wrong window.
-* Malformed payloads are dead-lettered, never coerced to zero.
+Pure Python (no PyFlink), so the contract is unit-testable without a cluster;
+row builders stay byte-identical to ``BusinessAggregator.aggregate_tumbling_window``.
+Event time is never invented and malformed payloads are dead-lettered.
 """
 
 from __future__ import annotations
@@ -24,13 +16,11 @@ from typing import Any
 
 logger = logging.getLogger("stream.window_logic")
 
-#: Tumbling window size. RF-09 caps end-to-end latency at 5 s and a tumbling
-#: window cannot emit before it closes, so the window itself must be under 5 s.
-#: Worst-case first emission = window remainder (4 s) + watermark lag (0.5 s).
+#: Tumbling window size: the 5 s end-to-end latency budget leaves room for the
+#: window remainder plus watermark lag.
 WINDOW_SIZE_MS: int = 4_000
 
-#: Absorbs the reordering from reading 3 Kafka partitions in parallel. At 0 ms
-#: real events would be dropped as late.
+#: Absorbs the reordering across the Kafka partitions; at 0 ms events arrive late.
 MAX_OUT_OF_ORDERNESS_MS: int = 500
 
 #: An event this late still corrects its row (the Iceberg sink upserts on

@@ -1,11 +1,8 @@
 {{- if and .Values.trino.enabled .Values.viewsInit.enabled }}
-# Mirror of pipelines/serving/unified_view.sql (serving live views + VIEW 1 / RF-11).
-# KEEP IN SYNC with that file: a Helm chart cannot read outside its own
-# directory, so the SQL is duplicated here verbatim. The init job applies it
-# with `trino --file /sql/unified_view.sql` after bootstrapping schemas.
-# Marketing/finance VIEWS 2-3 are intentionally ABSENT (removed K5/K8: their
-# source tables are produced by no pipeline - see the note at the end of the
-# SQL file). Do not re-add views without their producing pipelines.
+# Mirror of pipelines/serving/unified_view.sql: keep both files in sync (a Helm
+# chart cannot read outside its own directory). The init job applies it with
+# `trino --file /sql/unified_view.sql` after bootstrapping schemas.
+# Views 2-3 (marketing/finance) are intentionally absent: no producing pipeline.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,22 +13,35 @@ metadata:
     {{- include "s5-serving.labels" . | nindent 4 }}
 data:
   unified_view.sql: |
-    -- Catalog consolidation (2026-10-11): three Trino catalogs collapsed into
-    -- ONE catalog "iceberg". References formerly in "gold." and "stream." Trino
-    -- catalogs are now in "iceberg.sales.*" and "iceberg.sales.*" namespaces.
+    -- =============================================================================
+    -- Trino serving layer unified views.
+    --
+    -- Single query surface merging batch Gold data with the real-time Speed tables,
+    -- using 3-part <catalog>.<schema>.<table> identifiers. Stream windows are
+    -- aggregated to day grain before the anti-join so each key appears once.
+    --
+    -- One catalog: "iceberg" points at the Polaris REST catalog; Flink writes
+    -- iceberg.sales.orders_windowed and Spark writes iceberg.sales.daily_metrics.
+    -- =============================================================================
+
     CREATE SCHEMA IF NOT EXISTS iceberg.serving;
     CREATE SCHEMA IF NOT EXISTS iceberg.sales;
     CREATE SCHEMA IF NOT EXISTS iceberg.stream;
     CREATE SCHEMA IF NOT EXISTS iceberg.marketing;
     CREATE SCHEMA IF NOT EXISTS iceberg.finance;
 
+    -- LIVE VIEWS: pure pass-through over Iceberg tables; `_row_superseded` is a
+    -- SQLite-only versioning concept unknown to Iceberg/Trino.
     CREATE OR REPLACE VIEW iceberg.serving.gold_sales_daily_metrics_live AS
     SELECT * FROM iceberg.sales.daily_metrics;
 
     CREATE OR REPLACE VIEW iceberg.serving.stream_sales_orders_windowed_live AS
     SELECT * FROM iceberg.sales.orders_windowed;
 
+    -- VIEW 1: same semantics as QueryServingUseCase.execute: batch exact values
+    -- win, stream windows merged to day grain fill only keys absent from batch.
     CREATE OR REPLACE VIEW iceberg.serving.sales_unified_revenue AS
+
     SELECT
         order_date,
         status,
@@ -40,6 +50,7 @@ data:
         avg_order_value,
         source_tier
     FROM (
+        -- Historical batch (Gold): exact aggregates, always wins.
         SELECT
             order_date                                   AS order_date,
             status                                       AS status,
@@ -48,7 +59,10 @@ data:
             average_order_value                          AS avg_order_value,
             'batch_historical'                           AS source_tier
         FROM iceberg.sales.daily_metrics
+
         UNION ALL
+
+        -- Real-time stream (Speed): day grain, only keys absent from batch.
         SELECT
             s.order_date                                 AS order_date,
             s.status                                     AS status,
@@ -68,5 +82,12 @@ data:
         GROUP BY s.order_date, s.status
     ) unified
     ORDER BY order_date DESC, status DESC;
-{{- end }}
 
+    -- Example: SELECT * FROM iceberg.serving.sales_unified_revenue
+    --          WHERE order_date >= CURRENT_DATE - INTERVAL '30' DAY
+    --          ORDER BY order_date DESC LIMIT 20;
+
+
+    -- Views 2-3 (marketing/finance) are intentionally absent: no pipeline produces
+    -- marketing.campaigns, marketing.funnel_metrics or finance.financial_closings.
+{{- end }}

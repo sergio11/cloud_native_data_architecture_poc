@@ -1,19 +1,13 @@
 # frozen_string_literal: true
 
 # ==============================================================================
-# Modern Data Architecture POC - Master Rakefile
+# Modern Data Architecture POC - master Rakefile.
 #
-# THERE IS NO LOCAL EXECUTION PROFILE. The platform runs on Kubernetes only
-# (kind + Podman, per srs.txt RNF-04): ingestion is a CronJob, the medallion
-# layers are SparkApplications, the speed layer is a FlinkDeployment, and
-# serving is Trino. There is deliberately no task that executes the pipeline
-# locally, because a local run would be a different system pretending to be
-# the real one.
-#
-# What remains local is code verification only (tests, lint, types, contract
-# validation) plus cluster operations. Every cluster task is plain Ruby that
-# drives podman/kind/kubectl/helm directly - there are no shell scripts, so
-# the tasks behave the same on Windows (no bash/WSL dependency).
+# The platform runs on Kubernetes only (kind + Podman): ingestion is a CronJob,
+# the medallion layers are SparkApplications, the speed layer is a FlinkDeployment
+# and serving is Trino - there is no local execution profile. Only code
+# verification and cluster operations run locally. Every cluster task is plain
+# Ruby driving podman/kind/kubectl/helm, so there is no bash/WSL dependency.
 # ==============================================================================
 
 require 'rake'
@@ -25,7 +19,7 @@ require 'time'
 require 'socket'
 
 # Interleave our output with the child processes' (kubectl/helm write
-# unbuffered; without this the sections appear out of order when piped).
+# unbuffered, so sections appear out of order when piped).
 $stdout.sync = true
 
 def preflight_require!(cmd, name, remedy)
@@ -49,8 +43,7 @@ end
 # ------------------------------------------------------------------------------
 # Command helpers
 # ------------------------------------------------------------------------------
-# Runs a command capturing combined output. Never raises: returns [output, ok?].
-# Argument arrays are passed straight to the process (no shell interpolation).
+# Runs a command capturing combined output. Never raises: [output, ok?].
 def capture(*cmd, stdin: nil)
   out, status = if stdin
                   Open3.capture2e(*cmd, stdin_data: stdin)
@@ -72,9 +65,8 @@ end
 # ------------------------------------------------------------------------------
 # Podman / kind discovery
 # ------------------------------------------------------------------------------
-# The kind cluster may live on the rootful connection (`podman-machine-default-root`)
-# or the rootless one; rootless `podman ps` and `kind get clusters` are blind to
-# rootful containers, so BOTH connections are always probed (rootful first).
+# The kind cluster may live on the rootful or the rootless connection, and
+# rootless podman cannot see rootful containers, so both are always probed.
 KIND_LABEL = 'io.x-k8s.kind.cluster'
 
 def podman_connections
@@ -84,10 +76,8 @@ def podman_connections
   out.lines.map(&:strip).reject(&:empty?).sort_by { |n| n.end_with?('-root') ? 0 : 1 }
 end
 
-# Probes every podman connection once. Returns:
-#   connections: all configured connection names
-#   reachable:   connections whose daemon/machine answers
-#   containers:  kind cluster containers as {connection:, name:, status:}
+# Probes every podman connection once: returns :connections, :reachable and
+# :containers ({connection:, name:, status:}).
 def podman_probe
   connections = podman_connections
   reachable = []
@@ -109,27 +99,21 @@ def podman_probe
   { connections: connections, reachable: reachable, containers: containers }
 end
 
-# `podman ps --format {{.Status}}` reports "Up 5 minutes" / "Exited (0) ..."
-# (unlike Docker, it never says "Running").
+# `podman ps --format {{.Status}}` reports "Up ...", never "Running".
 def container_running?(container) = container[:status].start_with?('Up')
 
-# How many kind nodes belong to <name>. Used only to report what is about to be
-# deleted; returns 0 rather than raising when the cluster is already gone.
+# How many kind nodes belong to <name>; 0 when the cluster is already gone.
 def probe_count(cluster_name)
   probe = podman_probe
   probe[:containers].count { |c| c[:name].start_with?("#{cluster_name}-") }
 end
 
-# Applies the storage/compute domain roles to the kind workers, by name.
+# Applies the storage/compute domain roles to the kind workers, by node name.
 #
-# The roles cannot live in cluster-config.yaml: kind turns them into the
-# kubelet's --node-labels, and a kubelet that gets a kubernetes.io/ label it
-# does not recognise exits with "failed to validate kubelet flags" instead of
-# booting. See infra/kind/cluster-config.yaml for the full kubelet message.
-#
-# kind names workers <cluster>-worker, <cluster>-worker2, ... in order, so the
-# index decides the role. Missing nodes are reported, never fatal: a
-# single-node or two-node cluster is a legitimate shape.
+# The roles cannot live in cluster-config.yaml: kind turns them into the kubelet's
+# --node-labels and the kubelet refuses to boot with an unknown kubernetes.io/
+# label. kind names workers in order, so the index decides the role; missing
+# nodes are reported, never fatal.
 def label_worker_roles(cluster_name)
   info_msg('labelling kind workers with their domain roles...')
   roles = { 'worker' => 'storage', 'worker2' => 'compute' }
@@ -162,19 +146,15 @@ def label_worker_roles(cluster_name)
   end
 end
 
-# Imports one image into one kind node, from the machine's own store.
-# Returns true when the node ends up holding it under the requested name.
+# Imports one image into one kind node; true when the node ends up holding it.
 def load_image_into(node, image)
   listing, ok = capture('podman', '--connection', node[:connection], 'images',
                         '--format', '{{.Repository}}:{{.Tag}} {{.Id}}')
   abort "\e[31mpodman is not reachable on connection #{node[:connection]}\e[0m" unless ok
 
-  # Podman does NOT store an unqualified registry the way Docker does: a
-  # `podman build -t poc/flink-stream:0.1.0` lands as
-  # localhost/poc/flink-stream:0.1.0, so a lookup for the docker.io/ form finds
-  # nothing and the task reports "not built yet" for an image that was built
-  # seconds earlier. Compare on repository:tag with the registry prefix removed
-  # from BOTH sides, so docker.io/x, localhost/x and x all match.
+  # Podman stores an unqualified build as localhost/... while Docker uses
+  # docker.io/, so compare repository:tag with the registry prefix removed from
+  # both sides.
   wanted = short_image_ref(image)
   entry = listing.lines.find { |line| short_image_ref(line.split.first.to_s) == wanted }
   if entry.nil?
@@ -183,19 +163,13 @@ def load_image_into(node, image)
     return false
   end
 
-  # podman reports the image config digest, which is the same digest containerd
-  # stores as a blob, so this is a precise identity check. `ctr images list`
-  # cannot be used for it: that column is the MANIFEST digest, which changes on
-  # every re-save and is not what the pod pins.
+  # podman's image config digest is the same blob containerd stores (unlike
+  # `ctr images list`, which shows the manifest digest).
   store_ref = entry.split.first
   short_id = entry.split[1][0, 12]
 
-  #  Already there, with THIS digest, under the right name? Nothing to do.
-  #
-  #  Both conditions are required. The name alone is not enough: a rebuild
-  #  reuses poc/flink-stream:0.1.0, so the node still holds that tag pointing at
-  #  the PREVIOUS image id and the task would skip the copy and leave the
-  #  cluster running yesterday's code.
+  # Skip only when the node holds this name AND this digest: a rebuild reuses
+  # the tag, so the name alone can point at the previous image id.
   node_images, listed = capture('podman', '--connection', node[:connection], 'exec',
                                 node[:name], 'ctr', '-n', 'k8s.io', 'images', 'ls', '-q')
   node_blobs, bl = capture('podman', '--connection', node[:connection], 'exec',
@@ -211,26 +185,16 @@ def load_image_into(node, image)
   end
 
   info_msg("#{image} -> #{node[:name]} (image #{short_id}, copying inside the machine)")
-  # Two phases so progress is measurable: the save grows the tar, then the
-  # import grows the node blob store. One piped command hides both and looks
-  # exactly like a hang.
+  # Two phases so progress is measurable: the save grows the tar, the import
+  # grows the node blob store.
   #
-  # The tar is named after the image id and KEPT in the machine. podman save of
-  # this image costs ~5 minutes and most of it is layers the node already has,
-  # so re-saving on every retry threw that away over and over. Keyed by id, a
-  # retry after a failed import pays only the import.
-  #
-  # /var/tmp, NOT /tmp: in the podman machine /tmp is a tmpfs, so a tar there
-  # is RAM. Writing a 1 GB image tar into a 2.9 GB tmpfs took the whole box
-  # down (the machine stopped answering the API server) - and the tars pile up,
-  # because they are kept as a cache. On the root filesystem they cost disk,
-  # of which there is plenty.
+  # The tar is named after the image id and KEPT as a cache, so a retry after a
+  # failed import pays only the import. It lives in /var/tmp, not /tmp: in the
+  # machine /tmp is a tmpfs, and a 1 GB tar there is RAM.
   tar = "/var/tmp/kind-load-#{short_id}.tar"
 
   info_msg('  phase 1/2: podman save inside the machine')
-  # test -s first: `podman save -o` refuses to touch an existing docker-archive
-  # ("docker-archive doesn't support modifying existing images"), so a tar left
-  # behind by an interrupted run would otherwise break every subsequent run.
+  # test -s first: `podman save -o` refuses to touch an existing archive.
   save_out, saved = machine_script("test -s #{tar} && echo CACHED || " \
                                    "(rm -f #{tar}; podman save -o #{tar} #{store_ref})") do |_tick|
     size = machine_probe("stat -c %s #{tar} 2>/dev/null || echo 0")
@@ -250,32 +214,20 @@ def load_image_into(node, image)
   ok_msg("  tar ready: #{final_size / 1_048_576} MB in the machine")
 
   info_msg("  phase 2/2: ctr images import into #{node[:name]}")
-  # The tar is deliberately NOT removed: it is the cache that makes the next
-  # attempt cost only the import. `cluster:image:clean` removes it.
+  # The tar is kept as a cache; `cluster:image:clean` removes it.
   out, success = machine_script("cat #{tar} | podman exec -i #{node[:name]} " \
                                 'ctr -n k8s.io images import -') do |_tick|
-    # Bytes, not blob count: `ctr images import` stages the whole tar before it
-    # commits anything, and almost every layer is already in the node
-    # (content addressed), so the new-blob delta stays at 0 through a transfer
-    # that is actually running at full speed.
+    # Bytes, not blob count: `ctr images import` stages the whole tar first, so
+    # the new-blob delta stays at 0 during a fast transfer.
     used, = capture('podman', '--connection', node[:connection], 'exec', node[:name],
                     'df', '--output=used', '-B1', '/var/lib/containerd')
     warn_msg("  import: #{used.to_s.strip.split("\n").last.to_s.strip.to_i / 1_048_576} MB used by the node store")
   end
 
-  # Phase 3: alias the image under the docker.io/ name the charts use.
-  #
-  # podman stores an unqualified build as localhost/poc/flink:0.1.0, and
-  # `ctr images import` preserves that spelling. Kubernetes resolves a bare
-  # reference to docker.io/ FIRST: the FlinkDeployment says
-  # `image: poc/flink-stream:0.1.0`, the kubelet turns it into
-  # docker.io/poc/flink-stream:0.1.0, finds no such tag and fails with
-  #   failed to resolve reference: pull access denied ... insufficient_scope
-  # even though the image is sitting right there in the node.
-  #
-  # The tag is content-addressed, so the alias costs no bytes. Doing it here
-  # keeps the charts portable (they keep saying docker.io/poc/...) instead of
-  # hardcoding localhost/ into every image reference.
+  # Phase 3: alias the image under the docker.io/ name the charts use. podman
+  # imports it as localhost/..., but a bare reference resolves to docker.io/
+  # first, so without the alias the pull fails. The tag is content-addressed and
+  # costs no bytes.
   if store_ref != image
     tag_out, tagged = capture('podman', '--connection', node[:connection], 'exec',
                               node[:name], 'ctr', '-n', 'k8s.io', 'images',
@@ -299,17 +251,8 @@ def load_image_into(node, image)
   true
 end
 
-# Reduces an image reference to repository:tag with any registry prefix removed.
-#
-# Podman resolves an unqualified registry (podman build -t poc/flink:0.1.0) to
-# localhost/poc/flink:0.1.0 and keeps the fully-qualified form only if you
-# write it yourself, so the same image can be listed under either name. The
-# default port is dropped too, since :5000/... is the other spelling.
-#
-#   docker.io/poc/flink:0.1.0  -> poc/flink:0.1.0
-#   localhost/poc/flink:0.1.0   -> poc/flink:0.1.0
-#   poc/flink:0.1.0            -> poc/flink:0.1.0
-#   docker.io/library/busybox:1.36 -> library/busybox:1.36
+# Reduces an image reference to repository:tag with any registry prefix (or
+# default port) removed, so docker.io/x, localhost/x and x all agree.
 def short_image_ref(ref)
   repo, _, tag = ref.to_s.partition(':')
   repo = repo.sub(%r{\A(localhost|docker\.io|index\.docker\.io|registry-1\.docker\.io)/}, '')
@@ -337,13 +280,9 @@ def drop_image_tar(image)
   ok ? info_msg("dropped the cached tar of #{image}") : warn_msg("could not drop the tar of #{image}")
 end
 
-# Removes the untagged images of a node (the PREVIOUS versions of the images
-# that were reloaded) and the content they referenced.
-#
-# NOT `crictl rmi --prune`: that removes every image no RUNNING container
-# uses, including the one that was just loaded and is about to be used by a
-# pod that has not started yet (the pod then fails with "pull access denied"
-# for an image that is sitting in the node).
+# Removes a node's untagged images (the previous versions of reloaded images).
+# NOT `crictl rmi --prune`: that also removes the image just loaded for a pod
+# that has not started yet.
 def prune_node_images(node)
   script = 'crictl images -o json | python3 -c "import json,sys; ' \
            'd=json.load(sys.stdin); ' \
@@ -354,11 +293,8 @@ def prune_node_images(node)
   ok ? info_msg("pruned the untagged images of #{node[:name]}") : warn_msg("could not prune #{node[:name]}")
 end
 
-# Names of the kind clusters that exist right now.
-# `kind` prints "enabling experimental podman provider" (once, when it activates
-# the podman provider) and "No kind clusters found." on the same stream as the
-# list, so the raw output has to be filtered or both of those lines are read as
-# cluster names. Returns [] when kind is missing or there is nothing to report.
+# Names of the kind clusters that exist right now. kind prints its provider
+# notice and "No kind clusters found." on the same stream, so both are filtered.
 def kind_clusters
   out, ok = capture('kind', 'get', 'clusters')
   return [] unless ok
@@ -370,26 +306,10 @@ def kind_clusters
 end
 
 # Runs a shell script INSIDE the podman machine, printing elapsed time every
-# 15 seconds. Three reasons this exists instead of a bare `sh`:
-#
-#   * Transferring a 1.3 GB image is silent until it finishes, and a silent
-#     copy is indistinguishable from a hang - so the task must show a heartbeat.
-#   * Doing the copy from the Windows shell sends every byte across the ssh
-#     tunnel twice: VM -> ssh -> host -> ssh -> VM. Running the pipeline inside
-#     the machine keeps `podman save` reading the machine's own store and never
-#     touches the tunnel at all.
-#   * `podman machine ssh` JOINS its arguments with spaces and hands the result
-#     to a remote shell. A multi-line script is therefore split at every `;` and
-#     newline: `sudo -n sh -c 'set -e; podman save ...'` degenerates into
-#     `sudo -n sh -c set -e; podman save ...`, where only the first command runs
-#     as root and the rest silently run as the ssh user against the wrong store
-#     ("image not known"). The script is therefore collapsed to ONE line and
-#     wrapped in single quotes so it survives as a single remote argument.
-#
-# `podman machine ssh` reaches the machine behind the DEFAULT connection; both
-# configured connections point at the same machine, so which one is default does
-# not change what is read here. Inside the VM the images and the kind container
-# live in root's store, hence sudo.
+# 15 s, so a large transfer is not mistaken for a hang. The script is collapsed
+# to one line and single-quoted because `podman machine ssh` joins its arguments
+# and hands them to a remote shell (a `;` would split the sudo scope). Inside the
+# VM the images live in root's store, hence sudo.
 def machine_script(script)
   one_line = script.gsub(/\s+/, ' ').strip
   if one_line.include?("'")
@@ -413,9 +333,8 @@ def machine_script(script)
   [out, status&.success?]
 end
 
-# Byte-exact progress for a machine script that streams a file, so a slow copy
-# is visibly progressing instead of looking like a hang. `probe` is a script
-# run on every heartbeat and must print a single short line.
+# Progress for a machine script that streams a file: `probe` runs on every
+# heartbeat and must print one short line.
 def machine_probe(probe)
   out, = capture('podman', 'machine', 'ssh', 'sudo', '-n', 'sh', '-c', "'#{probe.gsub(/\s+/, ' ').strip}'")
   out.lines.last.to_s.strip
@@ -444,19 +363,13 @@ rescue StandardError
   false
 end
 
-# kind serves a self-signed certificate on 127.0.0.1; every manual command in
-# this repo uses this flag, so all Helm invocations go through the same constant.
+# kind serves a self-signed certificate on 127.0.0.1.
 HELM_KUBE_ARGS = ['--kube-insecure-skip-tls-verify'].freeze
 
-# The Helm releases each startup profile installs (release name == chart dir,
-# namespace platform). Mirrors the contract documented in infra/profiles/*.yaml.
-#
-# One profile = one phase of the platform, and the profiles are EXCLUSIVE
-# (RC-02: 8 GB of RAM cannot hold the whole stack at once, so the heavy
-# engines run one after the other). Trino is the serving phase on its own:
-# Spark (1.8 GiB of limits), Flink (1.8 GiB) and Trino (1.3 GiB) do not fit
-# together, and they do not need to: the data they exchange lives in the
-# lakehouse (MinIO + Iceberg), not in a pod.
+# The Helm releases each startup profile installs (release == chart dir,
+# namespace platform). The profiles are exclusive: the heavy engines do not fit
+# together in RAM, and the data they exchange lives in the lakehouse, not in a
+# pod. Mirrors the contract in infra/profiles/*.yaml.
 PROFILE_CHARTS = {
   'platform' => %w[s1-ingestion s2-lakehouse s7-fabric],
   'stream'   => %w[s1-ingestion s2-lakehouse s4-stream],
@@ -467,9 +380,8 @@ PROFILE_CHARTS = {
 }.freeze
 
 # Extracts `subsystems.<chart>` from infra/profiles/<profile>.yaml into a
-# Tempfile for `helm upgrade -f`. Returns the Tempfile (caller unlinks), nil
-# when the profile has no section for the chart (install with chart defaults),
-# or :error when the profile cannot be read/parsed.
+# Tempfile for `helm upgrade -f`; nil when the section is absent, :error when
+# the profile cannot be read.
 def extract_profile_values(profile, chart)
   doc = YAML.load_file(File.join('infra', 'profiles', "#{profile}.yaml"))
   subsystems = doc.is_a?(Hash) ? doc['subsystems'] : nil
@@ -484,39 +396,20 @@ rescue Psych::Exception, Errno::ENOENT
   :error
 end
 
-# Helm 4 changed the default apply method: `helm upgrade --server-side`
-# defaults to "auto", which means "keep the method the previous revision of
-# this release used". Every release in this repo was first installed with
-# Helm 4's own default (server-side apply), so every later upgrade keeps
-# applying with SSA - and SSA rejects the `helm.sh/hook-*` annotations of a
-# hook resource:
-#
-#   failed to create resource: server-side apply failed for object
-#   platform/kafka-topic-creator batch/v1, Kind=Job: failed to create typed
-#   patch object (platform/kafka-topic-creator; batch/v1, Kind=Job):
-#   .metadata.helm.sh/hook-timeout: field not declared in schema
-#
-# That killed s2-lakehouse (rev 13, on hook-weight) and s4-stream (rev 4, on
-# hook-timeout) and left s2-lakehouse stuck in pending-upgrade. Client-side
-# apply computes a strategic merge patch, where removing an annotation is an
-# ordinary patch operation instead of an undeclared field, so the hook
-# resources deploy again.
+# Client-side apply, forced. Helm 4 defaults `--server-side` to "auto", which
+# reuses the method of the previous revision; server-side apply then rejects the
+# `helm.sh/hook-*` annotations of a hook resource ("field not declared in
+# schema"). Client-side apply patches them as ordinary fields.
 HELM_APPLY_ARGS = ['--server-side=false'].freeze
 
-# How long Helm waits for a hook Job. The default is 5 minutes and the
-# catalogue bootstrap alone takes 6 to 11 minutes on this box, so the default
-# kills the upgrade with "pre-upgrade hooks failed: ... context deadline
-# exceeded" while the Job is still doing its work. The per-hook
-# `helm.sh/hook-timeout` annotation is the precise control; this is the
-# ceiling that applies to the release as a whole.
+# How long Helm waits for a hook Job. The default (5 min) is shorter than the
+# catalogue bootstrap on this box. The per-hook `helm.sh/hook-timeout` is the
+# precise control; this is the ceiling for the release.
 HELM_TIMEOUT_ARGS = ['--timeout', '20m'].freeze
 
-# Streams `helm upgrade --install` for one chart. Returns true/false.
-#
-# `sets` are --set overrides. They win over the profile's values file, which
-# is what the ramp increments use to switch ONE feature of a chart on or off
-# without forking the profile (and without duplicating the RAM budget in a
-# second file that would drift).
+# Streams `helm upgrade --install` for one chart; true/false. `sets` are --set
+# overrides that win over the profile's values file, used by the ramp increments
+# to toggle one feature without forking the profile.
 def helm_upgrade(chart, values_path, sets = {})
   cmd = ['helm', 'upgrade', '--install', chart, "infra/helm/#{chart}",
          '-n', 'platform', *HELM_KUBE_ARGS, *HELM_APPLY_ARGS, *HELM_TIMEOUT_ARGS]
@@ -669,11 +562,9 @@ namespace :governance do
   end
 end
 
-# ---------------------------------------------------------------------------
-# Cluster operations (Kubernetes). These do not run the pipelines; they
-# deploy and observe them. kind runs on Podman - possibly the rootful
-# connection - so discovery always probes every connection.
-# ---------------------------------------------------------------------------
+# Cluster operations (Kubernetes): deploy and observe the pipelines, never run
+# them. kind runs on Podman (possibly rootful), so discovery probes every
+# connection.
 namespace :cluster do
   desc 'Guided status: kind container, API, nodes, pods, Helm releases + next step'
   task :status do
@@ -777,19 +668,10 @@ namespace :cluster do
       abort "\e[31mNo kind cluster container found. Run: rake cluster:setup\e[0m"
     end
 
-    # The nodes are started ONE AT A TIME, control plane first.
-    #
-    # Starting all three at once is what turns a slow disk into an outage:
-    # each kubelet pulls, unpacks and mounts its images at the same time, the
-    # filesystem (the WSL2 rootfs lives on the Windows filesystem through
-    # 9P/virtiofs) saturates, and etcd - which fsyncs on every Raft write -
-    # stops answering. The apiserver then times out on every request and the
-    # control plane crash-loops:
-    #
-    #   http: Handler timeout ... rpc error: code = Canceled desc = context canceled
-    #   load average: 63.52, 53.10, 32.15   (on 4 CPUs)
-    #
-    # With the API up first, the workers come up against a working etcd.
+    # The nodes are started one at a time, control plane first: starting all
+    # three together saturates the filesystem, etcd stops answering and the
+    # control plane crash-loops. With the API up first, the workers come up
+    # against a working etcd.
     probe[:containers].each do |c|
       if container_running?(c)
         ok_msg("container #{c[:name]} already running (#{c[:connection]})")
@@ -890,11 +772,9 @@ namespace :cluster do
   task :diagnose, [:name] do |_t, args|
     target = args[:name].to_s
 
-    # `kubectl logs` on a restarted container is EMPTY: the terminated container's
-    # log lives only in the kubelet's last-termination buffer, reachable with
-    # --previous, and it is overwritten by the NEXT restart. Chasing a crash-loop
-    # with `cluster:logs` therefore always shows the newest, least informative
-    # attempt. This task grabs every window at once, into a file that survives.
+    # `kubectl logs` on a restarted container is empty: the previous log lives
+    # only in the kubelet's last-termination buffer (--previous), and the next
+    # restart overwrites it. This task captures every window into a file.
     banner 'CLUSTER DIAGNOSE'
     stamp = Time.now.strftime('%Y%m%d-%H%M%S')
     out_dir = File.join('data', 'diagnostics')
@@ -935,8 +815,8 @@ namespace :cluster do
         f.puts format('%-22s %-38s %-24s %d', p[:ns], p[:name], p[:status], p[:restarts])
       end
 
-      # Jobs are where this platform actually fails (bootstrap/hook Jobs), and
-      # a failed Job's pod is often already gone: its state lives in .status.
+      # Jobs are where this platform fails (bootstrap/hook Jobs), and a failed
+      # Job's pod is often gone: its state lives in .status.
       jobs_out, jobs_ok = capture('kubectl', 'get', 'jobs', '-A', '--no-headers')
       if jobs_ok && !jobs_out.strip.empty?
         f.puts "\n## Jobs\n"
@@ -949,8 +829,7 @@ namespace :cluster do
         end
       end
 
-      # Custom resources: the Flink/Spark operators report job-level failures
-      # here, not on any pod, so a pod-only sweep misses them entirely.
+      # The Flink/Spark operators report job-level failures here, not on a pod.
       { 'flinkdeployments' => 'FlinkDeployments',
         'scheduledsparkapplications' => 'ScheduledSparkApplications',
         'sparkapplications' => 'SparkApplications' }.each do |plural, title|
@@ -1053,19 +932,10 @@ namespace :cluster do
     # 4. Start (no-op when already running) and wait for API + nodes
     Rake::Task['cluster:start'].invoke
 
-    # 4b. Domain roles on the kind workers.
-    #
-    # Applied here, by NODE NAME, and not in infra/kind/cluster-config.yaml:
-    # kind turns a node's `labels:` into the kubelet's --node-labels flag, and
-    # the kubelet refuses to start when that carries a kubernetes.io/ label
-    # outside its allow-list ("failed to validate kubelet flags: unknown
-    # 'kubernetes.io' or 'k8s.io' labels specified with --node-labels:
-    # [node-role.kubernetes.io/storage node-role.kubernetes.io/worker]"). The
-    # worker kubelet then crash-loops and never joins.
-    #
-    # By name, not by selector: a selector on node-role.kubernetes.io/storage
-    # would match nothing, because that is the label being set in the first
-    # place.
+    # 4b. Domain roles on the kind workers, applied by node name (not in
+    # cluster-config.yaml: kind turns `labels:` into the kubelet's --node-labels
+    # and the kubelet refuses an unknown kubernetes.io/ label). By name and not
+    # by selector, since the selector label is what is being set.
     label_worker_roles(ENV.fetch('CLUSTER_NAME', 'poc-data-platform'))
 
     # 5. Namespaces with domain/platform labels
@@ -1085,15 +955,9 @@ namespace :cluster do
         run! 'kubectl', 'create', 'namespace', ns
         ok_msg("namespace #{ns} created")
       end
-      # Labels only, and only with values a label can hold: a label value must
-      # match ([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9] - no spaces, no commas.
-      # The description is prose ("Infrastructure, catalogs, message broker,
-      # object storage"), so putting it in data-platform.io/description made
-      # kubectl reject the whole command:
-      #   invalid label value: ... a valid label must consist of alphanumeric
-      #   characters, '-', '_' or '.'
-      # which aborted cluster:create before any profile was deployed. Prose
-      # belongs in an annotation.
+      # Labels hold no spaces or commas, so the prose description goes in an
+      # annotation instead - a label value with it makes kubectl reject the
+      # whole command.
       run! 'kubectl', 'label', 'namespace', ns,
            'data-mesh.io/domain=' + ns, 'data-platform.io/managed=true', '--overwrite'
       run! 'kubectl', 'annotate', 'namespace', ns,
@@ -1169,9 +1033,8 @@ namespace :cluster do
     end
 
     info_msg("deleting cluster '#{cluster_name}' (nodes: #{probe_count(cluster_name)})...")
-    # --kubeconfig is not passed on purpose: `kind delete` only needs the node
-    # containers, and passing the kubeconfig makes it also rewrite the current
-    # context, which loses the poc-qa context the operator may still be using.
+    # --kubeconfig is not passed on purpose: `kind delete` would then also
+    # rewrite the current context, losing whatever context the operator uses.
     deleted, deleted_ok = capture('kind', 'delete', 'cluster', '--name', cluster_name)
     unless deleted_ok
       err_msg('kind delete failed:')
@@ -1248,14 +1111,10 @@ namespace :cluster do
     banner 'OLTP SEED'
     records = (args[:records] || 105).to_i
 
-    # The schema is created by the postgres init script, but the DATA is not:
-    # the chart has no seeding step, so without this the medallion reads an
-    # empty OLTP source and reports EMPTY for every entity (which is what it
-    # did before this task existed).
-    #
-    # The seeder runs on the HOST, because it needs Faker and numpy and the
-    # Postgres service is a ClusterIP: it reaches the database through a
-    # port-forward that this task opens and closes.
+    # The chart creates the schema but seeds no DATA, so without this the
+    # medallion reads an empty OLTP source. The seeder runs on the host (it
+    # needs Faker/numpy) and reaches the ClusterIP database through a
+    # port-forward this task opens and closes.
     values = YAML.load_file(File.join('infra', 'helm', 's1-ingestion', 'values.yaml'))
     env = values.dig('ingestionRunner', 'env') || {}
     password = env['PGPASSWORD']
@@ -1326,15 +1185,9 @@ namespace :cluster do
     ok_msg("Profile '#{profile}' removed successfully! (#{removed} release(s) uninstalled)")
   end
 
-  # ---------------------------------------------------------------------------
-  # Images
-  #
-  # `kind load docker-image` cannot do this job on Podman: kind drives the
-  # ROOTLESS socket while the images are built into the ROOTFUL store, so its
-  # presence check answers "not present locally" and it refuses to load. The
-  # images are small, local and versionless (poc/*:0.1.0), so they are loaded
-  # through containerd directly instead.
-  # ---------------------------------------------------------------------------
+  # Images: `kind load docker-image` does not work on Podman (kind drives the
+  # rootless socket while the images are in the rootful store), so they are
+  # loaded through containerd directly.
   POC_IMAGES = %w[
     docker.io/poc/ingest:0.1.0
     docker.io/poc/spark-medallion:0.1.0
@@ -1342,10 +1195,8 @@ namespace :cluster do
     docker.io/poc/lineage-webhook:0.1.0
   ].freeze
 
-  # How each local image is built: tag => [dockerfile, build context].
-  # The context is the directory the COPY paths are relative to: the repo
-  # root for the three images that carry the repository code, and
-  # lineage/config for the webhook, which is self-contained.
+  # How each local image is built: tag => [dockerfile, build context]. The
+  # context is the repo root, except for the self-contained lineage webhook.
   POC_IMAGE_BUILDS = {
     'docker.io/poc/ingest:0.1.0'         => ['infra/docker/ingest.Dockerfile', '.'],
     'docker.io/poc/spark-medallion:0.1.0' => ['infra/docker/spark.Dockerfile', '.'],
@@ -1390,13 +1241,12 @@ namespace :cluster do
       end
       ok_msg("#{built.size} image(s) built")
 
-      # The build layers of a rebuilt image are dangling: they are the biggest
-      # consumer of the machine's disk and nothing else removes them.
+      # The build layers of a rebuilt image are dangling; nothing else removes
+      # them.
       capture('podman', 'image', 'prune', '-f')
 
-      # RNF-03 asks for ONE versioned procedure with no manual step, so the
-      # build does not stop at the image: it also puts it where the cluster
-      # can use it. `cluster:image:load` on its own still works.
+      # The build also loads the image into the cluster; `cluster:image:load`
+      # on its own still works.
       Rake::Task['cluster:image:load'].invoke(built.join('+'))
     end
 
@@ -1404,13 +1254,9 @@ namespace :cluster do
     task :load, [:images] do |_t, args|
       banner 'IMAGE LOAD'
       probe = podman_probe
-      # EVERY node, not the first one. The scheduler spreads pods across all
-      # three kind nodes, and a local image only exists inside the containerd
-      # of the node it was imported into: loading into the control-plane alone
-      # leaves the workers with nothing, and the pod that lands on a worker
-      # fails with
-      #   failed to pull image: insufficient_scope: authorization failed
-      # which looks exactly like a missing image and is not one.
+      # EVERY node, not the first one: the scheduler spreads pods across all
+      # three nodes, and a local image exists only in the containerd of the node
+      # it was imported into.
       nodes = probe[:containers]
       if nodes.empty?
         abort "\e[31mNo kind cluster container found. Run: rake cluster:create\e[0m"
@@ -1427,12 +1273,8 @@ namespace :cluster do
           loaded_into[image] << node[:name] if load_image_into(node, image)
         end
 
-        # The tar was a cache so that a failed import would not pay for the
-        # save again. Once the image is in every node it is dead weight on
-        # the machine's disk (a Spark image is ~950 MB), and so is the
-        # PREVIOUS version of the image in each node's containerd store:
-        # four rebuilds left ~10 GB of dead blobs per node, which is what
-        # filled the host disk.
+        # Once the image is in every node, the cached tar and the previous
+        # versions in each node's containerd store are dead weight.
         next unless loaded_into[image].size == nodes.size
 
         drop_image_tar(image)
@@ -1460,11 +1302,8 @@ namespace :cluster do
                         "'rm -f /var/tmp/kind-load-*.tar'")
       abort "\e[31mcould not reach the podman machine\e[0m" unless ok
 
-      # Every rebuild of an image left its PREVIOUS version in the node's
-      # containerd store, untagged, and nothing ever removed it: four rebuilds
-      # of the Spark image left ~10 GB of dead blobs per node, and the host
-      # disk (the machine's VHDX) filled up. The untagged images are pruned
-      # after every load, and this task prunes whatever is left.
+      # Every rebuild leaves the previous image untagged in the node's containerd
+      # store; the loads prune these, and this task prunes whatever is left.
       probe = podman_probe
       probe[:containers].each { |node| prune_node_images(node) }
 
@@ -1486,8 +1325,7 @@ namespace :cluster do
 end
 
 # The Trino image, read from the chart so the demo and the deployment cannot
-# drift apart. A hardcoded tag here is how the serving layer ended up running
-# a Trino that could not talk to Polaris at all.
+# drift apart.
 def trino_image
   doc = YAML.load_file(File.join('infra', 'helm', 's5-serving', 'values.yaml'))
   image = doc.dig('trino', 'image')
@@ -1496,17 +1334,10 @@ rescue StandardError
   'trinodb/trino:455'
 end
 
-# ------------------------------------------------------------------------------
 # The windowed speed-layer table cannot be counted with a query engine here:
-#
-#   * PyIceberg refuses the table ("does not yet support equality deletes"),
-#     because the Flink sink writes in upsert mode;
-#   * Trino cannot be up AT THE SAME TIME as Flink on a 6 GiB box, which is the
-#     whole reason the increments exist.
-#
-# So the state is read from the table metadata in MinIO: the current
-# snapshot's summary carries total-records and total-data-files.
-# ------------------------------------------------------------------------------
+# PyIceberg refuses it (the Flink sink writes upserts) and Trino cannot be up at
+# the same time as Flink on this box. The state is read from the table metadata
+# in MinIO instead.
 def orders_windowed_state(table = 'orders_windowed', namespace = 'sales')
   user, = capture('kubectl', 'get', 'deploy', 'minio', '-n', 'platform', '-o',
                   'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="MINIO_ROOT_USER")].value}')
@@ -1537,8 +1368,7 @@ def snapshot_records(state)
   snapshot.dig('summary', 'total-records').to_s
 end
 
-# Every line the Iceberg committer writes when it closes a checkpoint:
-#   2026-10-22 15:23:15,603 INFO ... Committed rowDelta to table: ..., checkpointId 2 in 13265 ms
+# Every line the Iceberg committer writes when it closes a checkpoint.
 def commit_timestamps
   out, ok = capture('kubectl', 'logs', '-n', 'sales', '-l', 'component=taskmanager', '--tail=1000')
   return [] unless ok
@@ -1562,14 +1392,10 @@ def flink_state(deployment, namespace)
   ok ? JSON.parse(out) : nil
 end
 
-# Rotates the Kafka consumer group and rewinds to offset 0 on the live
-# FlinkDeployment. The env lives in the pod templates (the operator puts it
-# there), not in spec.env, and main() runs in the JobManager pod, so BOTH
-# templates are patched.
-#
-# Same rule as pipelines/orchestration/flink_replay.py: a group that has
-# already committed offsets ignores KAFKA_START_OFFSET=earliest, so rotating
-# the group is what actually makes the replay happen.
+# Rotates the Kafka consumer group and rewinds to offset 0. The env lives in the
+# pod templates (the operator puts it there), so both templates are patched. A
+# group that already committed offsets ignores KAFKA_START_OFFSET=earliest, so
+# rotating the group is what makes the replay happen.
 def rotate_consumer_group!(deployment, namespace, state)
   abort "\e[31m#{deployment} is not deployed.\e[0m" if state.nil?
 
@@ -1610,8 +1436,7 @@ def rotate_consumer_group!(deployment, namespace, state)
   [group_var, group]
 end
 
-# Waits for a commit NEWER than the one seen before the patch: that is the
-# proof the job came back up and flushed the replayed windows.
+# Waits for a commit newer than the one seen before the patch.
 def wait_for_new_commit(deployment, namespace, previous_commit, timeout_minutes: 20)
   info_msg('esperando a que el job relea el log y cierre un checkpoint...')
   deadline = Time.now + (timeout_minutes * 60)
@@ -1651,10 +1476,8 @@ def serving_up
   wait_for_workload('platform', 'deploy/trino')
 end
 
-# One line out of the Trino CLI: the digest both reads have to agree on.
-#
-# The Deployment reports Ready before the server accepts queries ("Trino
-# server is still initializing"), so the read is retried for a few minutes.
+# One line out of the Trino CLI. The Deployment reports Ready before the server
+# accepts queries, so the read is retried for a few minutes.
 def trino_digest(sql, timeout_minutes: 6)
   deadline = Time.now + (timeout_minutes * 60)
   loop do
@@ -1663,9 +1486,8 @@ def trino_digest(sql, timeout_minutes: 6)
                       '--image-pull-policy=IfNotPresent', '--command', '--',
                       'trino', '--server', 'http://trino.platform.svc.cluster.local:8080',
                       '--output-format', 'TSV', '--execute', sql)
-    # kubectl prints "pod ... deleted from platform namespace" AFTER the query
-    # output, so the answer is picked by its shape (TSV row starting with the
-    # row count) and not by position.
+    # kubectl prints its "pod deleted" line after the query output, so the answer
+    # is picked by shape (a TSV row starting with the row count).
     line = out.lines.map(&:strip).find { |candidate| candidate.match?(/^\d+\t/) }
     return line if ok && line
     unless out.to_s.include?('still initializing')
@@ -1734,9 +1556,8 @@ namespace :stream do
     state = flink_state(deployment, namespace)
     abort "\e[31m#{deployment} is not deployed. Bring the speed layer up first: rake ramp:stream\e[0m" if state.nil?
 
-    # Flink and Trino do not fit in this box AT THE SAME TIME (that is what the
-    # increments exist for), so the two reads are taken with the job suspended:
-    # upgradeMode=stateless makes suspending cheap and safe.
+    # Flink and Trino do not fit in this box at the same time, so both reads are
+    # taken with the job suspended (upgradeMode=stateless makes it cheap).
     info_msg('suspendiendo el job para dejar sitio a Trino...')
     suspend_flink!(deployment, namespace)
     serving_up
@@ -1786,11 +1607,9 @@ namespace :stream do
       abort "\e[31mNo commits in the TaskManager log. Is the speed layer RUNNING? rake stream:logs\e[0m"
     end
 
-    # A commit that is logged just after the producer stopped may have STARTED
-    # before the last event was produced (the log line carries the END of the
-    # commit, which on this box takes 8-17 s), so the honest measurement waits
-    # for the sink to go quiet: once no new commit appears for 45 s there is
-    # nothing left to flush and the last commit carried the final windows.
+    # A commit logged just after the producer stopped may have started before the
+    # last event (the line carries the end of the commit). So the measurement
+    # waits for the sink to go quiet: no new commit for 45 s.
     info_msg('esperando a que el sink se quede quieto (45 s sin commits)...')
     quiet_deadline = Time.now + (5 * 60)
     last_seen = commits.last[:at]
@@ -1884,13 +1703,9 @@ namespace :stream do
       abort "\e[31mThe Kafka broker is not ready. Run: rake ramp:kafka\e[0m"
     end
 
-    # The rate and the duration are part of the container's command, and a
-    # Job's spec is immutable once its pod runs, so the manifest is submitted
-    # with the values already in it.
-    #
-    # The check is on the RESULT and not on "the text changed": with the
-    # default rate and duration (20 and 60) the substitution is a no-op and
-    # comparing against the original file reported a bogus patch failure.
+    # The rate and duration are part of the container's command, and a Job's spec
+    # is immutable, so the manifest is submitted with the values already in it
+    # (the check is on the result: with the defaults the substitution is a no-op).
     manifest = File.read(job_file)
                    .sub('- "20"', "- \"#{rate}\"")
                    .sub('- "60"', "- \"#{duration}\"")
@@ -1963,8 +1778,8 @@ namespace :stream do
             "\e[33mDeploy it first: rake cluster:up[stream]\e[0m"
     end
 
-    # The script goes in through a ConfigMap so it can be corrected without
-    # paying the image rebuild + per-node load cycle (~20 min here).
+    # The script goes in through a ConfigMap so it can be corrected without an
+    # image rebuild and reload.
     run! 'kubectl', 'delete', 'job', 'flink-window-probe', '-n', 'platform',
          '--ignore-not-found'
     run! 'kubectl', 'delete', 'configmap', 'flink-window-probe', '-n', 'platform',
@@ -2007,9 +1822,8 @@ namespace :stream do
     ok_msg("#{passes.size} comprobacion(es) superadas") unless passes.empty?
     fails.each { |f| err_msg("comprobacion fallida: #{f}") }
 
-    # Independent of the Job's own verdict: did Parquet actually land? Asked of
-    # the MinIO pod, not the probe pod - the probe's container has exited by now,
-    # so exec would fail with "container not found" no matter what it wrote.
+    # Independent of the Job's verdict: ask the MinIO pod (the probe's container
+    # has exited by now).
     minio_pod, = capture('kubectl', 'get', 'pods', '-n', 'platform',
                          '-o', 'jsonpath={.items[?(@.metadata.labels.app=="minio")].metadata.name}')
     minio_pod = minio_pod.to_s.strip
@@ -2043,24 +1857,12 @@ end
 # Batch tier: run the medallion on demand
 # ------------------------------------------------------------------------------
 #
-# The medallion has TWO entry points per tier, and they are the same code:
-#
-#   bronze  the s1 CronJob (poc/ingest:0.1.0, plain Python) - the one path
-#           that writes bronze; the Spark bronze job is disabled in s3-batch
-#           so the two never write the same Iceberg table.
-#   silver  the s3 ScheduledSparkApplication (spark-silver-transform).
-#   gold    the s3 ScheduledSparkApplication (spark-gold-aggregation).
-#
-# The crons fire at 02:00/03:00/04:00, which is no use for a demo or for a
-# verification run, so this task submits the SAME spec on demand:
-#
-#   * bronze: the CronJob is suspended and a one-shot Job is created from it
-#     (`kubectl create job --from=cronjob/`), so what runs is exactly what
-#     the cron would have run.
-#   * silver/gold: the spec of the deployed ScheduledSparkApplication is read
-#     back and applied as a plain SparkApplication. The chart stays the only
-#     source of truth for what a tier runs, so the manual run and the
-#     scheduled run cannot drift.
+# The medallion has one entry point per tier: bronze is the s1 CronJob, silver
+# and gold are the s3 ScheduledSparkApplications. Their crons fire overnight, so
+# this task resubmits the SAME spec on demand: bronze is created from the
+# suspended CronJob, and silver/gold read the deployed ScheduledSparkApplication
+# back and apply it as a plain SparkApplication. The chart stays the only source
+# of truth, so the manual run and the scheduled run cannot drift.
 # ------------------------------------------------------------------------------
 BATCH_TIERS = {
   'bronze' => { kind: 'cronjob', object: 'medallion-bronze-ingestion-cron', ns: 'platform' },
@@ -2107,9 +1909,8 @@ def submit_one_shot_spark(scheduled_name, ns)
 
   run! 'kubectl', 'delete', 'sparkapplication', "#{scheduled_name}-oneshot",
        '-n', ns, '--ignore-not-found'
-  # A failed attempt leaves the driver pod behind (the operator creates it
-  # and the pod stays in Failed/StartError), and the next submission collides
-  # with it: `pods "spark-...-driver" already exists` (409).
+  # A failed attempt leaves the driver pod behind, and the next submission
+  # collides with it ("pods ... already exists"), so the pod is deleted too.
   run! 'kubectl', 'delete', 'pod', '-n', ns,
        '-l', "sparkoperator.k8s.io/app-name=#{scheduled_name}-oneshot", '--ignore-not-found'
   run! 'kubectl', 'apply', '-f', file.path
@@ -2352,17 +2153,11 @@ namespace :lakehouse do
   end
 end
 
-# Re-registers the Iceberg tables in the Polaris catalogue and waits for it.
-#
-# Polaris keeps the catalogue IN MEMORY, so every restart of the pod leaves it
-# empty even though the tables and their data are still in MinIO. Anything
-# that reads the lakehouse through the catalogue (Trino, the Flink speed
-# layer, the row counter) then fails with:
-#
-#   org.apache.iceberg.exceptions.RESTException: Unable to process:
-#   Unable to find warehouse polaris
-#
-# so this runs before every increment that reads the lakehouse.
+# Re-registers the Iceberg tables in the Polaris catalogue and waits for it, so
+# it runs before every increment that reads the lakehouse. Polaris keeps the
+# catalogue in memory, so a restart leaves it empty even though the tables and
+# their data are still in MinIO, and every reader then fails with "Unable to
+# find warehouse polaris".
 def run_lakehouse_restore
   script = File.join('infra', 'diagnostics', 'polaris_restore.py')
   job_file = File.join('infra', 'diagnostics', 'polaris-restore.job.yaml')
@@ -2437,19 +2232,16 @@ def run_lakehouse_restore
 end
 
 # ------------------------------------------------------------------------------
-# RF-24: the demo as a SEQUENCE of exclusive phases
+# The demo as a SEQUENCE of exclusive phases
 # ------------------------------------------------------------------------------
 #
-# RC-02 gives the box 8 GB and asks for EXCLUSIVE startup profiles; AD-4 says
-# "Demo por perfiles". The demo profile (all eight subsystems at once) needs
-# ~8000 MiB of container limits and does not fit on a 6 GiB host: the
-# kube-scheduler ended up losing its lease 107 times. So the demo is a
-# sequence, and each phase declares what it brings up AND what the next phase
-# cannot afford.
+# Running every subsystem at once does not fit on this box, so the demo is a
+# sequence of phases, and each one declares what it brings up and what the next
+# phase cannot afford.
 #
-# What crosses the phases is the LAKEHOUSE (MinIO + Iceberg), not a pod: that
-# is why the batch tier and the stream tier can run in different phases and
-# still be queried together at the end (RF-11).
+# What crosses the phases is the LAKEHOUSE (MinIO + Iceberg), not a pod: that is
+# why the batch tier and the stream tier can run in different phases and still
+# be queried together at the end.
 #
 #   phase      up                                  down (for the next phase)
 #   platform   postgres, minio, polaris, marquez   -
@@ -2479,19 +2271,17 @@ DEMO_PHASES = [
   {
     'name' => 'stream',
     'profile' => 'stream',
-    # s2 is NOT upgraded here: the lakehouse release is already installed and
-    # serving, and its bootstrap hook needs 6-11 minutes on this box (the
-    # whole cluster is swapping while it runs). Only s4 comes up. The speed
-    # layer writes into the lakehouse that is already there.
+    # s2 is not upgraded here: the lakehouse release is already installed and
+    # its bootstrap hook is slow and heavy, so only s4 comes up. The speed layer
+    # writes into the lakehouse that is already there.
     'charts' => %w[s4-stream],
     'down' => [['scale', 'platform', 'deploy/postgres-oltp', 0],
                ['scale', 'platform', 'deploy/spark-operator', 0],
                ['scale', 'platform', 'deploy/marquez', 0],
                ['scale', 'platform', 'deploy/lineage-alert-service', 0],
                ['rmimage', 'docker.io/poc/spark-medallion:0.1.0'],
-               # The hook Jobs of an upgrade that timed out stay behind, and
-               # Helm then refuses to touch them ("invalid ownership
-               # metadata"): they belong to no release.
+               # The hook Jobs of a timed-out upgrade stay behind and Helm
+               # refuses to touch them ("invalid ownership metadata").
                ['delete', 'job', 'polaris-catalog-bootstrap', 'platform'],
                ['delete', 'job', 'polaris-catalog-registration', 'platform'],
                ['delete', 'job', 'minio-bucket-init', 'platform'],
@@ -2504,10 +2294,8 @@ DEMO_PHASES = [
     'charts' => %w[s5-serving],
     'down' => [['delete', 'flinkdeployment', 'flink-orders-stream', 'sales'],
                ['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
-               # Kafka is a StatefulSet, not a Deployment: scaling
-               # "deploy/kafka" fails with "the server doesn't have a resource
-               # type deploy" and the broker stays up with its 768Mi of limits,
-               # which is what the serving phase cannot afford.
+               # Kafka is a StatefulSet, not a Deployment, so it has to be
+               # scaled as statefulset/kafka and not as a deploy.
                ['scale', 'platform', 'statefulset/kafka', 0]],
     'wait' => [['platform', 'deploy/trino']]
   },
@@ -2541,9 +2329,8 @@ DEMO_PHASES = [
                ['scale', 'platform', 'deploy/s8-ops-grafana', 0],
                ['scale', 'platform', 'deploy/marquez', 0],
                ['scale', 'platform', 'deploy/lineage-alert-service', 0]],
-    # The s6-mesh chart only APPLIES the ClusterPolicies; the controller and
-    # its CRDs come from the upstream chart, which the cluster:create task
-    # already registers (https://kyverno.github.io/kyverno/).
+    # The s6-mesh chart only applies the ClusterPolicies; the controller and its
+    # CRDs come from the upstream chart, registered by cluster:create.
     'extra' => [%w[helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace]]
   }
 ].freeze
@@ -2601,9 +2388,8 @@ def apply_down(entry)
     _, ok = capture('kubectl', 'delete', kind, name, '-n', ns, '--ignore-not-found')
     ok ? info_msg("down: #{kind}/#{name} deleted") : warn_msg("down: could not delete #{kind}/#{name}")
   when 'rmimage'
-    # An image that this phase does not use costs a gigabyte of page cache
-    # per node on a 6 GiB box, and that cache is what makes the API server
-    # time out. The Spark image is only needed by the batch phase.
+    # An image this phase does not use still costs page cache on every node.
+    # The Spark image is only needed by the batch phase.
     _kind, image = entry
     probe = podman_probe
     probe[:containers].each do |node|
@@ -2634,19 +2420,12 @@ end
 # RAMP: the platform as a ladder of MINIMAL increments
 # ------------------------------------------------------------------------------
 #
-# The podman machine that backs kind has 5.9 GiB of RAM, and the three kind
-# node CONTAINERS are not free: measured from the host they are 2.0 + 1.5 +
-# 1.6 GB. The cluster itself costs ~3.5 GB before a single application pod
-# starts. Worse, every node REPORTS ~5.79 GiB of allocatable memory (they all
-# see the same VM), so the scheduler happily commits 17.4 GiB on a 5.9 GiB
-# machine and the kubelet then evicts whatever is unlucky - which is what made
-# the failures look random (minio's liveness probe timing out, marquez
-# OOM-killed, the scheduler losing its lease 107 times).
-#
-# So the platform is deployed in INCREMENTS. Each one brings up ONLY the pods
-# its test needs and takes the rest down, and the ledger (rake ramp:status)
-# prints the sum of the limits of the running pods: that sum, not the
-# scheduler's opinion, is the number that has to stay under the box.
+# The kind node containers are not free and every node reports the whole VM's
+# memory, so the scheduler overcommits and the kubelet then evicts whatever is
+# unlucky. The platform is therefore deployed in INCREMENTS: each one brings up
+# only the pods its test needs and takes the rest down, and the ledger (rake
+# ramp:status) prints the sum of the limits of the running pods - that sum, not
+# the scheduler's opinion, is the number that has to stay under the box.
 #
 #   ramp:lakehouse  minio + polaris                    -> the catalogue
 #   ramp:kafka      + kafka                            -> the topics
@@ -2656,37 +2435,28 @@ end
 # The lakehouse crosses the increments: the data lives in MinIO, not in a pod,
 # which is why the speed layer and the serving layer see the same gold rows.
 #
-# s2-lakehouse is upgraded ONCE, by ramp:lakehouse, and never again. Its
-# chart has three Jobs that run on EVERY upgrade - the Polaris bootstrap (it
-# re-creates the catalogue, which WIPES it), the catalogue registration and
-# the bucket initialisation - and that burst of pods is what starves MinIO
-# and the API server on this box:
+# s2-lakehouse is upgraded ONCE, by ramp:lakehouse, and never again: its chart
+# runs three Jobs on every upgrade (the Polaris bootstrap, which recreates and
+# WIPES the catalogue, plus the catalogue registration and the bucket init), and
+# that burst of pods starves MinIO and the API server. The limits it needs are
+# the same in the stream and the serving profile, so re-upgrading changes
+# nothing.
 #
-#   FALLO: sales.bronze_orders: error al leer (AWS Error NETWORK_CONNECTION
-#   during GetObject operation: curlCode: 28, Timeout was reached)
-#
-# The limits it needs are the same in the stream and the serving profile, so
-# there is nothing to change by re-upgrading it.
-#
-# The heavy increments additionally STOP the "worker" kind node, which is
-# where 1.5 GB of the overhead sits. The node comes back with
-# `rake ramp:node:start`.
+# The heavy increments additionally stop the "worker" kind node; it comes back
+# with `rake ramp:node:start`.
 # ------------------------------------------------------------------------------
 
-# The kind node the heavy phases stop. It carries the "storage" role
-# (MinIO's PVC is on worker2, but Kafka's, Postgres' and Marquez' are on this
-# one), so stopping it is only possible when the workloads that need a
-# node-local volume are not in the increment.
+# The kind node the heavy phases stop. It carries the "storage" role (Kafka's,
+# Postgres' and Marquez' PVCs are on it), so it can only be stopped when no
+# increment workload needs a node-local volume.
 RAMP_HEAVY_NODE = 'poc-data-platform-worker'.freeze
 
-# The node the heavy workloads run on: the Flink operator's image and the
-# lakehouse's live there, so the 1.7 GB Flink image only has to be loaded
-# once.
+# The node the heavy workloads run on: the Flink image and the lakehouse live
+# there, so the Flink image only has to be loaded once.
 RAMP_COMPUTE_NODE = 'poc-data-platform-worker2'.freeze
 
 # Everything that is never part of an increment. Scaled to zero, not
-# uninstalled: the PVCs of the lineage database and the lakehouse are what
-# carry the data across the phases.
+# uninstalled, so the PVCs that carry the data across the phases survive.
 RAMP_COMMON_DOWN = [
   ['scale', 'platform', 'deploy/postgres-oltp', 0],
   ['scale', 'platform', 'deploy/spark-operator', 0],
@@ -2698,14 +2468,10 @@ RAMP_COMMON_DOWN = [
   ['delete', 'flinkdeployment', 'flink-orders-stream', 'sales']
 ].freeze
 
-# Converts a human memory size ("1.615GB", "384Mi", "512MiB") to MiB.
-#
-# The unit letter is required and the trailing "B" is optional: Kubernetes
-# writes "320Mi" and podman writes "1.615GB", so a pattern that expects the
-# trailing B misses every Kubernetes quantity.
-#
-# The first match is taken instead of the whole string: the jsonpath below
-# concatenates the limits of a multi-container pod into one field.
+# Converts a human memory size ("1.615GB", "384Mi", "512MiB") to MiB. The unit
+# letter is required and the trailing "B" optional, since Kubernetes writes
+# "320Mi" and podman writes "1.615GB". The first match is taken, because the
+# jsonpath concatenates the limits of a multi-container pod into one field.
 def mem_to_mib(text)
   m = text.to_s.strip.match(/([\d.]+)\s*([KMG])i?B?/i)
   return 0 if m.nil?
@@ -2719,13 +2485,12 @@ def mem_to_mib(text)
   (m[1].to_f * factor).round
 end
 
-# The RAM ledger: the running pods with their memory limits, their sum, and
+# The RAM ledger: the running pods with their memory limits and their sum, plus
 # the memory the kind node containers are holding. The sum is what the box
-# actually has to give, because the scheduler believes there is 17.4 GiB.
+# actually has to give, not what the scheduler believes.
 def ram_ledger
   # `containers[*]` and not `containers[0]`: inside a `range`, kubectl's
-  # jsonpath does NOT resolve the indexed form and returns an empty string
-  # for the limit, which made the whole ledger read 0 MiB.
+  # jsonpath does not resolve the indexed form and returns an empty string.
   out, ok = capture('kubectl', 'get', 'pods', '-A',
                     '-o', 'jsonpath={range .items[*]}{.metadata.namespace}{" "}' \
                     '{.metadata.name}{" "}{.status.phase}{" "}' \
@@ -2750,10 +2515,9 @@ def ram_ledger
     overhead += mem_to_mib(stats.to_s.split('/').first.to_s.strip)
   end
 
-  # The kube-system pods are NOT part of the budget: they are the control
-  # plane, they run whether the platform is up or not, and counting them
-  # twice (once here, once inside the kind node containers) makes the number
-  # meaningless.
+  # The kube-system pods are not part of the budget: they run whether the
+  # platform is up or not, and they are already counted inside the kind node
+  # containers.
   apps = pods.reject { |p| p[:ns] == 'kube-system' || p[:ns] == 'local-path-storage' }
   {
     pods: pods,
@@ -2785,7 +2549,7 @@ def ramp_report(budget_mib = 1600)
 end
 
 # Stops a kind node: drain it first so the API server evicts its pods, then
-# stop the container so its kubelet stops reporting.
+# stop the container.
 def ramp_node_stop(name)
   probe = podman_probe
   container = probe[:containers].find { |c| c[:name] == name }
@@ -2804,12 +2568,9 @@ def ramp_node_stop(name)
                      '--force', '--timeout=180s')
   warn_msg("the drain of #{name} did not finish cleanly") unless ok
 
-  # The hook Jobs are deleted BEFORE the node goes away. A pod of a node that
-  # is not there cannot be deleted (there is no kubelet to confirm the kill),
-  # so it stays Terminating forever, and a hook Job whose pod is stuck
-  # Terminating blocks the next hook of the SAME NAME:
-  #   pre-upgrade hooks failed: resource Job/platform/kafka-topic-creator
-  #   not ready. status: Failed, message: Job Failed. failed: 1/1
+  # The hook Jobs are deleted before the node goes away: a pod of a node that is
+  # not there cannot be deleted and stays Terminating forever, which blocks the
+  # next hook of the same name.
   capture('kubectl', 'delete', 'job', 'kafka-topic-creator', '-n', 'platform',
           '--ignore-not-found', '--force', '--grace-period=0')
 
@@ -2858,38 +2619,26 @@ def ramp_node_start(name)
   true
 end
 
-# Deletes the Kafka StatefulSet and its volume.
-#
-# Needed because `persistence.enabled` is part of the StatefulSet's
-# volumeClaimTemplates, and those are IMMUTABLE: switching the flag from true
-# to false on a live StatefulSet fails with "updates to statefulset spec for
-# fields other than 'replicas' are forbidden". The broker's log is a
-# throwaway buffer - the events are re-produced on every run and the topics
-# are recreated by the hook - so dropping it costs nothing.
+# Deletes the Kafka StatefulSet and its volume. `persistence.enabled` is part of
+# the StatefulSet's volumeClaimTemplates, which are IMMUTABLE, so the flag
+# cannot be flipped on a live StatefulSet. The broker's log is a throwaway
+# buffer, so dropping it costs nothing.
 def ramp_kafka_reset
   capture('kubectl', 'delete', 'statefulset/kafka', '-n', 'platform', '--ignore-not-found')
   capture('kubectl', 'delete', 'pvc', 'data-kafka-0', '-n', 'platform', '--ignore-not-found')
   capture('kubectl', 'delete', 'job', 'kafka-topic-creator', '-n', 'platform', '--ignore-not-found')
 
-  # The ControllerRevisions of the old StatefulSet have to go with it. They
-  # are named after a HASH of the pod template, so the next StatefulSet
-  # adopts the leftovers, and then currentRevision and updateRevision point
-  # at a revision that is NOT the pod's: the rolling update never fires and
-  # the broker keeps running the old template (and the old heap) forever.
-  #
-  #   currentRev=kafka-8667856cd4 updateRev=kafka-8667856cd4
-  #   podHash=kafka-5c76cdddfc
+  # The ControllerRevisions of the old StatefulSet have to go with it: they are
+  # named after a hash of the pod template, so the next StatefulSet adopts the
+  # leftovers and then currentRevision and updateRevision point at a revision
+  # that is not the pod's, so the rolling update never fires.
   capture('kubectl', 'delete', 'controllerrevision', '-n', 'platform',
           '--selector', 'app=kafka', '--ignore-not-found')
 end
 
-# Loads an image into ONE kind node.
-#
-# cluster:image:load copies into EVERY node, and on this box that is several
-# GB of writes: the Flink image alone is 1.7 GB, and the filesystem (a WSL2
-# rootfs on the Windows one) does not take that without starving etcd and
-# killing the API server. The ramp increments pin the workloads to one node,
-# so one copy is enough.
+# Loads an image into ONE kind node. cluster:image:load copies into every node,
+# which is a lot of writes, and the ramp increments pin the workloads to one
+# node, so one copy is enough.
 def ramp_load_image(image, node_name)
   probe = podman_probe
   node = probe[:containers].find { |c| c[:name] == node_name }
@@ -2900,12 +2649,9 @@ def ramp_load_image(image, node_name)
   load_image_into(node, image)
 end
 
-# The topic creator is a PRE-upgrade hook: it runs BEFORE Helm applies the
-# release, so the broker it has to talk to has to be up already. When the
-# previous increment scaled Kafka down, the hook waits 300s for a broker that
-# does not exist yet and the whole upgrade fails with
-#   pre-upgrade hooks failed: resource Job/platform/kafka-topic-creator not
-#   ready. status: InProgress, message: Job in progress
+# The topic creator is a pre-upgrade hook, so the broker it talks to has to be
+# up already. When the previous increment scaled Kafka down, the hook waits for
+# a broker that does not exist yet and the whole upgrade fails.
 def ramp_broker_up
   capture('kubectl', 'scale', 'statefulset/kafka', '-n', 'platform', '--replicas=1')
   wait_for_workload('platform', 'statefulset/kafka', 300)
@@ -2953,13 +2699,9 @@ namespace :ramp do
     [['scale', 'platform', 'deploy/flink-kubernetes-operator', 0],
      ['scale', 'platform', 'deploy/trino', 0]].each { |entry| apply_down(entry) }
 
-    # The Flink job stays off in this increment: the broker and the topics are
-    # what this one proves, and the speed layer is the increment that does not
-    # fit without freeing a node.
-    #
-    # Kafka runs WITHOUT a volume from here on: the log is disposable, and
-    # without a PVC the broker can be scheduled on any node, which is what
-    # lets the heavy increment stop one.
+    # The Flink job stays off here: this increment proves the broker and the
+    # topics. Kafka runs WITHOUT a volume from here on (its log is disposable),
+    # so it can be scheduled on any node and the heavy increment can stop one.
     ramp_kafka_reset
 
     failures = helm_upgrade_charts('stream', %w[s4-stream],
@@ -2983,33 +2725,21 @@ namespace :ramp do
     RAMP_COMMON_DOWN.each { |entry| apply_down(entry) }
     [['scale', 'platform', 'deploy/trino', 0]].each { |entry| apply_down(entry) }
 
-    # The Flink image has to be in the node the job runs on: it is 1.7 GB
-    # and loading it into every node is several GB of writes, which on this
-    # filesystem (a WSL2 rootfs on the Windows one) starves etcd and kills
-    # the API server. The job is pinned to the compute node.
+    # The job is pinned to the compute node, so the Flink image only has to be
+    # in that one node.
     unless ramp_load_image('docker.io/poc/flink-stream:0.1.0', RAMP_COMPUTE_NODE)
       abort "\e[31mthe Flink image could not be loaded into #{RAMP_COMPUTE_NODE}.\e[0m"
     end
 
-    # The node is stopped BEFORE the upgrade, not after it.
-    #
-    # Starting the Flink JobManager and TaskManager on top of the cluster as
-    # it is pushes the box past its memory, and the API server dies first:
-    # the RBAC error Helm reports ("kubernetes-admin cannot list jobs",
-    # "cluster-admin not found") is a SYMPTOM of the apiserver restarting,
-    # not a permission problem. Stopping the node first frees 1.5 GB, and
-    # the apiserver survives the arrival of the speed layer.
+    # The node is stopped before the upgrade, not after: starting Flink on top
+    # of the cluster as it is pushes the box past its memory and the API server
+    # dies first (the RBAC error Helm reports is a symptom of that, not a
+    # permission problem).
     ramp_node_stop(RAMP_HEAVY_NODE)
 
-    # Kafka's PVC lived on the node this increment stops, and a Pod cannot be
-    # scheduled on a node that is not there: the broker's log is a throwaway
-    # buffer (the events are re-produced on every run), so it runs without a
-    # volume in this increment.
-    # The catalogue is restored BEFORE the speed layer starts. Polaris keeps
-    # it in memory, so it is empty after every restart of the pod, and the
-    # Flink job cannot even start without it:
-    #   org.apache.iceberg.exceptions.RESTException: Unable to process:
-    #   Unable to find warehouse polaris
+    # Kafka cannot run on the stopped node, so in this increment the broker runs
+    # without a volume. The catalogue is restored before the speed layer starts,
+    # because the Flink job cannot start against an empty Polaris.
     run_lakehouse_restore
 
     ramp_broker_up
@@ -3080,12 +2810,9 @@ namespace :ramp do
 end
 
 namespace :serving do
-  # The Trino CLI CANNOT be run with "kubectl exec" inside the Trino pod: the
-  # server already runs its own JVM with a 640M heap under a 1024Mi limit, and
-  # the second JVM dies before it prints anything:
-  #   Failed to start thread "Unknown thread" - pthread_create failed (EAGAIN)
-  # It is run as a throwaway pod instead, with the same image (already in the
-  # node) and the server reached through its Service.
+  # The Trino CLI cannot run with "kubectl exec" inside the Trino pod: the server
+  # already fills its memory limit and the second JVM dies before printing. It
+  # runs as a throwaway pod instead, reaching the server through its Service.
   desc 'Run a SQL query with the Trino CLI in its own pod (args: sql="...")'
   task :query, [:sql] do |_t, args|
     sql = args[:sql].to_s.strip
@@ -3132,10 +2859,8 @@ namespace :demo do
       banner "PHASE #{phase['name'].upcase}"
       charts = phase['charts'] || PROFILE_CHARTS.fetch(phase['profile'])
 
-      # What the previous phase leaves behind goes DOWN FIRST: on a 6 GiB box
-      # the room for the next phase has to be there before its hooks run,
-      # and the Helm hooks need 6-11 minutes each while the cluster is
-      # swapping.
+      # What the previous phase leaves behind goes down first: the room for the
+      # next phase has to be there before its hooks run.
       (phase['down'] || []).each { |entry| apply_down(entry) }
 
       failures = helm_upgrade_charts(phase['profile'], charts)

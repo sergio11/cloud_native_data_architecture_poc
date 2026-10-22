@@ -1,12 +1,12 @@
 """
-Modern Data Architecture POC - Integration Test: RF-24 shaped full demo flow.
+Modern Data Architecture POC - Integration Test: full demo flow.
 
 Reproduces the whole F1-F6 demo path hermetically inside tmp_path:
 Bronze ingest (orders + customers) -> Silver cleanse behind the real quality
 suites -> Gold aggregation with GDPR masking -> seed stream log -> speed-layer
 processing -> single unified serving query. Verifies stage row counts, the
-GDPR/RNF-07 column contract, RF-11 dual-tier serving, Bronze re-ingest
-idempotency (RF-01) and whole-chain idempotency (RNF-05).
+GDPR column contract, dual-tier serving, Bronze re-ingest idempotency and
+whole-chain idempotency.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def _run_medallion_chain(world) -> dict:
 
 
 def test_full_demo_flow(world) -> None:
-    """RF-24 shaped end-to-end: every stage produces rows, Gold is GDPR-safe,
+    """End-to-end: every stage produces rows, Gold is GDPR-safe,
     serving unifies batch + stream in one query, Bronze re-ingest is a no-op
     and re-running the entire medallion chain never duplicates Silver/Gold."""
     storage = world.storage
@@ -81,7 +81,7 @@ def test_full_demo_flow(world) -> None:
     assert len(bronze_orders) == len(world.demo_orders)
     assert len(bronze_customers) == len(world.demo_customers)
 
-    # --- Bronze re-ingest idempotency (RF-01 / RNF-05) ---------------------
+    # --- Bronze re-ingest idempotency -------------------------------------
     reingest = world.ingest_bronze.execute("orders")
     assert reingest["rows_ingested"] == 0
     assert reingest["idempotent_hit"] is True
@@ -94,7 +94,7 @@ def test_full_demo_flow(world) -> None:
     assert len(silver_customers) == len(world.demo_customers)
     assert all(not key.startswith("_") for row in silver_orders for key in row)
 
-    # --- Gold GDPR / RNF-07 column contract --------------------------------
+    # --- Gold GDPR column contract ----------------------------------------
     gold_customers = storage.read_table(GOLD_CUSTOMERS)
     assert len(gold_customers) == len(world.demo_customers)
 
@@ -123,7 +123,7 @@ def test_full_demo_flow(world) -> None:
     stream_rows = storage.read_table(STREAM_TARGET)
     assert len(stream_rows) > 0
 
-    # --- F6: unified serving query (RF-11) - both tiers in one call -------
+    # --- F6: unified serving query - both tiers in one call ---------------
     unified = world.query_serving.execute()
     assert unified, "unified serving query returned no rows"
     assert {row["source_tier"] for row in unified} == {"batch_historical", "stream_speed"}
@@ -133,7 +133,7 @@ def test_full_demo_flow(world) -> None:
         for row in unified
     )
 
-    # --- RNF-05: re-running the WHOLE chain duplicates nothing -------------
+    # --- Re-running the WHOLE chain duplicates nothing --------------------
     counts_before = {
         "silver_orders": len(storage.read_table("silver.sales.orders")),
         "silver_customers": len(storage.read_table("silver.sales.customers")),

@@ -1,7 +1,6 @@
-"""
-Modern Data Architecture POC - Real-time Streaming Speed Layer (Kappa) Use Case.
-Consumes continuous event streams, calculates tumbling windows,
-and updates the Speed layer table with support for log replay (RF-10).
+"""Modern Data Architecture POC - Streaming speed layer (Kappa) use case.
+
+Consumes event streams, computes tumbling windows and updates the speed table.
 """
 
 from __future__ import annotations
@@ -18,26 +17,18 @@ logger = logging.getLogger("use_case.process_stream")
 
 CONSUMER_GROUP = "speed_layer"
 
-#: Tumbling-window size in seconds (RF-09: 5-minute windows).
+#: Tumbling-window size in seconds (5-minute windows).
 WINDOW_SIZE_SECONDS = 300
 
-#: Incremental cursor-advance batch cap per run (observability only; the speed
-#: table itself is always fully recomputed from the whole log).
+#: Incremental cursor batch cap per run (observability only).
 CURSOR_OBSERVABILITY_BATCH = 500
 
 
 class ProcessStreamUseCase(ProcessStreamPort):
     """Orchestrates stream window processing and Kappa replay logic.
 
-    Incremental runs rebuild the whole speed table from the full event log
-    (overwrite) so that tumbling windows shared across batches never fragment
-    into partial rows. The ``speed_layer`` cursor is advanced for
-    observability ONLY after the speed table has been durably written: the
-    full log is first re-consumed with ``replay=True`` (which never touches
-    cursors), windows are recomputed and written, and only then is the log
-    consumed incrementally to count newly arrived events
-    (``events_consumed``). A write failure therefore leaves the cursor
-    untouched and the next run still materializes the pending windows.
+    Incremental runs rebuild the whole speed table from the full log; the
+    cursor is advanced only after a durable write.
     """
 
     def __init__(
@@ -56,57 +47,26 @@ class ProcessStreamUseCase(ProcessStreamPort):
         target_table: str = stream_table(),
         replay: bool = False,
     ) -> ProcessStreamResult:
-        """Consumes stream events and rebuilds/updates the speed buffer table.
+        """Consumes stream events and rebuilds/updates the speed table.
 
-        replay=False (incremental): the FULL speed table is rebuilt
-        deterministically from the entire topic log re-consumed with
-        ``replay=True`` (which never touches cursors) via
-        ``BusinessAggregator.aggregate_tumbling_window`` and written with
-        ``mode='overwrite'``. Only AFTER the write succeeds is the log
-        consumed incrementally (``max_messages=500``) to advance the
-        ``speed_layer`` cursor for observability and count newly arrived
-        events (``events_consumed``); when there is nothing new it returns
-        ``NO_EVENTS`` (the idempotent rewrite already applied changes
-        nothing). ``windows_generated`` / ``windows_written`` therefore
-        report full-table recompute counts, not just the delta of the
-        latest batch.
-
-        Rationale: the event log is tiny at POC scale, so a full recompute per
-        incremental run is cheap, idempotent and eliminates partial-window
-        fragmentation (events of the same window arriving in different runs
-        would otherwise produce multiple partial rows for the same
-        ``(window_start, status)`` key). Advancing the cursor strictly after
-        a successful write guarantees that a failed run is safely retried by
-        the next execution instead of being skipped as ``NO_EVENTS``.
-
-        replay=True: FULL RECOMPUTE (RF-10) - rewinds to offset 0, consumes the
-        entire topic log, recomputes every tumbling window from scratch and
-        overwrites the whole speed table deterministically (idempotent,
-        no row growth across repeated replays). An empty log reconciles the
-        speed table to empty instead of leaving stale rows behind.
+        Both modes recompute every tumbling window from the full log and
+        overwrite the table; the cursor advances only after a successful write.
         """
         mode: Literal["replay_full", "append"] = "replay_full" if replay else "append"
         logger.info("Processing streaming speed layer on topic '%s' (replay=%s)...", topic, replay)
 
-        # 1. Consume events from the persistent log (replay rewinds to earliest offset RF-10).
-        # Incremental runs read the full log first WITHOUT touching cursors so a
-        # downstream write failure never leaves the cursor falsely advanced.
-        # An empty log yields zero windows; the overwrite below then reconciles
-        # the speed table to empty (or is a no-op when the table is missing).
+        # 1. Read the full log first without touching cursors.
         events = self._broker.consume_events(topic=topic, max_messages=None, replay=True)
         events_consumed = len(events)
 
-        # 2. Compute 5-minute tumbling windows from event time (RF-09)
+        # 2. Compute 5-minute tumbling windows from event time
         windows = BusinessAggregator.aggregate_tumbling_window(events, window_size_seconds=WINDOW_SIZE_SECONDS)
         logger.info("Calculated %d window aggregations", len(windows))
 
-        # 3. Write Speed layer table (overwrite on both replay and incremental
-        # full recompute; incremental overwrites to avoid partial-window fragmentation)
+        # 3. Write the speed table (full recompute on both modes).
         written = self._storage.write_table(target_table, windows, mode="overwrite")
 
-        # 4. Emit OpenLineage metadata for the durable recompute. The run
-        # completed (COMPLETE even when the recompute is empty): lineage must
-        # not be skipped on paths that performed a write.
+        # 4. Emit lineage for the durable recompute.
         self._lineage.emit_job_event(
             job_name="streaming_orders_windowing",
             inputs=[f"kafka.{topic}"],
@@ -114,9 +74,7 @@ class ProcessStreamUseCase(ProcessStreamPort):
             status="COMPLETE",
         )
 
-        # 5. Advance the observability cursor ONLY after the durable write. When
-        # there is nothing new the idempotent rewrite above changed nothing, so
-        # report NO_EVENTS — with the real recompute counters, not zeroes.
+        # 5. Advance the observability cursor only after the durable write.
         if not replay:
             incremental = self._broker.consume_events(
                 topic=topic,

@@ -1,16 +1,4 @@
-"""
-Modern Data Architecture POC - Shared test helpers (deduplicated builders).
-
-Single home for the contract/product builders copied between
-``tests/unit/test_contract_validation.py`` and
-``tests/integration/test_rf_acceptance.py``, and for the minimal in-memory
-``LineagePublisherPort`` stub copied across ``test_quality_gate.py``,
-``test_ingest_idempotency.py`` and ``test_silver_latest_wins.py``.
-
-Semantics are the SUPERSET of the copies (owner/domain/format handling from
-the unit variant, which is backward compatible with the integration call
-sites), so existing assertions behave identically.
-"""
+"""Shared test helpers: contract/product builders and port stubs."""
 
 from __future__ import annotations
 

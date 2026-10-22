@@ -1,12 +1,7 @@
-"""
-Modern Data Architecture POC - Bronze Layer Raw Ingestion Use Case.
-Extracts operational records, attaches audit technical columns,
-and writes idempotently to Bronze tier lakehouse storage.
+"""Modern Data Architecture POC - Bronze raw ingestion use case.
 
-RF-01 append-only Bronze: records are always APPENDED (never overwritten), and
-the storage layer deduplicates by content hash, so re-running ingestion over an
-identical source snapshot inserts 0 new rows and does not duplicate existing
-ones (SRS §8 audit retention keeps prior batches readable).
+Extracts operational records, adds audit columns and writes idempotently to
+append-only Bronze storage.
 """
 
 from __future__ import annotations
@@ -25,13 +20,9 @@ logger = logging.getLogger("use_case.ingest_bronze")
 
 
 def provenance_label(extraction: ExtractionResult, entity: str) -> str:
-    """Maps the observed extraction origin to the Bronze provenance label.
+    """Maps extraction origin to the Bronze provenance label.
 
-    The label is stamped on the ``_source`` audit column AND used as the
-    OpenLineage input dataset, so both always agree with where the records
-    actually came from: ``postgresql.public.<entity>`` for rows queried from a
-    live database, ``synthetic.local.<entity>`` for rows fabricated by the
-    embedded demo generator (never the other way around).
+    Stamped on ``_source`` and used as the OpenLineage input dataset.
     """
     if extraction.origin == "postgresql":
         return f"postgresql.public.{entity}"
@@ -54,17 +45,13 @@ class IngestBronzeUseCase(IngestBronzePort):
     def execute(self, entity: str) -> IngestBronzeResult:
         """Ingests one OLTP snapshot into append-only Bronze storage.
 
-        Append-only + content-hash idempotency (RF-01): the write always uses
-        ``mode="append"`` and the storage adapter skips rows whose content hash
-        already exists, so a re-run of the same snapshot returns
-        ``rows_ingested == 0`` (``idempotent_hit=True``) instead of duplicating
-        rows.
+        Content-hash idempotency means a re-run returns 0 rows.
         """
         batch_id = str(uuid.uuid4())
         target_table = bronze_table(entity)
         logger.info("Starting Bronze ingestion for entity '%s' (batch_id=%s)", entity, batch_id)
 
-        # 1. Extract raw records from OLTP source (``origin`` carries honest provenance)
+        # 1. Extract raw records (``origin`` carries honest provenance)
         extraction = self._source.extract_table(entity)
         records = extraction.records
         source_label = provenance_label(extraction, entity)
@@ -75,8 +62,7 @@ class IngestBronzeUseCase(IngestBronzePort):
             extraction.origin,
         )
 
-        # 1b. Honest empty ingestion: 0 source rows short-circuits to EMPTY
-        # (no write) while still emitting lineage like every other run.
+        # 1b. Empty source: report EMPTY without writing, still emit lineage.
         if not records:
             logger.warning("Source table '%s' returned 0 rows; reporting EMPTY without writing.", entity)
             self._lineage.emit_job_event(
@@ -104,7 +90,7 @@ class IngestBronzeUseCase(IngestBronzePort):
             row["_batch_id"] = batch_id
             enriched_records.append(row)
 
-        # 3. Append to Bronze tier storage (RF-01 content-hash idempotent)
+        # 3. Append to Bronze tier storage (content-hash idempotent)
         count_written = self._storage.write_table(target_table, enriched_records, mode="append")
         idempotent_hit = count_written == 0 and len(records) > 0
         logger.info(

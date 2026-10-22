@@ -1,14 +1,5 @@
-# ==============================================================================
-# OpenLineage Global Configuration for Modern Data Architecture POC
-# ==============================================================================
-# This configuration defines OpenLineage event generation, facet emission,
-# and transport routing for Apache Spark, Apache Flink, and custom Python
-# pipeline runtimes pointing to the Marquez metadata backend.
-#
-# References:
-#   - OpenLineage Spec 1-0-2: https://openlineage.io/spec/1-0-2/
-#   - Marquez API: http://marquez-api.lineage.svc.cluster.local:5000
-# ==============================================================================
+# OpenLineage configuration: event generation, facets and HTTP transport to Marquez.
+# Spec: https://openlineage.io/spec/1-0-2/
 
 transport:
   type: http
@@ -35,9 +26,7 @@ circuitBreaker:
   gcCpuThreshold: 80
   checkIntervalMillis: 2000
 
-# ------------------------------------------------------------------------------
-# Default Job and Dataset Metadata Configuration
-# ------------------------------------------------------------------------------
+# Default job and dataset metadata
 job:
   namespace: ${OPENLINEAGE_NAMESPACE:-data-platform}
   owners:
@@ -48,9 +37,7 @@ job:
     - "medallion-architecture"
     - "iceberg"
 
-# ------------------------------------------------------------------------------
-# Facet Configuration
-# ------------------------------------------------------------------------------
+# Facet configuration
 facetsConfig:
   # Schema Facet: Captures dataset field names, types, nullability, and descriptions
   schema:
@@ -105,9 +92,7 @@ facetsConfig:
   spark_unknown_operator:
     disabled: false
 
-# ------------------------------------------------------------------------------
-# Runtime Integrations Specific Settings
-# ------------------------------------------------------------------------------
+# Runtime integrations
 runtimes:
   spark:
     spark.extraListeners: "io.openlineage.spark.agent.OpenLineageSparkListener"

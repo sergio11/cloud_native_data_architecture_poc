@@ -1,29 +1,10 @@
 """
 catalog_registration.py - Catalog registration and metadata publishing.
 
-Registers every serving Iceberg table in the Polaris catalog,
-publishes datasets and jobs (lineage) to Marquez/OpenLineage,
-and updates data product manifests with the actual table paths.
-
-Usage:
-    python catalog_registration.py
-
-Environment variables:
-    POLARIS_URL      - Polaris REST catalog base URL (e.g. http://polaris:8181)
-    POLARIS_TOKEN    - Bearer token for Polaris authentication
-    MARQUEZ_URL      - Marquez base URL (e.g. http://marquez:5000)
-    MANIFESTS_DIR    - Root directory containing domain product.yaml files
-
-Exit codes:
-    0  every Polaris/Marquez call succeeded (manifest updates are best-effort
-       warnings by design and never silently append invalid entries)
-    1  a required environment variable is missing, or at least one
-       catalog/lineage call failed - the script is fail-closed and never
-       reports success while a step failed
-
-Requirements:
-    requests>=2.28.0
-    PyYAML>=6.0
+Registers serving Iceberg tables in Polaris, publishes lineage to Marquez and
+updates product manifests with the actual table paths. Configure POLARIS_URL
+(plus POLARIS_TOKEN or client credentials), MARQUEZ_URL and MANIFESTS_DIR; the
+script exits 1 when any catalog or lineage call fails.
 """
 
 from __future__ import annotations
@@ -57,51 +38,23 @@ DEFAULT_RETRY_COUNT = 3
 DEFAULT_RETRY_DELAY_S = 2.0
 HTTP_TIMEOUT = 30
 
-# Root of the warehouse the tables are registered under. It MUST match the
-# catalog's allowedLocations, or Polaris refuses every table with
-#
-#   Invalid locations '[s3://datalake/warehouse/gold/sales/daily_metrics, ...]'
-#   for identifier 'sales.daily_metrics': ... is not in the list of allowed
-#   locations: [s3://warehouse/sales]
-#
-# It was hardcoded to s3://datalake/warehouse while the catalog is bootstrapped
-# with s3://warehouse/, so no table could ever be registered. It is read from
-# the environment so the chart is the single source of truth, and the default
-# matches the chart's polaris.config.warehouseLocation.
+# Warehouse root the tables are registered under. It MUST match the catalog's
+# allowedLocations; read from the environment so the chart is the source of truth.
 WAREHOUSE_ROOT = os.getenv("POLARIS_WAREHOUSE_ROOT", "s3://warehouse/").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
 # Table registry (single source of truth)
 # ---------------------------------------------------------------------------
-# Every logical id follows src/domain/naming.py: <tier>.<domain>.<table>
-# (e.g. ``gold.sales.daily_metrics``).  Two identities are derived from each
-# logical id, one per target system:
-#
-#   * Polaris / Trino -> (domain, table): the Trino catalogs ``iceberg``,
-#     ``gold`` and ``stream`` are aliases of the SAME Polaris REST catalog
-#     (infra/helm/s5-serving/templates/trino-configmap.yaml), so the tier is a
-#     catalog name and the Polaris namespace is the middle (schema) part.
-#     ``stream.sales.orders_windowed`` is therefore registered as namespace
-#     ``sales`` + table ``orders_windowed`` - exactly the identifier
-#     pipelines/serving/unified_view.sql queries.
-#   * Marquez -> (tier, domain.table): OpenLineage convention (namespace =
-#     source system, name = schema.table).  Concatenating both parts
-#     reconstructs the logical id, so lineage references are never invented.
+# Every logical id follows src/domain/naming.py: <tier>.<domain>.<table>.
+# Polaris registers namespace <domain> + table <table>; Marquez uses <tier> as
+# namespace and <domain>.<table> as name, so lineage references are never invented.
 def _logical_location(logical: str) -> str:
     """Map a logical id to its warehouse location (derived, never hand-written).
 
-    The location is ``<warehouse root>/<namespace>/<table>`` - the tier is NOT
-    part of it. Polaris derives the location of a table in a namespace from the
-    namespace's own allowed location, and it refuses anything outside it:
-
-      Invalid locations '[s3://warehouse/gold/sales/daily_metrics, ...]' for
-      identifier 'sales.daily_metrics': ... is not in the list of allowed
-      locations: [s3://warehouse/sales]
-
-    The allowed location of a namespace is the catalog's base location plus the
-    namespace name, so the table has to sit directly under it. The tier lives
-    in the logical id and in the product manifests, not in the physical path.
+    The location is ``<warehouse root>/<namespace>/<table>``; the tier is not
+    part of the physical path because Polaris only allows tables under the
+    namespace location. The tier lives in the logical id and product manifests.
     """
     parts = logical.split(".")
     if len(parts) != 3:
@@ -147,12 +100,8 @@ def _table(
     return entry
 
 
-# Gold Iceberg tables to register in Polaris.
-# Only tables actually produced by the core use cases are listed:
-#   AggregateGoldUseCase -> gold.sales.daily_metrics, gold.sales.customers.
-# Columns mirror what aggregate_gold.py actually writes (verified against
-# data/lakehouse.db: gold_sales_customers = id, segment, registration_date,
-# created_at, email_hash, name_masked - no total_orders/lifetime_value/is_active).
+# Gold Iceberg tables actually produced by AggregateGoldUseCase.
+# Columns mirror what the Gold job writes (no total_orders/lifetime_value).
 GOLD_TABLES: list[dict[str, Any]] = [
     _table(
         "gold.sales.daily_metrics",
@@ -179,21 +128,9 @@ GOLD_TABLES: list[dict[str, Any]] = [
     ),
 ]
 
-# Stream Iceberg tables to register in Polaris.
-# Only tables actually written by the streaming jobs are listed:
-#   flink_orders_stream     -> stream.sales.orders_windowed
-#   flink_clickstream_stream -> stream.marketing.clickstream_windowed
-#
-# The row shape is the one the Flink jobs produce from
-# pipelines/stream/window_logic.py, which is kept in parity with
-# BusinessAggregator.aggregate_tumbling_window (tests/unit/test_stream_window_parity.py):
-#   * orders_windowed     : window_start, window_end, order_date, status,
-#                          window_revenue, window_orders, avg_order_value, source_tier
-#   * clickstream_windowed: window_start, window_end, order_date, event_type,
-#                          event_count, unique_sessions, source_tier
-# order_date is required by unified_view.sql on the orders side. Neither table is
-# represented by a manifest asset today, so no ``manifest`` target is declared and
-# the manifest step warns instead.
+# Stream Iceberg tables written by the Flink jobs, with the row shape produced
+# by pipelines/stream/window_logic.py (in parity with BusinessAggregator).
+# Neither is represented by a manifest asset, so the manifest step warns.
 STREAM_TABLES: list[dict[str, Any]] = [
     _table(
         "stream.sales.orders_windowed",
@@ -224,10 +161,8 @@ STREAM_TABLES: list[dict[str, Any]] = [
 
 ALL_TABLES: list[dict[str, Any]] = GOLD_TABLES + STREAM_TABLES
 
-# Polaris namespaces == Trino schemas: the domain namespaces actually used by
-# registered tables plus ``finance`` (bootstrapped by unified_view.sql).
-# ``stream``/``gold`` are Trino catalog aliases, NOT schemas, so they are
-# deliberately not registered here.
+# Polaris namespaces == Trino schemas: the domain namespaces used by registered
+# tables plus ``finance``. ``stream``/``gold`` are catalog aliases, not schemas.
 NAMESPACES: list[str] = sorted({tbl["namespace"] for tbl in ALL_TABLES} | {"finance"})
 
 
@@ -373,10 +308,9 @@ def lineage_datasets() -> list[dict[str, Any]]:
 
 DATASET_IDS: list[str] = [ds["logical"] for ds in lineage_datasets()]
 
-# Pipeline job definitions for Marquez lineage.
-# ``inputs``/``outputs`` are FULL dataset ids; they are split with
-# ``dataset_identity`` when registered and validated against DATASET_IDS, so a
-# job can never reference a dataset that was never created (no dangling I/O).
+# Pipeline job definitions for Marquez lineage. Inputs/outputs are full dataset
+# ids, split by dataset_identity and validated against DATASET_IDS so a job can
+# never reference a dataset that was never created.
 PIPELINE_JOBS: list[dict[str, Any]] = [
     {
         "namespace": "flink",
@@ -521,10 +455,9 @@ class PolarisClient:
                     # Already exists — treat as success (idempotent)
                     logger.debug("Resource already exists at %s (409); skipping.", url)
                     return exc.response  # type: ignore[return-value]
-                # The BODY is the only thing that says WHY a 4xx happened.
-                # Polaris explains itself there - "location is not allowed",
-                # "Malformed request: ...", the offending field - and without
-                # it the log only says "400", which is not diagnosable.
+                # Log the response body: Polaris explains 4xx causes there
+                # ("location is not allowed", "Malformed request: ..."), which
+                # the bare status code does not.
                 body = ""
                 if exc.response is not None:
                     try:
@@ -557,11 +490,8 @@ class PolarisClient:
     def register_namespace(self, namespace: str) -> None:
         """Create a namespace (database) in Polaris if it does not exist.
 
-        The catalog name belongs in the PATH. Polaris 1.8 exposes the Iceberg
-        REST namespace endpoint as
-        ``/api/catalog/v1/{catalog}/namespaces`` - the same route the
-        polaris-bootstrap Job uses - and answers 404 on
-        ``/api/catalog/v1/namespaces``, which is what this call used to send.
+        The catalog name belongs in the path: Polaris 1.8 exposes the Iceberg
+        REST namespace endpoint as ``/api/catalog/v1/{catalog}/namespaces``.
 
         Args:
             namespace: Namespace name (e.g. ``sales``).
@@ -602,11 +532,7 @@ class PolarisClient:
             "location": location,
             "schema": {
                 # "type": "struct" is REQUIRED by the Iceberg REST catalog
-                # spec and Polaris answers 400 without it:
-                #   {"error":{"message":"HTTP 400 Bad Request","code":400}}
-                # with a body that says nothing about the cause. Measured
-                # against the running Polaris: the same payload with the field
-                # answers 200 and creates the table.
+                # spec; Polaris answers 400 without it.
                 "type": "struct",
                 "schema-id": 0,
                 "identifier-field-ids": [],
@@ -1134,11 +1060,8 @@ class ManifestUpdater:
 def _fetch_polaris_token(base_url: str, client_id: str, client_secret: str) -> str:
     """Obtain an OAuth2 bearer token from the Polaris token endpoint.
 
-    The endpoint is ``/api/catalog/v1/oauth/tokens`` and it answers the
-    client_credentials grant. The scope is not optional: Polaris rejects the
-    request with ``invalid_scope: The scope is invalid`` when it is missing or
-    when it is anything other than ``PRINCIPAL_ROLE:ALL`` - which is also the
-    scope the Flink job asks for.
+    Uses the client_credentials grant; the scope MUST be ``PRINCIPAL_ROLE:ALL``
+    or Polaris rejects the request with ``invalid_scope``.
 
     Args:
         base_url: Polaris base URL, e.g. ``http://polaris:8181``.
@@ -1212,16 +1135,9 @@ def _build_marquez_client() -> MarquezClient | None:
     Returns:
         Initialised MarquezClient, or None when MARQUEZ_URL is not set.
 
-    The lineage registration is OPTIONAL, like the manifest update. Marquez
-    lives in the s7-fabric subsystem, and the catalog registration is what
-    makes the Iceberg tables visible to the serving layer - it must not depend
-    on a lineage backend being deployed too, or the serving layer would be
-    blocked by an unrelated subsystem.
-
-    Returns None when MARQUEZ_URL is absent, and the Marquez steps are then
-    skipped. When it IS set, a failure to reach Marquez is still counted as a
-    failure, because a misconfigured Marquez is a real defect and not a
-    missing optional.
+    Lineage registration is optional: the Iceberg catalog registration must not
+    depend on the s7-fabric lineage backend being deployed. When MARQUEZ_URL is
+    set, a failure to reach Marquez is still counted as a failure.
     """
     marquez_url = os.getenv("MARQUEZ_URL", "").strip()
     if not marquez_url:
@@ -1516,15 +1432,9 @@ def run_registration(
 def main() -> None:
     """Orchestrate full catalog registration and manifest update.
 
-    Steps:
-    1. Read config from environment variables (missing vars exit 1).
-    2. Register all namespaces and tables in Polaris.
-    3. Register namespaces, datasets, and jobs in Marquez.
-    4. Update product.yaml manifests with actual table paths.
-    5. Print summary report.
-
-    Exit code:
-        0 only when every Polaris/Marquez call succeeded; 1 otherwise.
+    Reads config from the environment, registers Polaris namespaces/tables and
+    Marquez namespaces/datasets/jobs, updates manifests and prints a summary.
+    Exit code 0 only when every call succeeded; 1 otherwise.
     """
     logger.info("Starting catalog_registration.py")
 

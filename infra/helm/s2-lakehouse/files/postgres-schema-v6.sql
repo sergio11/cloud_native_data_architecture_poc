@@ -16,11 +16,7 @@
 -- specific language governing permissions and limitations
 -- under the License.
 
--- Changes from v5:
---  * `idx_locations` now leads with `catalog_id` instead of `parent_id`, matching the predicate in
---    QueryGenerator.generateOverlapQuery (WHERE realm_id = ? AND catalog_id = ?). The previous
---    definition let the optimized sibling check (OPTIMIZED_SIBLING_CHECK) use only the realm_id
---    prefix, degrading CREATE TABLE / CREATE NAMESPACE to a realm-wide scan.
+-- v6: idx_locations leads with catalog_id to match QueryGenerator.generateOverlapQuery.
 
 CREATE TABLE IF NOT EXISTS version (
     version_key TEXT PRIMARY KEY,
@@ -141,9 +137,7 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (event_id)
 );
 
--- ============================================================================
 -- SCAN METRICS REPORT TABLE
--- ============================================================================
 
 CREATE TABLE IF NOT EXISTS scan_metrics_report (
     report_id TEXT NOT NULL,
@@ -202,9 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_scan_report_timestamp ON scan_metrics_report(real
 -- Index for query lookups by catalog_id and table_id
 CREATE INDEX IF NOT EXISTS idx_scan_report_lookup ON scan_metrics_report(realm_id, catalog_id, table_id, timestamp_ms);
 
--- ============================================================================
 -- COMMIT METRICS REPORT TABLE
--- ============================================================================
 
 CREATE TABLE IF NOT EXISTS commit_metrics_report (
     report_id TEXT NOT NULL,

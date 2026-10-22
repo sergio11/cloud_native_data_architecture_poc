@@ -1,7 +1,6 @@
-"""
-Modern Data Architecture POC - Inbound (Driving) Ports.
-Defines interfaces that application entrypoints (CLI, Dagster, APIs) call to execute use cases.
-Follows Interface Segregation Principle (ISP) and Dependency Inversion Principle (DIP).
+"""Modern Data Architecture POC - Inbound (driving) ports.
+
+Interfaces called by entrypoints to execute use cases.
 """
 
 from __future__ import annotations
@@ -69,7 +68,7 @@ class ValidateContractResult(TypedDict):
 
 
 class UnifiedRevenueRow(TypedDict):
-    """One row of the RF-11 unified batch + stream revenue query."""
+    """One row of the unified batch + stream revenue query."""
 
     order_date: str | None
     status: str | None
@@ -98,20 +97,16 @@ class CleanseSilverPort(Protocol):
     ) -> CleanseSilverResult:
         """Cleanses Bronze records and promotes valid records to Silver.
 
-        ``suite_path`` is REQUIRED: the driver resolves the quality
-        expectations suite path per entity and passes it explicitly (the core
-        holds no filesystem conventions). ``quality_threshold`` is a fallback
-        used only when the entity contract declares no quality thresholds;
-        otherwise the contract thresholds govern per dimension.
+        ``suite_path`` is required. ``quality_threshold`` applies only when the
+        entity contract declares no thresholds.
         """
         ...
 
 
 class AggregateGoldPort(Protocol):
-    """Driving port to trigger Gold tier business modeling and PII masking.
+    """Driving port to trigger Gold modeling and PII masking.
 
-    Gold is a full recomputation by design (Lambda batch layer): every execution
-    rebuilds the target aggregates from Silver, so no incremental replay flag exists.
+    Gold is fully recomputed from Silver on every run (Lambda batch layer).
     """
 
     def execute(
@@ -122,12 +117,9 @@ class AggregateGoldPort(Protocol):
         customers_suite: str,
         quality_threshold: float | None = None,
     ) -> AggregateGoldResult:
-        """Materializes aggregated Gold datasets by recomputing them from Silver.
+        """Materializes Gold datasets by recomputing them from Silver.
 
-        Both expectation suite paths are REQUIRED keyword arguments resolved by
-        the driver (the core holds no filesystem conventions).
-        ``quality_threshold`` is a fallback used only when the governing
-        contract declares no quality thresholds.
+        Suite paths are required; ``quality_threshold`` is only a fallback.
         """
         ...
 
@@ -143,14 +135,14 @@ class ProcessStreamPort(Protocol):
     ) -> ProcessStreamResult:
         """Consumes stream events and updates speed buffer tables.
 
-        ``replay=True`` rewinds to the beginning of the topic log (RF-10 full
-        replay); otherwise only not-yet-consumed events are processed.
+        ``replay=True`` rewinds to the earliest offset; otherwise only new
+        events are processed.
         """
         ...
 
 
 class RunQualityGatePort(Protocol):
-    """Driving port to evaluate quality expectation suites (fail-closed, RF-06)."""
+    """Driving port to evaluate quality expectation suites (fail-closed)."""
 
     def execute(
         self,
@@ -159,20 +151,10 @@ class RunQualityGatePort(Protocol):
         threshold: float = DEFAULT_QUALITY_THRESHOLD,
         records: list[dict[str, Any]] | None = None,
     ) -> QualityGateEvaluation:
-        """Evaluates assertions against table and returns quality verdict.
+        """Evaluates assertions against a table and returns the verdict.
 
-        When ``records`` is provided they are evaluated as-is (file-input
-        scenarios); otherwise the use case loads the table from storage.
-
-        Threshold precedence mirrors the Silver/Gold promotion gate: the
-        thresholds declared by the contract governing the table's entity take
-        precedence per dimension, and ``threshold`` applies only when no such
-        contract declares any (fallback).
-
-        Fail-closed (RF-06): a failing verdict raises
-        ``QualityGateBreachError`` carrying the evaluation instead of
-        returning it, so programmatic callers cannot ignore a breach; only
-        a passing evaluation is returned.
+        ``records`` override storage when provided. Contract thresholds take
+        precedence; a failing verdict raises ``QualityGateBreachError``.
         """
         ...
 
@@ -181,26 +163,20 @@ class ValidateContractPort(Protocol):
     """Driving port to validate DataProduct manifests and DataContracts."""
 
     def execute(self) -> ValidateContractResult:
-        """Validates contract structure and evolution rules across domains.
-
-        The catalog owns the repository root, so no path argument is needed.
-        """
+        """Validates contract structure and evolution rules across domains."""
         ...
 
 
 class QueryServingPort(Protocol):
-    """Driving port for the Serving layer executing unified queries (RF-11)."""
+    """Driving port for the Serving layer executing unified queries."""
 
     def execute(
         self,
         order_date_gte: str | None = None,
         limit: int = 20,
     ) -> list[UnifiedRevenueRow]:
-        """Executes a single unified revenue query across batch Gold and stream Speed tiers.
+        """Executes one unified revenue query across Gold batch and stream Speed.
 
-        RF-11: one query, no double counting - for the same (order_date, status)
-        key the exact batch value wins; stream rows only fill keys absent from
-        batch. Rows are filtered by ``order_date_gte`` when given and capped at
-        ``limit``.
+        Batch wins on ``(order_date, status)``; stream only fills absent keys.
         """
         ...

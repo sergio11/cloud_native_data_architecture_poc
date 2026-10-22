@@ -1,8 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: Streaming Speed Layer (RF-09 / RF-10).
-Verifies real tumbling window bucketing, persistent consumer cursors, full log
-replay, deterministic speed-table recomputation and the no-fabrication contract.
-Every test runs against isolated event-log and lakehouse databases under tmp_path.
+"""Unit tests: streaming speed layer.
+
+Covers tumbling-window bucketing, consumer cursors, replay, deterministic
+recomputation and the no-fabrication contract.
 """
 
 from __future__ import annotations
@@ -281,8 +280,7 @@ def test_empty_log_returns_empty(tmp_path: Path):
 
 
 def test_replay_empty_log_clears_stale_speed_rows(tmp_path: Path):
-    """Regression (RF-10): replaying an empty log must reconcile the speed
-    table to empty instead of reporting SUCCESS over stale rows."""
+    """Replaying an empty log reconciles the speed table to empty."""
     use_case, broker, storage = _make_use_case(tmp_path)
     topic = "unit.replay_empty_clears"
 
@@ -312,11 +310,10 @@ def test_replay_empty_log_clears_stale_speed_rows(tmp_path: Path):
 
 
 def test_write_failure_does_not_advance_cursor(tmp_path: Path):
-    """Regression: the cursor must advance only after a successful speed-table write.
+    """The cursor advances only after a successful speed-table write.
 
-    Simulates a crash between recompute and cursor commit (storage raises on the
-    first write). The failed run must leave the cursor untouched so a second
-    execution still materializes the pending windows instead of NO_EVENTS.
+    A failed write must leave the cursor untouched so a second execution still
+    materializes the pending windows.
     """
     real_storage = LakehouseStorageAdapter(db_path=str(tmp_path / "lakehouse.db"))
     broker = EventStreamAdapter(db_path=str(tmp_path / "event_log.db"))
@@ -390,12 +387,7 @@ def test_write_failure_does_not_advance_cursor(tmp_path: Path):
 def test_process_stream_kafka_replay_recovers_full_backlog_despite_zero_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End-to-end (A4): a Kafka replay with zero poll budget still rebuilds every window.
-
-    Guards the silent-loss defect where ``_consume_from_kafka`` truncated the
-    replay and ``process_stream`` overwrote the Speed table with that partial
-    result: all 30 events must be consumed and both tumbling windows rebuilt.
-    """
+    """A Kafka replay with zero poll budget still rebuilds every window."""
     monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     monkeypatch.setattr(event_stream_module, "_POLL_BUDGET_SECONDS", 0.0)
     topic = "unit.kafka_replay_full"

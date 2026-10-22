@@ -42,34 +42,17 @@ spec:
             - name: rest-api
               containerPort: 8181
               protocol: TCP
-            # Quarkus management interface: this is where /q/health lives.
-            # The catalog API on 8181 requires authentication and is the wrong
-            # target for a kubelet probe.
+            # Quarkus management interface for /q/health; the catalog API needs auth.
             - name: management
               containerPort: 8182
               protocol: TCP
           env:
-            # Metastore. Quarkus env mapping: a double underscore is one nesting
-            # level, so POLARIS_PERSISTENCE_JDBC__CONNECTION__URL is
-            # polaris.persistence.jdbc.connection.url.
-            #
-            # This used to be the in-memory metastore with a comment explaining
-            # that JDBC never came up on this cluster. That conclusion was drawn
-            # from a 15-minute timeout imposed by the liveness probe, not from the
-            # metastore: the probe killed Polaris during the first Hibernate
-            # schema mapping. The startupProbe below now allows 10 minutes, so
-            # the JDBC path is given the time it needs, and the catalog survives
-            # restarts instead of vanishing and taking the speed layer with it.
+            # Metastore type. Quarkus maps a dot to one underscore; a double
+            # underscore escapes a literal underscore.
             - name: POLARIS_PERSISTENCE_TYPE
               value: {{ .Values.polaris.persistence.type | quote }}
             {{- if ne .Values.polaris.persistence.type "in-memory" }}
-            # Env mapping: a DOTS in the property name becomes ONE underscore, not
-            # two. `quarkus.datasource.jdbc.url` is QUARKUS_DATASOURCE_JDBC_URL and
-            # `polaris.persistence.jdbc.connection.url` is
-            # POLARIS_PERSISTENCE_JDBC_CONNECTION_URL. A doubled underscore is only
-            # how a literal underscore inside a property name is escaped, and
-            # writing __ silently produced an unknown property that Quarkus ignored -
-            # which is why the datasource still reported "URL is not set".
+            # Dots map to single underscores; a doubled underscore is silently ignored.
             - name: QUARKUS_DATASOURCE_JDBC_URL
               value: {{ .Values.polaris.persistence.jdbcUrl | quote }}
             - name: QUARKUS_DATASOURCE_USERNAME
@@ -88,22 +71,14 @@ spec:
               value: {{ .Values.polaris.persistence.password | quote }}
             - name: POLARIS_PERSISTENCE_JDBC_CONNECTION_POOL_MAX_SIZE
               value: {{ .Values.polaris.persistence.poolMaxSize | quote }}
-            # Schema management. Without it Polaris connects fine but every query
-            # fails with `relation "entities" does not exist`. Polaris 1.8 maps
-            # the tables with Hibernate (not Flyway - no migration ever ran and
-            # the database stayed empty), so it is Hibernate's own DDL export
-            # that has to be enabled.
+            # Polaris 1.8 maps tables with Hibernate, so its DDL export must be enabled.
             - name: POLARIS_PERSISTENCE_JDBC_SCHEMA_MANAGEMENT_TYPE
               value: "hibernate"
             - name: QUARKUS_HIBERNATE_ORM_DATABASE_GENERATION
               value: "update"
             {{- end }}
-            # Fixed root credentials. Without these Polaris generates a random
-            # pair on every boot and only prints it to stdout, so no Iceberg
-            # client could ever be pointed at it. Format per
-            # RootCredentialsSet.fromString() is "realm,clientId,clientSecret"
-            # with ";" between realms. Anything else fails fast with
-            # "Invalid credentials format" and the server exits.
+            # Fixed root credentials, or Polaris generates a random pair every boot.
+            # Format is "realm,clientId,clientSecret", ";" between realms.
             - name: POLARIS_BOOTSTRAP_CREDENTIALS
               value: "{{ .Values.polaris.realm }},{{ .Values.polaris.clientId }},{{ .Values.polaris.clientSecret }}"
             - name: AWS_ACCESS_KEY_ID
@@ -114,24 +89,12 @@ spec:
               value: {{ .Values.polaris.config.awsRegion | quote }}
           resources:
             {{- toYaml .Values.polaris.resources | nindent 12 }}
-          # Polaris 1.8 takes ~80 s to boot on the in-memory metastore and
-          # several minutes on the first JDBC-mapped start (Hibernate schema
-          # creation). With initialDelay 20 s and the default failureThreshold
-          # of 3, the old liveness probe killed it at ~80 s, every time, before
-          # it could serve a single request: 105 restarts and a permanent
-          # CrashLoopBackOff. A startupProbe suspends liveness and readiness
-          # until the server is genuinely up, which is the only correct way to
-          # express a slow boot. Budget: 5 s x 120 = 10 minutes.
+          # Slow boot, so a startupProbe holds liveness and readiness back: 5s x 120.
           startupProbe:
             httpGet:
               path: /q/health/ready
               port: 8182
-            # Without this the probe gets the Kubernetes default timeoutSeconds
-            # of 1s, which is shorter than the GC pause a loaded Quarkus JVM
-            # produces. s1-ingestion/values.yaml already learned this for
-            # PostgreSQL ("the default 1s exec timeout flaps and restarts
-            # PostgreSQL needlessly"); these HTTP probes never got the same
-            # treatment. Upstream Polaris ships 10.
+            # 1s (the default) is shorter than a GC pause in a loaded Quarkus JVM.
             timeoutSeconds: 10
             periodSeconds: 5
             failureThreshold: 120

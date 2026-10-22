@@ -1,8 +1,6 @@
-"""
-Modern Data Architecture POC - Unit Tests: RF-11 Unified Serving Query.
-Verifies no-double-count semantics of QueryServingUseCase + SqlServingAdapter
-against an isolated tmp_path SQLite database. Adapters/use case are constructed
-DIRECTLY - src.container is never imported (other agents own its wiring).
+"""Unit tests: unified serving query.
+
+Verifies no-double-count semantics against an isolated tmp_path SQLite database.
 """
 
 from __future__ import annotations

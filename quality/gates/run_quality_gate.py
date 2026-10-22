@@ -2,7 +2,7 @@
 run_quality_gate.py - Quality gate runner for data pipelines.
 Driving Adapter invoking RunQualityGateUseCase via Hexagonal Architecture container.
 Runs Great Expectations validation suites against Lakehouse tables or local files.
-Blocks pipeline progression if quality threshold is not met (RF-06).
+Blocks pipeline progression if quality threshold is not met.
 
 The CLI never evaluates expectations itself: it delegates to
 ``container.run_quality_gate.execute(...)`` so the fail-closed core rules
@@ -15,7 +15,7 @@ none - so this CLI can never PASS a table that promotion then rejects.
 Exit codes:
   0: Quality gate PASSED
   1: Quality gate FAILED (blocks pipeline) - includes "no records to evaluate"
-     (fail-closed empty evaluation, RF-06)
+     (fail-closed empty evaluation)
   2: Execution error (e.g. SuiteNotFoundError, unreadable --input-file)
 """
 
@@ -159,7 +159,7 @@ def main(
             if not isinstance(records, list):
                 raise ValueError(f"Input file must contain a JSON array of records: {input_file}")
 
-        # 2. Delegate to the core use case - the fail-closed rules (RF-06) live
+        # 2. Delegate to the core use case - the fail-closed rules live
         #    there: a failing verdict raises QualityGateBreachError carrying
         #    the evaluation (exit 1: blocked), a missing suite raises
         #    SuiteNotFoundError (exit 2: execution error).

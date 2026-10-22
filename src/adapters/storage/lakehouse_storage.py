@@ -1,15 +1,7 @@
-"""
-Modern Data Architecture POC - Lakehouse Storage Adapter.
-Implements LakehouseStoragePort on an embedded ACID relational engine (SQLite)
-with snapshot bookkeeping tables.
+"""Modern Data Architecture POC - Lakehouse storage adapter.
 
-Provides:
-- RF-01 idempotent landing: content-hash based deduplication for appends and
-  overwrite-as-supersede semantics (nothing is physically deleted).
-- RF-07 time travel: every successful write records a new incremental snapshot
-  version and prior row versions stay readable through ``read_table(version=...)``.
-- Controlled schema evolution: record columns missing from an existing table are
-  added with ``ALTER TABLE ... ADD COLUMN`` before the write proceeds.
+Implements LakehouseStoragePort on SQLite with content-hash idempotency,
+overwrite-as-supersede and snapshot time travel.
 """
 
 from __future__ import annotations
@@ -47,36 +39,8 @@ INTERNAL_COLUMN_TYPES: dict[str, str] = {
 class LakehouseStorageAdapter(LakehouseStoragePort):
     """ACID lakehouse storage adapter for local and containerized execution.
 
-    Normalizes dot-separated table names (e.g. ``bronze.sales.orders``) into
-    managed SQL tables and tracks one row per snapshot bookkeeping entry in
-    ``_lakehouse_snapshots``.
-
-    Versioning model
-    ----------------
-    Each successful write computes ``new_version = max(snapshot_version of the
-    table) + 1`` (1 when the table has no snapshots yet) and stamps every newly
-    inserted row with ``_row_version = new_version``. Rows superseded by a later
-    write keep ``_row_superseded = <version that replaced them>``, so they are
-    excluded from live reads but remain visible for historical reads.
-    ``read_table(version=N)`` returns the rows of the table as of version N:
-    ``_row_version <= N`` and (``_row_superseded IS NULL`` or ``_row_superseded > N``).
-    A write that would not change content (idempotent append, overwrite with the
-    identical live content) returns 0 and records no snapshot.
-
-    Legacy table compatibility
-    --------------------------
-    Tables created by earlier revisions of this adapter only carry the business
-    columns plus ``_snapshot_time``. Whenever such a table is opened for reading
-    or writing, the missing internal columns are added with
-    ``ALTER TABLE ... ADD COLUMN`` and default to NULL. A NULL ``_row_superseded``
-    marks a live row, and a NULL ``_row_version`` is interpreted as version 0, so
-    legacy rows stay live and remain visible in every historical read. Rows newly
-    written on top of them carry real snapshot versions, which keeps time travel
-    consistent across pre-existing and freshly written data.
-
-    Internal columns (``_snapshot_time``, ``_row_version``, ``_row_superseded``,
-    ``_content_hash``) are stripped from read output, while business audit
-    columns (``_ingested_at``, ``_source``, ``_batch_id``) are preserved.
+    Each write records a snapshot; superseded rows stay readable for time
+    travel. Missing internal columns are added automatically.
     """
 
     def __init__(self, db_path: str = "data/lakehouse.db") -> None:
@@ -116,11 +80,8 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
             if "mode" not in snapshot_columns:
                 conn.execute("ALTER TABLE _lakehouse_snapshots ADD COLUMN mode TEXT;")
             conn.commit()
-            # Belt-and-braces uniqueness for the (table, version) pair so two
-            # racing writers can never publish the same snapshot version
-            # (RF-07). Legacy databases that already hold duplicate versions
-            # keep working: the index is skipped with a warning, and
-            # BEGIN IMMEDIATE below still serializes new writers.
+            # Uniqueness for (table, version) so racing writers cannot publish
+            # the same version; pre-existing duplicates skip the index with a warning.
             try:
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS ux_snapshots_table_version "
@@ -142,13 +103,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
     @staticmethod
     def _stored_value(value: Any) -> Any:
-        """Maps a Python value to its SQLite storage value, preserving numerics.
-
-        ``None`` stays NULL; ``bool`` is stored as INTEGER 0/1 (SQLite has no
-        native boolean); ``int``/``float`` keep their type so INTEGER/REAL
-        column affinities hold them without TEXT coercion; ``dict``/``list``
-        are JSON-encoded; anything else is stored as TEXT via ``str()``.
-        """
+        """Maps a Python value to its SQLite storage value, preserving numerics."""
         if value is None:
             return None
         if isinstance(value, bool):
@@ -172,14 +127,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
 
     @staticmethod
     def _infer_column_affinities(records: list[dict[str, Any]], columns: list[str]) -> dict[str, str]:
-        """Infers SQLite column affinities from the Python types of ``records``.
-
-        A column holding any string/complex value is TEXT; else any float makes
-        it REAL; else any int/bool makes it INTEGER; all-NULL columns default
-        to TEXT. This keeps ``typeof(col)`` INTEGER/REAL for typed Silver data
-        instead of coercing everything to TEXT (a TEXT-affinity column converts
-        incoming numerics to TEXT on write).
-        """
+        """Infers SQLite column affinities from the Python types of ``records``."""
         affinities: dict[str, str] = {}
         for column in columns:
             has_text = False
@@ -216,8 +164,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
     def _ensure_internal_columns(self, conn: sqlite3.Connection, clean_name: str) -> None:
         """Adds every missing internal versioning column to ``clean_name``.
 
-        Legacy tables receive the columns with NULL defaults, which the read
-        path interprets as "live row at version 0" (see the class docstring).
+        New columns default to NULL, interpreted as a live row at version 0.
         """
         existing = self._table_columns(conn, clean_name)
         for column, column_type in INTERNAL_COLUMN_TYPES.items():
@@ -240,13 +187,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         columns: list[str],
         affinities: dict[str, str] | None = None,
     ) -> None:
-        """Creates ``clean_name`` (or adds missing columns) honouring type affinities.
-
-        Business columns use the inferred ``affinities`` (INTEGER/REAL/TEXT from
-        the Python value types); a missing entry defaults to TEXT. Pre-existing
-        columns keep their declared affinity (SQLite cannot change it in place):
-        tables created before typed writes stay TEXT-affined for those columns.
-        """
+        """Creates the table (or adds missing columns) honouring affinities."""
         resolved = affinities or {}
         if not self._table_exists(conn, clean_name):
             definitions = [f'"{column}" {resolved.get(column, "TEXT")}' for column in columns]
@@ -274,17 +215,10 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         records: list[dict[str, Any]],
         mode: str = "append",
     ) -> int:
-        """Writes records with RF-01 content-hash idempotency and RF-07 versioning.
+        """Writes records with content-hash idempotency and versioning.
 
-        ``mode="append"`` inserts only rows whose content hash is absent from the
-        table (live or superseded); a fully duplicate batch returns 0 and creates
-        no snapshot.         ``mode="overwrite"`` supersedes all live rows by setting
-        ``_row_superseded`` to the new version (rows are never deleted, so prior
-        snapshots stay readable) and then inserts the new rows; when the incoming
-        content equals the current live content it is a no-op returning 0.
-        Overwriting with an empty set reconciles the table to empty (RF-10: a
-        replayed empty log clears the speed table instead of leaving stale rows
-        behind); a missing table stays missing in that case.
+        Append inserts only unseen rows; overwrite supersedes live rows without
+        deleting them. An empty overwrite reconciles the table to empty.
         """
         if mode not in ("append", "overwrite"):
             raise ValueError(f"Unsupported write mode '{mode}'. Expected 'append' or 'overwrite'.")
@@ -295,11 +229,8 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         now_iso = datetime.now(UTC).isoformat()
 
         with self._connection() as conn:
-            # Serialize concurrent writers (RF-07): the SELECT MAX below must
-            # not run in autocommit, otherwise two writers read the same
-            # maximum and publish duplicate snapshot versions (TOCTOU).
-            # BEGIN IMMEDIATE takes the RESERVED lock up front; concurrent
-            # writers wait on the busy timeout instead of interleaving.
+            # Serialize concurrent writers: BEGIN IMMEDIATE avoids a TOCTOU
+            # on the snapshot version.
             conn.execute("BEGIN IMMEDIATE")
             if not records:
                 # Overwrite-to-empty: supersede every live row under a new
@@ -405,11 +336,9 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
         limit: int | None = None,
         version: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Reads live rows (``version=None``) or the state as of ``version`` (RF-07).
+        """Reads live rows (``version=None``) or the state as of ``version``.
 
-        Rows are ordered by ``rowid`` so output is deterministic and ``limit`` is
-        applied after ordering. Internal versioning columns are stripped while
-        business audit columns are kept.
+        Rows are ordered by rowid; internal versioning columns are stripped.
         """
         clean_name = self._normalize_name(table_name)
         with self._connection() as conn:
@@ -455,7 +384,7 @@ class LakehouseStorageAdapter(LakehouseStoragePort):
             return [row["name"] for row in cursor.fetchall() if row["name"] not in INTERNAL_COLUMN_TYPES]
 
     def list_versions(self, table_name: str) -> list[dict[str, Any]]:
-        """Lists snapshots of ``table_name`` oldest to newest (RF-07).
+        """Lists snapshots of ``table_name`` oldest to newest.
 
         ``row_count`` is the number of rows written by that snapshot.
         """

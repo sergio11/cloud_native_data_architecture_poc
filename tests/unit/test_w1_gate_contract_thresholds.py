@@ -1,16 +1,7 @@
-"""Unit tests: standalone quality gate honors contract thresholds (W1).
+"""Unit tests: standalone quality gate honors contract thresholds.
 
-Regression for the split-brain policy: ``RunQualityGateUseCase`` used to apply
-only the passed/global threshold while Silver/Gold promotion
-(``gate_support.enforce_quality_gate``) enforced the contract thresholds, so
-the same table could PASS the standalone gate and FAIL promotion. The use case
-now resolves the governing contract through ``ContractCatalogPort`` and assesses
-the verdict with the same domain policy (``assess_gate``).
-
-Scenario pinned here: 50 completeness assertions, 48 of which pass, so the
-overall pass rate is 0.96 (>= a 0.95 fallback threshold) while the measured
-per-record completeness dimension is 0.97 (3 distinct rows with nulls out of
-100, < the contract's 0.98).
+``RunQualityGateUseCase`` resolves the governing contract through
+``ContractCatalogPort`` and assesses it with the same domain policy.
 """
 
 from __future__ import annotations
@@ -94,8 +85,7 @@ def test_contract_thresholds_override_the_fallback_threshold(tmp_path) -> None:
         catalog=catalog,
     )
 
-    # Old behaviour: threshold-only arithmetic (0.96 >= 0.95) PASSED here while
-    # promotion failed the same table. The contract must govern.
+    # The contract must govern even when threshold-only arithmetic would pass.
     with pytest.raises(QualityGateBreachError) as exc_info:
         use_case.execute(
             "silver.sales.orders",
@@ -106,10 +96,7 @@ def test_contract_thresholds_override_the_fallback_threshold(tmp_path) -> None:
 
     breach = exc_info.value
     assert breach.evaluation is not None
-    # The breach carries the FAILED verdict (QA regression: a contract-dimension
-    # breach used to attach an evaluation with passed=True because the engine's
-    # global-threshold arithmetic was fine — the CLI then exited 0 / printed
-    # PASSED while the contract blocked the gate).
+    # The breach carries the FAILED verdict even when global arithmetic passes.
     assert breach.evaluation.passed is False
     assert breach.evaluation.pass_rate == 0.96
     assert breach.evaluation.dimension_rates["completeness"] == 0.97

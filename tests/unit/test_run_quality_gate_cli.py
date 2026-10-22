@@ -1,9 +1,6 @@
-"""Unit tests: quality-gate CLI flag/env routing (A2) and threshold panel (M3).
+"""Unit tests: quality-gate CLI flag/env routing and threshold panel.
 
-Hermetic: records travel through ``--input-file`` (storage is never read) and
-``requests.post`` is stubbed, so no Marquez server is needed; the lineage audit
-trail is redirected under ``tmp_path`` and the global container's cached
-lineage adapter is evicted before/after each run.
+Hermetic: records travel through ``--input-file`` and ``requests.post`` is stubbed.
 """
 
 from __future__ import annotations
@@ -51,11 +48,7 @@ def _write_records(tmp_path: Path) -> str:
 
 
 def test_marquez_url_flag_routes_each_invocation_to_its_url(tmp_path: Path, monkeypatch: Any) -> None:
-    """Two invocations with different --marquez-url must POST to their own URL.
-
-    Regression (A2): the flag used to be a mere on/off switch while the POST
-    always left for the default URL.
-    """
+    """Two invocations with different --marquez-url must POST to their own URL."""
     cli = _load_cli()
     posted_urls: list[str] = []
 

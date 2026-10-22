@@ -9,11 +9,7 @@ marquez:
     type: NodePort
     apiPort: 5000
     webPort: 3000
-    # The NodePort belongs on the WEB port (what kind forwards to the host as
-    # 3002), not on the API port. It used to be called nodePortApi and carry
-    # 30002: the value was on the wrong port AND on the wrong number, so
-    # http://localhost:3002 refused connections. cluster-config.yaml widens
-    # service-node-port-range to 1-65535, so 3002 is legal.
+    # Belongs on the WEB port (what kind forwards as 3002), not the API port.
     nodePortWeb: 3002
   resources:
     limits:
@@ -23,10 +19,7 @@ marquez:
       cpu: "100m"
       memory: "256Mi"
 
-# The database Marquez keeps its catalogue in. The image's default
-# configuration points at a host called "postgres" and the server dies in the
-# Flyway migration when it cannot resolve it, so the database is deployed with
-# the chart (the upstream chart ships it as a subchart).
+# Marquez's catalog database: the image defaults to a host called "postgres".
 marquezPostgres:
   enabled: true
   image:
@@ -49,7 +42,7 @@ alertService:
   enabled: true
   replicaCount: 1
   image:
-    # Built from lineage/config (that dir is the build context):
+    # Build context is lineage/config:
     #   docker build -f lineage/config/Dockerfile -t poc/lineage-webhook:0.1.0 lineage/config/
     repository: poc/lineage-webhook
     tag: 0.1.0
@@ -64,7 +57,7 @@ alertService:
     requests:
       cpu: "50m"
       memory: "64Mi"
-  # SQLite backing store for LINEAGE_DB_PATH (/data/lineage_events.db).
+  # SQLite store behind LINEAGE_DB_PATH.
   persistence:
     enabled: true
     size: 1Gi

@@ -1,16 +1,7 @@
-"""
-Modern Data Architecture POC - Filesystem Domain Catalog Adapter.
-Implements DomainCatalogPort by recursively scanning ``domains/**`` for
-``product.yaml``, ``contract.yaml`` and ``schema.json`` manifests (RF-13/RF-15).
+"""Modern Data Architecture POC - Filesystem Domain Catalog Adapter.
 
-Discovery is deterministic (results sorted by path) and never crashes on
-malformed input: a file that fails to parse (YAML/JSON error) or whose root
-document is not a mapping is skipped with ``logger.error`` including its path.
-The port contract exposes 2-tuples ``(path, parsed_content)`` only, so parse
-failures surface to consumers indirectly - the validation use case detects
-skipped files through sibling/count cross-checks (missing product/contract/
-schema for a manifest that does exist on disk), while the adapter log always
-carries the exact parse error. Only stdlib + PyYAML + logging; no network.
+Implements DomainCatalogPort by scanning ``domains/**`` for product, contract
+and schema manifests. Malformed files are skipped and logged.
 """
 
 from __future__ import annotations
@@ -49,8 +40,7 @@ class FsDomainCatalogAdapter(DomainCatalogPort):
     def load_governance_schema(self, schema_filename: str) -> dict[str, Any] | None:
         """Loads ``<repo_root>/governance/schemas/<schema_filename>`` as a dict.
 
-        Returns None (logging a warning) when the file is missing or invalid,
-        so the validation use case falls back to structural checks only.
+        Returns None when missing or invalid; validation then runs structural checks.
         """
         schema_path = os.path.join(self._repo_root, "governance", "schemas", schema_filename)
         try:

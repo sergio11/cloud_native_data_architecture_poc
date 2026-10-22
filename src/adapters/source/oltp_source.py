@@ -19,15 +19,10 @@ TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class OltpSourceAdapter(OltpSourcePort):
-    """
-    Adapter extracting operational relational tables.
-    Supports PostgreSQL connection with seamless fallback to embedded operational seed.
-    RNF-07: no embedded credentials - PGPASSWORD is read only from the environment;
-    when it is unset PostgreSQL is treated as unavailable and the embedded
-    synthetic generator serves the local demo profile instead.
-    The returned ``ExtractionResult.origin`` is honest provenance: ``"postgresql"``
-    for any successful query (even one returning zero rows), ``"synthetic"`` when
-    the embedded generator served the records.
+    """Extracts operational relational tables.
+
+    Uses PostgreSQL when PGPASSWORD is configured, otherwise the embedded
+    synthetic generator. ``ExtractionResult.origin`` reports the true source.
     """
 
     def __init__(
@@ -66,7 +61,7 @@ class OltpSourceAdapter(OltpSourcePort):
         self._validate_identifier(table_name)
         limit = self._validate_limit(limit)
 
-        # 1. Try PostgreSQL connection if psycopg2 is installed and a password is configured
+        # 1. Try PostgreSQL when psycopg2 is installed and a password is configured
         password = os.getenv("PGPASSWORD")
         if not password:
             logger.info(
@@ -85,12 +80,8 @@ class OltpSourceAdapter(OltpSourcePort):
                     exc,
                 )
             else:
-                # Only connection/query failures trigger the synthetic fallback.
-                # psycopg2 reports them as subclasses of ``psycopg2.Error``
-                # (plus OSError for transport-level failures); everything else
-                # (TypeError, ValueError, AttributeError, ...) is a programming
-                # error and must propagate instead of silently serving
-                # fabricated rows.
+                # Only connection/query failures trigger the synthetic fallback;
+                # other errors are programming errors and must propagate.
                 connection_errors: tuple[type[BaseException], ...] = (OSError,)
                 pg_error = getattr(psycopg2, "Error", None)
                 if isinstance(pg_error, type):
@@ -113,11 +104,8 @@ class OltpSourceAdapter(OltpSourcePort):
                             rows = [dict(r) for r in cur.fetchall()]
                     finally:
                         conn.close()
-                    # A successful query is authoritative even when it returns zero
-                    # rows: an empty real table yields [], never synthetic records.
-                    # The synthetic fallback below applies ONLY to connection/query
-                    # failures (or an unconfigured PostgreSQL), so lineage always
-                    # describes the true origin of the returned rows.
+                    # A successful query is authoritative even with zero rows;
+                    # the synthetic fallback applies only to connection failures.
                     logger.info("Extracted %d records from PostgreSQL '%s'", len(rows), table_name)
                     return ExtractionResult(records=rows, origin="postgresql")
                 except connection_errors as exc:
@@ -127,7 +115,7 @@ class OltpSourceAdapter(OltpSourcePort):
                         exc,
                     )
 
-        # 2. Fallback to generating high-fidelity synthetic relational records
+        # 2. Fall back to synthetic relational records
         logger.warning(
             "SYNTHETIC fallback data: generating embedded demo records for table '%s' (not live PostgreSQL rows)",
             table_name,

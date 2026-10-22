@@ -1,18 +1,6 @@
-# ==============================================================================
-# DataProduct CRD (subsystem S6: Data Mesh)
+# DataProduct CRD. Lives in crds/, not templates/ (see datacontract-crd.yaml).
 #
-# Lives in crds/, NOT templates/ - see datacontract-crd.yaml for why: from
-# templates/ the CRD is three-way-merged on every upgrade and deleted by
-# `helm uninstall`, which would wipe every DataProduct in the cluster.
-#
-# Schema describes domains/<domain>/data-products/<product>/product.yaml. The
-# previous version declared assets.items, quality and lineage as bare
-# `type: object` with no properties: those are structural schemas, so the API
-# server pruned every child. A DataProduct applied against it lost the asset
-# paths (s3://datalake/.../gold/sales/daily_metrics, sales.orders.events), the
-# quality thresholds and the lineage steps - silently, with no error. They are
-# enumerated below now.
-# ==============================================================================
+# Sub-schemas are enumerated because a bare `type: object` prunes its children.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:

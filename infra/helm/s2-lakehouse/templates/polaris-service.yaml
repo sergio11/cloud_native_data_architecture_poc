@@ -14,9 +14,7 @@ spec:
       port: {{ .Values.polaris.service.port }}
       targetPort: 8181
       {{- if eq .Values.polaris.service.type "NodePort" }}
-      # nodePort is rejected by the API server on a ClusterIP Service
-      # ("may not be used when 'type' is 'ClusterIP'"), so it is emitted only
-      # when the type is actually NodePort.
+      # nodePort is rejected on a ClusterIP Service, so emit it only for NodePort.
       nodePort: {{ .Values.polaris.service.nodePort }}
       {{- end }}
       protocol: TCP

@@ -1,43 +1,7 @@
-"""
-W8 architecture gate: hexagonal dependency DIRECTION enforced via stdlib AST.
+"""W8 architecture gate: hexagonal dependency direction enforced via stdlib AST.
 
-No import-linter (dev-only dependency ban): this test parses every ``src/``
-module with :mod:`ast` and asserts the dependency rules that the hexagonal
-design promises but nothing else enforces.
-
-Forbidden-import matrix (derived 2026-10-03 from the ACTUAL imports of the
-then-clean tree; the allowlists are ratchets - adding a new import outside the
-allowlist fails the test and must be justified in review):
-
-=================  =========================================  =========================
-Layer              MAY import                                 MUST NOT import
-=================  =========================================  =========================
-src/domain/**      stdlib: __future__, collections, datetime,  src.ports, src.use_cases,
-                   logging, typing, dataclasses, enum,          src.adapters, src.container,
-                   hashlib; src.domain.**                      ANY other top-level module
-                                                               (sqlite3, yaml, requests,
-                                                               pathlib, os, sys, json,
-                                                               urllib, http, kafka, ... are
-                                                               therefore all forbidden)
-src/ports/**       stdlib: __future__, typing;                 src.use_cases, src.adapters,
-                   src.domain.**, src.ports.**                 src.container; any other module
-src/use_cases/**   stdlib: __future__, logging, typing,        src.adapters, src.container
-                   dataclasses, datetime, pathlib, uuid;       (also caught by the allowlist);
-                   third-party: jsonschema (observed,          any other third-party module
-                   opportunistic import inside the use case);
-                   src.domain.**, src.ports.**, src.use_cases.**
-src/adapters/**    anything EXCEPT the two columns at right    src.use_cases, src.container
-src/container.py   (composition root) - no rules               -
-=================  =========================================  =========================
-
-TYPE_CHECKING policy: ``if TYPE_CHECKING:`` imports are read separately and
-subject to the SAME rules as runtime imports. In particular an adapter may not
-import ``src.use_cases`` even for annotations (the dependency must not exist in
-any form), and the domain layer may import nothing beyond its allowlist even
-under TYPE_CHECKING.
-
-The policy engine is also fed SYNTHETIC sources (``test_engine_*``) so a rule
-that silently stops matching cannot rot unnoticed.
+This test parses every ``src/`` module and asserts the dependency rules the
+hexagonal design promises; allowlists are ratchets that fail on new imports.
 """
 
 from __future__ import annotations

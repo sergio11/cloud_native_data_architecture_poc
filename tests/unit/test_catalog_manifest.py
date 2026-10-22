@@ -1,10 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: Catalog Manifests & Quality Resource.
+"""Unit tests: catalog manifests and the Dagster quality resource.
 
-Hermetic tests (tmp_path fixtures only, no network: HTTP calls are monkeypatched
-at the ``_request`` boundary).  The Dagster quality resource is verified against
-a stubbed ``src.container`` module injected into ``sys.modules`` - the real
-container (and its lakehouse adapters) is never imported here.
+Hermetic: tmp_path fixtures only, HTTP calls monkeypatched at the ``_request``
+boundary and a stubbed ``src.container``.
 """
 
 from __future__ import annotations
@@ -374,16 +371,8 @@ def test_registry_identifiers_match_pipeline_reality() -> None:
 def test_registry_matches_unified_view_selects() -> None:
     """Verify unified_view.sql reads the registered gold/stream tables.
 
-    Catalog consolidation (2026-10-11): the SQL no longer uses the Trino
-    multi-catalog format "gold.sales.X" / "stream.sales.X". All tables are
-    now accessed via a single Trino catalog "iceberg":
-        iceberg.sales.daily_metrics    ← was gold.sales.daily_metrics
-        iceberg.sales.orders_windowed  ← was stream.sales.orders_windowed
-
-    The logical registry names still use the tier prefix ("gold.", "stream."),
-    so we map iceberg references back:
-        iceberg.sales.daily_metrics  → gold.sales.daily_metrics   (in GOLD_TABLES)
-        iceberg.sales.orders_windowed → stream.sales.orders_windowed (in STREAM_TABLES)
+    All tables live under the single Trino catalog "iceberg"; registry names
+    keep the "gold." / "stream." tier prefix, so map references back.
     """
     sql = (REPO_ROOT / "pipelines" / "serving" / "unified_view.sql").read_text(encoding="utf-8")
 

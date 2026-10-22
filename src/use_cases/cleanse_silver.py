@@ -1,7 +1,6 @@
-"""
-Modern Data Architecture POC - Silver Layer Cleansing & Quality Gate Use Case.
-Applies deduplication, type casting, quality gate assertion checks,
-and promotes validated records into Silver lakehouse storage.
+"""Modern Data Architecture POC - Silver cleansing and quality gate use case.
+
+Deduplicates, casts and quality-gates Bronze records before promoting to Silver.
 """
 
 from __future__ import annotations
@@ -29,13 +28,10 @@ _FALSE_TOKENS: frozenset[str] = frozenset({"false", "f", "0", "no", "n"})
 
 
 def _resolve_entity_field_types(catalog: ContractCatalogPort | None, entity: str) -> dict[str, str]:
-    """Returns canonical type families for ``entity`` from its data contract (no I/O here).
+    """Returns canonical type families for ``entity`` from its data contract.
 
-    The contract is the ``list_contracts()`` entry whose path contains the
-    ``data-products/<entity>/`` segment (first match wins, same convention as
-    ``gate_support.find_contract_thresholds``). Returns {} when there is no
-    catalog, no matching contract, or the contract is unreadable: typing is then
-    skipped (fail-open) and the quality gate still guards promotion.
+    Returns {} when no contract is found or readable; typing is then skipped
+    and the quality gate still guards promotion.
     """
     if catalog is None:
         return {}
@@ -59,9 +55,7 @@ def _resolve_entity_field_types(catalog: ContractCatalogPort | None, entity: str
 def _cast_value(value: Any, family: str) -> tuple[Any, bool]:
     """Casts ``value`` to the contract ``family``; returns (result, ok).
 
-    ``""``/unknown families: value untouched (ok=True). Dates/strings stay TEXT.
-    Unparseable values are NOT converted here (caller keeps the original and
-    counts a ``cast_failures`` entry: fail-open typing, the gate still blocks).
+    Unparseable values keep the original value and report ``ok=False``.
     """
     if value is None:
         return None, True
@@ -162,8 +156,7 @@ class CleanseSilverUseCase(CleanseSilverPort):
         raw_records = self._reader.read_table(source_table)
         if not raw_records:
             logger.warning("No records found in '%s'. Skipping promotion.", source_table)
-            # The EMPTY shape mirrors the SUCCESS contract (target_table and
-            # quality_pass_rate included): drivers index those keys directly.
+            # EMPTY mirrors the SUCCESS contract keys.
             empty_result: dict[str, Any] = {
                 "entity": entity,
                 "target_table": target_table,
@@ -175,13 +168,8 @@ class CleanseSilverUseCase(CleanseSilverPort):
             }
             return cast(CleanseSilverResult, empty_result)
 
-        # 2. Deduplicate records based on primary key ('id'):
-        # latest snapshot wins (RF-01 periodic snapshots). read_table returns
-        # rows ordered by rowid ASC (oldest first), so iterating in order and
-        # letting each later occurrence overwrite keeps the most recent snapshot.
-        # Rows with a NULL id carry no identity and are dropped, but COUNTED
-        # (auditable via dropped_null_id; the gate still evaluates the deduped
-        # set exactly as before, so no gate semantic change).
+        # 2. Deduplicate by primary key 'id': latest snapshot wins.
+        # Rows with a NULL id are dropped and counted.
         latest: dict[object, dict[str, Any]] = {}
         dropped_null_id = 0
         for r in raw_records:
@@ -202,12 +190,8 @@ class CleanseSilverUseCase(CleanseSilverPort):
                 source_table,
             )
 
-        # 2b. Explicit typing (RF-04): cast each field to the type declared by
-        # the entity contract schema (families resolved through the injected
-        # catalog port: no new I/O in the use case). Integers -> int, decimals
-        # -> float, booleans -> bool, dates/strings -> TEXT (dates stay TEXT,
-        # SQLite standard). Unparseable values keep the ORIGINAL value and bump
-        # cast_failures (fail-open typing; the quality gate still blocks).
+        # 2b. Explicit typing: cast each field to its contract schema type.
+        # Unparseable values keep the original and bump ``cast_failures``.
         field_families = _resolve_entity_field_types(self._catalog, entity)
         typed: list[dict[str, Any]] = []
         cast_failures = 0
@@ -235,12 +219,7 @@ class CleanseSilverUseCase(CleanseSilverPort):
                 target_table,
             )
 
-        # 3. Quality Gate Enforcement (RF-06, fail-closed: a missing suite raises
-        #    SuiteNotFoundError which must propagate - never a silent pass).
-        #    Hexagonal note: the core holds no filesystem conventions - the
-        #    driver resolves the suite path per entity and passes it explicitly.
-        #    Threshold resolution, lineage emission and breach raising live in
-        #    the shared gate_support collaborator (single policy for Silver/Gold).
+        # 3. Quality gate (fail-closed): a missing suite propagates.
         quality_pass_rate = enforce_quality_gate(
             quality_engine=self._quality,
             lineage=self._lineage,

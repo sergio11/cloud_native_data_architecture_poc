@@ -1,6 +1,5 @@
-# Self-contained Grafana (no upstream subchart; offline env).
-# The dashboard JSON comes from the chart asset dashboards/platform-overview.json
-# via .Files.Get (raw, no templating; single-brace JSON is Helm-safe).
+# Self-contained Grafana (no upstream subchart; offline env). The dashboard JSON
+# comes from dashboards/platform-overview.json via .Files.Get (raw, no templating).
 {{- if .Values.grafana.enabled }}
 apiVersion: v1
 kind: ConfigMap
@@ -19,12 +18,8 @@ data:
         type: file
         options:
             path: /var/lib/grafana/dashboards
-  # The dashboard PROVIDER was provisioned but the DATASOURCE never was, and no
-  # panel in platform-overview.json declares a "datasource" key. Grafana
-  # therefore defaulted to a datasource that does not exist and every panel
-  # rendered "No data" - which is indistinguishable, to whoever is looking,
-  # from Prometheus genuinely having nothing to report.
-  # uid is pinned so the panels can reference it (see the dashboard JSON).
+  # The datasource was never provisioned and panels declare no "datasource", so every
+  # panel rendered "No data". uid is pinned so panels can reference it.
   datasources.yaml: |
     apiVersion: 1
     datasources:
@@ -82,9 +77,8 @@ spec:
             - name: provisioning
               mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
               subPath: datasources.yaml
-          # Grafana had no probes, so a pod stuck on a full disk stayed in the
-          # Service endpoints and the NodePort answered nothing at all.
-          # /api/health is Grafana's own documented unauthenticated endpoint.
+          # Grafana had no probes, so a stuck pod stayed in the Service endpoints.
+          # /api/health is its documented unauthenticated endpoint.
           startupProbe:
             httpGet:
               path: /api/health

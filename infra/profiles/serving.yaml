@@ -1,43 +1,17 @@
-# ==============================================================================
-# Modern Data Architecture POC - Startup Profile: Serving
-# File: infra/profiles/serving.yaml
-# CONTRACT (K-B): each `subsystems.<chart>` is a verbatim Helm values fragment
-# for infra/helm/<chart> (keys verified 1:1 against each chart's values.yaml).
-#
-# This is the phase that answers RF-11: Trino reads the batch gold table AND
-# the stream speed table through the single `iceberg` catalog (Polaris REST +
-# MinIO) and the unified view merges them without double counting.
-#
-# It is a SEPARATE profile from batch/stream on purpose: 6 GiB cannot hold
-# the Spark tier (1.8 GiB of limits) and Trino (1.2 GiB) and Flink (1.8 GiB)
-# at the same time. The data is in the lakehouse, not in a pod, so the phases
-# run one after another and the unified view still sees both branches.
-#
-# s1 and s2 are (re)installed here because the profile contract lists every
-# chart it owns, and `helm upgrade --install` is idempotent: the PVCs and the
-# lakehouse content survive.
-#
-# Target RAM Footprint (container LIMITS):
-#   minio 320 + polaris 384 + trino 1024 = 1728 MiB
-# plus ~3.5 GB of kind overhead (the three node containers themselves are
-# 2.0 + 1.5 + 1.6 GB measured from the host), which is what the 5.9 GiB VM
-# actually has to give.
-#
-# The OLTP Postgres is NOT part of this phase: serving reads the lakehouse,
-# and postgres would only add 384MiB of limits for a database nothing in the
-# serving path touches.
-# ==============================================================================
+# Serving profile. Each `subsystems.<chart>` is a verbatim Helm values fragment
+# for infra/helm/<chart>. Trino reads the batch and speed tables through the
+# single `iceberg` catalog; the unified view merges them.
+
 profile:
   name: "serving"
-  description: "Trino serving layer over the Iceberg lakehouse (unified batch + stream view, RF-11)"
+      description: "Trino serving layer over the Iceberg lakehouse (unified batch + stream view)"
   targetRamMb: 1728
   targetCpuCores: 2.5
 
 subsystems:
   s1-ingestion:
     postgresql:
-      # OFF: the serving phase reads the lakehouse, not the OLTP source. The
-      # 384MiB of limits it costs are 384MiB the coordinator does not get.
+      # Off: serving reads the lakehouse, not the OLTP source.
       enabled: false
     ingestionRunner:
       enabled: false
@@ -65,16 +39,7 @@ subsystems:
   s5-serving:
     trino:
       enabled: true
-      # Heap must leave room for metaspace and direct buffers inside the
-      # container limit. 1024M in 1280Mi is exactly the combination
-      # s5-serving/values.yaml calls out as an OOM risk, and the chart runs with
-      # -XX:+ExitOnOutOfMemoryError, so the first heap excursion kills the pod.
-      # 896M gives ~384MiB of headroom, which is what the chart ships.
-      #
-      # 1280Mi -> 1024Mi with a 640M heap: the query memory has to follow the
-      # heap down, because Trino refuses to start when the per-node query
-      # memory plus 30% of the heap exceeds the heap
-      # (maxMemoryPerNode 256MB + 192MB headroom = 448MB, inside 640MB).
+      # Heap must leave room for metaspace and direct buffers inside the limit.
       resources:
         requests:
           cpu: "400m"

@@ -1,12 +1,7 @@
-"""Unit tests: extraction provenance (W1) - honest ``ExtractionResult.origin``.
+"""Unit tests: extraction provenance (W1).
 
-Covers the two ends of the provenance contract:
-  * a successful PostgreSQL query (including one returning zero rows) reports
-    ``origin="postgresql"``, and only connection/query failures (or an
-    unconfigured source) fall back to the generator with
-    ``origin="synthetic"`` - programming errors propagate instead;
-  * ``IngestBronzeUseCase`` stamps the origin verbatim on the ``_source``
-    audit column AND on the OpenLineage input dataset, so both always agree.
+Covers ``ExtractionResult.origin`` for real and synthetic sources, and the
+``IngestBronzeUseCase`` stamping on the audit column and lineage dataset.
 """
 
 from __future__ import annotations

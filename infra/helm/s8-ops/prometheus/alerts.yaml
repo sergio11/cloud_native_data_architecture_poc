@@ -1,15 +1,7 @@
 groups:
   - name: modern_data_platform_alerts
     rules:
-      # ------------------------------------------------------------------------
-      # DISABLED (rule commented out, not deleted - restore it when the metric
-      # exists). data_quality_assertion_success_ratio is not emitted by any
-      # component in this POC: the quality gates live in quality/gates/ and
-      # report through Marquez and the console, not through a Prometheus
-      # exposition endpoint. With the rule active Prometheus evaluates it
-      # against an empty series forever, which is indistinguishable from a
-      # healthy system.
-      # ------------------------------------------------------------------------
+      # Disabled: no component exposes data_quality_assertion_success_ratio.
       # - alert: DataQualityBreach
       #   expr: avg(data_quality_assertion_success_ratio) < 0.95
       #   for: 2m
@@ -20,11 +12,7 @@ groups:
       #     summary: "Data quality threshold dropped below 95%"
       #     description: "Quality assertions failed across domain silver or gold datasets. Gate blocked downstream updates."
 
-      # ------------------------------------------------------------------------
-      # DISABLED for the same reason: the Flink job exports Flink's own native
-      # metrics (flink_taskmanager_*), but not this composed
-      # source-to-sink latency series, and nothing derives it.
-      # ------------------------------------------------------------------------
+      # Disabled: the job exports Flink's native metrics, not this composed series.
       # - alert: StreamLatencyHigh
       #   expr: flink_taskmanager_job_latency_source_to_sink_seconds > 5
       #   for: 1m
@@ -32,11 +20,10 @@ groups:
       #     severity: warning
       #     subsystem: s4-stream
       #   annotations:
-      #     summary: "Streaming latency exceeded 5 seconds SLO (RF-09)"
+      #     summary: "Streaming latency exceeded 5 seconds SLO"
       #     description: "End-to-end event latency from Kafka to serving layer exceeds the agreed 5s threshold."
 
-      # ACTIVE: kafka_consumergroup_lag is a real broker metric (ConsumerGroupLagGauge)
-      # and the kafka scrape job in templates/prometheus.yaml now collects it.
+      # Active: the broker exposes kafka_consumergroup_lag and the kafka scrape job collects it.
       - alert: KafkaConsumerLagCritical
         expr: sum(kafka_consumergroup_lag) by (consumergroup) > 5000
         for: 3m
@@ -47,11 +34,7 @@ groups:
           summary: "Kafka consumer group lag critical"
           description: "Consumer group {{ $labels.consumergroup }} has accumulated over 5,000 unconsumed records."
 
-      # ------------------------------------------------------------------------
-      # DISABLED: lakehouse_table_last_write_timestamp is not emitted by
-      # Polaris, Trino or Spark in this POC. Iceberg table metadata holds the
-      # real write time; nothing turns it into a metric.
-      # ------------------------------------------------------------------------
+      # Disabled: no component emits lakehouse_table_last_write_timestamp.
       # - alert: GoldTableFreshnessExpired
       #   expr: (time() - lakehouse_table_last_write_timestamp{layer="gold"}) > 86400
       #   for: 10m

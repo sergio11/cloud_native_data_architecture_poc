@@ -1,8 +1,7 @@
-"""
-Modern Data Architecture POC - Event Stream Adapter.
-Implements EventBrokerPort with support for Kafka and an embedded persistent event log.
-Fulfills Kappa Architecture requirement RF-10 (replay from earliest offset,
-persistent per-consumer-group cursors, never fabricating events).
+"""Modern Data Architecture POC - Event stream adapter.
+
+Implements EventBrokerPort on Kafka or an embedded persistent event log,
+with replay and durable per-consumer-group cursors.
 """
 
 from __future__ import annotations
@@ -26,29 +25,15 @@ KAFKA_ENV_VAR = "KAFKA_BOOTSTRAP_SERVERS"
 _POLL_TIMEOUT_SECONDS = 1.0
 _MAX_EMPTY_POLLS = 2
 _POLL_BUDGET_SECONDS = 30.0
-#: Poll rounds spent waiting for the broker to assign partitions on replay
-#: before falling back to the no-watermark drain. Fake consumers answer
-#: immediately; each round blocks at most ``_POLL_TIMEOUT_SECONDS``.
+#: Poll rounds spent waiting for partition assignment on replay.
 _ASSIGNMENT_WAIT_POLLS = 10
 
 
 class EventStreamAdapter(EventBrokerPort):
-    """
-    Event broker adapter supporting Kafka and an embedded local WAL event log.
-    Ensures persistent replayability (RF-10) and durable consumer cursors so
-    incremental consumption never returns already-processed events twice.
+    """Event broker adapter supporting Kafka or an embedded SQLite WAL log.
 
-    Backend selection is driven by the ``KAFKA_BOOTSTRAP_SERVERS`` environment
-    variable: when it is set and non-empty the adapter talks ONLY to Kafka,
-    otherwise it uses ONLY the embedded SQLite log (no double writes and no
-    silent fallbacks). The variable is read ONCE at construction and the
-    backend is then fixed for the adapter's lifetime, so every publish and
-    consume call hits the same backend (the SQLite schema is initialised only
-    when that backend is selected). ``confluent_kafka`` is imported lazily
-    inside the Kafka code paths so the SQLite profile never requires the
-    package. An optional ``consumer_factory`` seam (a callable receiving the
-    consumer config dict and returning a ``confluent_kafka.Consumer``-like
-    object) allows tests to inject a fake consumer.
+    Backend is selected once from ``KAFKA_BOOTSTRAP_SERVERS``; Kafka is used
+    when set, SQLite otherwise. No silent fallbacks.
     """
 
     def __init__(
@@ -58,9 +43,7 @@ class EventStreamAdapter(EventBrokerPort):
     ) -> None:
         self._db_path = db_path
         self._consumer_factory = consumer_factory
-        # Backend decided ONCE here (never re-read per call): with the Kafka
-        # backend selected this adapter talks ONLY to Kafka, so it must not
-        # create local files or schemas as a side effect of construction.
+        # Backend decided once; the Kafka path creates no local files.
         self._bootstrap = self._resolve_bootstrap()
         if self._bootstrap is None:
             ensure_parent_dir(db_path)
@@ -104,7 +87,7 @@ class EventStreamAdapter(EventBrokerPort):
         return True
 
     def _publish_to_sqlite(self, topic: str, key: str, payload: dict[str, Any]) -> None:
-        # Persist to local immutable event log (guarantees Kappa replay RF-10)
+        # Persist to local immutable event log (guarantees Kappa replay)
         with sqlite_connection(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO event_log (topic, key, payload, published_at) VALUES (?, ?, ?, ?);",
@@ -136,19 +119,10 @@ class EventStreamAdapter(EventBrokerPort):
         replay: bool = False,
         consumer_group: str = "default",
     ) -> list[dict[str, Any]]:
-        """Consumes events per EventBrokerPort contract (RF-10).
+        """Consumes events per EventBrokerPort contract.
 
-        replay=False: reads events with offset > the committed cursor of
-        ``consumer_group`` (ascending) and atomically advances that cursor to
-        the highest offset returned, in the same transaction.
-        replay=True: reads the full topic log from offset 0 (ascending) and
-        never touches consumer cursors. Never fabricates events when empty.
-
-        Backend selection is fixed at construction: Kafka when
-        ``KAFKA_BOOTSTRAP_SERVERS`` was set and non-empty at that moment
-        (consuming ONLY from Kafka), SQLite otherwise. An unreachable Kafka
-        broker raises ``RuntimeError`` (fail-fast, never a silent fallback
-        to SQLite).
+        Incremental reads advance the consumer cursor; replay reads the full
+        log without touching cursors. Never fabricates events.
         """
         if self._bootstrap is not None:
             return self._consume_from_kafka(self._bootstrap, topic, max_messages, replay, consumer_group)
@@ -163,9 +137,7 @@ class EventStreamAdapter(EventBrokerPort):
     ) -> list[dict[str, Any]]:
         with sqlite_connection(self._db_path) as conn:
             if not replay:
-                # Serialize concurrent consumers of the same group: reading the
-                # cursor and advancing it must be one atomic unit, otherwise two
-                # consumers redeliver the same batch (TOCTOU on last_offset).
+                # Serialize cursor read and advance to avoid redelivery (TOCTOU).
                 conn.execute("BEGIN IMMEDIATE")
             if replay:
                 query = "SELECT offset, payload FROM event_log WHERE topic = ? ORDER BY offset ASC"
@@ -224,34 +196,14 @@ class EventStreamAdapter(EventBrokerPort):
     ) -> list[dict[str, Any]]:
         """Consumes from Kafka preserving the EventBrokerPort cursor semantics.
 
-        Incremental runs use ``group.id=<consumer_group>`` with
-        ``auto.offset.reset=earliest`` and explicitly commit every consumed
-        offset. ``earliest`` (not ``latest``) is required so a brand-new
-        consumer group reads the existing backlog, exactly like the SQLite
-        backend (unknown cursor starts at offset 0): the port promises
-        "only events NOT yet consumed by consumer_group", and for a new
-        group nothing has been consumed yet. Once offsets are committed,
-        subsequent runs are incremental on both backends. Replay runs use an
-        ephemeral group id with ``auto.offset.reset=earliest`` and never
-        commit, so consumer cursors are left untouched.
-
-        Replay termination: after ``subscribe`` the adapter waits for the
-        partition assignment and snapshots the high-watermark end-offsets
-        with ``consumer.get_watermark_offsets``; the drain ends when the
-        consumed offsets reach those end-offsets on every assigned partition
-        (frozen log-end at replay start, so events appended concurrently
-        afterwards may be excluded). Neither the poll time budget nor an
-        empty-poll streak truncates a watermark-driven replay. When the
-        injected consumer exposes no watermark API, replay falls back to
-        draining until ``_MAX_EMPTY_POLLS`` consecutive empty polls, still
-        ignoring the time budget.
+        Incremental runs commit every consumed offset; replay uses an ephemeral
+        group and never commits. Replay ends at the snapshotted high watermark.
         """
         if replay:
             group_id = f"{consumer_group}-replay-{uuid.uuid4().hex}"
         else:
             group_id = consumer_group
-        # Both modes reset to earliest (see docstring): a group without
-        # committed offsets reads the backlog like the SQLite backend.
+        # Both modes reset to earliest so a new group reads the backlog.
         config: dict[str, Any] = {
             "bootstrap.servers": bootstrap,
             "group.id": group_id,
@@ -297,13 +249,9 @@ class EventStreamAdapter(EventBrokerPort):
         topic: str,
         limit: int | None,
     ) -> list[dict[str, Any]]:
-        """Drains new events for a consumer group (budget + empty streak apply).
+        """Drains new events for a consumer group.
 
-        Unchanged incremental semantics: stops at ``max_messages``, after
-        ``_MAX_EMPTY_POLLS`` consecutive empty polls, or when the
-        ``_POLL_BUDGET_SECONDS`` budget is exhausted, then explicitly commits
-        every consumed offset (including skipped corrupt frames, mirroring
-        the SQLite cursor which advances past them) in ascending order.
+        Stops at ``max_messages``, an empty-poll streak or the poll budget.
         """
         collected: list[tuple[int, dict[str, Any]]] = []
         consumed: list[Any] = []
@@ -345,10 +293,8 @@ class EventStreamAdapter(EventBrokerPort):
             collected.append((int(message.offset()), payload))
 
         collected.sort(key=lambda item: item[0])
-        # Explicitly commit every consumed offset (including skipped
-        # corrupt frames, mirroring the SQLite cursor which advances
-        # past them) in ascending order — the order of the returned
-        # events — so poison pills are never redelivered forever.
+        # Commit every consumed offset (including corrupt frames) so poison
+        # pills are never redelivered forever.
         consumed.sort(key=lambda message: int(message.offset()))
         for message in consumed:
             try:
@@ -365,13 +311,7 @@ class EventStreamAdapter(EventBrokerPort):
     ) -> list[dict[str, Any]]:
         """Drains the full topic log from offset 0 without committing.
 
-        Watermark path: ends when consumed offsets reach the end-offsets
-        snapshotted at assignment on every assigned partition — never via
-        the time budget or an empty-poll streak, so large backlogs and slow
-        producers with delivery gaps are returned in full. Fallback path
-        (no watermark API on the consumer): drains until
-        ``_MAX_EMPTY_POLLS`` consecutive empty polls, still ignoring the
-        time budget.
+        Ends at the snapshotted watermarks, or on an empty-poll streak.
         """
         prefetched: list[Any] = []
         assignment = self._wait_kafka_assignment(consumer, topic, prefetched)
@@ -477,9 +417,7 @@ class EventStreamAdapter(EventBrokerPort):
     ) -> list[Any]:
         """Polls until the broker assigns topic partitions, buffering early messages.
 
-        Messages arriving before the assignment is visible are appended to
-        ``prefetched`` so the replay never loses them; errors and empty
-        polls are skipped. Returns the topic assignment (possibly empty).
+        Early messages are kept in ``prefetched``; returns the assignment.
         """
         assignment_fn = getattr(consumer, "assignment", None)
         if assignment_fn is None:

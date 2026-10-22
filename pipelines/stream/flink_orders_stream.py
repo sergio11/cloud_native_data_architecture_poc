@@ -1,21 +1,9 @@
 """
 flink_orders_stream.py - Apache Flink 1.18 speed-layer job for sales orders.
 
-Submitted by the Flink Kubernetes Operator through
-``infra/helm/s4-stream/templates/flink-deployments.yaml`` with the PyFlink
-``PythonDriver``. Not a CLI, and no fallback: if PyFlink, the cluster or the
-configuration is missing the job fails rather than running something else.
-
-    Kafka (sales.orders.events) -> dead-letter -> event-time watermarks
-      -> 4 s tumbling windows keyed by status
-      -> upsert into Iceberg stream.sales.orders_windowed (Polaris, Parquet/MinIO)
-
-PyFlink ships no DataStream binding for the Iceberg connector, so this uses the
-documented "Mixing DataStream and Table" pattern: source, watermarks and
-windowing on the DataStream API, then a temporary view the Table API writes.
-
-Configuration comes exclusively from the environment declared in the
-FlinkDeployment. A missing variable is a hard error, never a localhost default.
+Kafka (sales.orders.events) -> event-time watermarks -> 4 s tumbling windows
+keyed by status -> upsert into Iceberg stream.sales.orders_windowed. Submitted
+by the Flink Kubernetes Operator; config comes only from the environment.
 """
 
 from __future__ import annotations
@@ -47,20 +35,9 @@ from pyflink.datastream.functions import (  # noqa: E402
 from pyflink.datastream.window import TumblingEventTimeWindows  # noqa: E402
 from pyflink.table import StreamTableEnvironment  # noqa: E402
 
-# There is deliberately NO `from pyflink.util import type_hints` here. PyFlink
-# 1.18 has no `pyflink.util.type_hints` and no `pyflink.common.type_hints`
-# either - both were verified inside the image:
-#   >>> import pyflink.common.type_hints
-#   ModuleNotFoundError: No module named 'pyflink.common.type_hints'
-#   >>> import pyflink.datastream.functions as f
-#   >>> [n for n in dir(f) if 'Collector' in n]
-#   []
-# so the import failed at module load, before any topology was built, and the
-# JobManager died with only:
-#   ImportError: cannot import name 'type_hints' from 'pyflink.util'
-#   Python process exits with code: 1
-# The window function below returns the rows it wants to emit; DataStream
-# .process() passes no Collector to annotate.
+# Deliberately no `pyflink.util.type_hints` import: PyFlink 1.18 does not ship
+# it, so the import fails at module load. The window function below returns the
+# rows to emit; DataStream.process() passes no Collector.
 from pipelines.stream.window_logic import (  # noqa: E402
     ALLOWED_LATENESS_MS,
     MAX_OUT_OF_ORDERNESS_MS,
@@ -119,20 +96,16 @@ class JobConfig:
     s3_endpoint: str
     s3_access_key: str
     s3_secret_key: str
-    # OAuth2 credential for Polaris 1.x REST catalog.
-    # Format: "client_id:client_secret". Injected via POLARIS_OAUTH2_CREDENTIAL
-    # env var in the FlinkDeployment (s4-stream/templates/flink-deployments.yaml).
+    # OAuth2 credential for the Polaris 1.x REST catalog, "client_id:client_secret",
+    # injected via POLARIS_OAUTH2_CREDENTIAL in the FlinkDeployment.
     oauth2_credential: str
 
     @property
     def oauth2_server_uri(self) -> str:
         """Polaris token endpoint, derived from the catalog URI.
 
-        Iceberg must be told where to fetch the OAuth2 token. Without it the
-        client calls GET /v1/config unauthenticated and Polaris answers 404
-        "Unable to find warehouse <warehouse>" - even though the catalog exists
-        with exactly that base location. The derivation keeps the catalog URI as
-        the single source of truth instead of a second env var to keep in sync.
+        Iceberg must know where to fetch the OAuth2 token; deriving it from the
+        catalog URI keeps one source of truth.
         """
         return f"{self.catalog_uri.rstrip('/')}/v1/oauth/tokens"
 
@@ -170,23 +143,8 @@ class _ParseOrderEvent(FlatMapFunction):
 
 
 #: The aggregate accumulator: (total_revenue, order_count, status, max_event_ms).
-#:
-#: A plain TUPLE, and not a dataclass, on purpose. Flink sends the accumulator
-#: to the TaskManager with standard pickle, and the Beam runner executes the
-#: operator module under the name __main__ - so a class defined in this module
-#: is pickled by reference to __main__, where the TaskManager cannot find it:
-#:
-#:     _pickle.PicklingError: Can't pickle <class '__main__.RevenueAccumulator'>:
-#:     attribute lookup RevenueAccumulator on __main__ failed
-#:
-#: The TaskManager then fails the task while INITIALIZING and the job restarts
-#: in a loop, with "Not all required tasks are currently running" on the
-#: checkpoints as the only symptom. A tuple of primitives pickles with no
-#: module lookup at all, so it cannot fail that way.
-#:
-#: The indices are literal because a tuple is read positionally here; the
-#: names below are the documentation.
-#:   0 total_revenue   1 order_count   2 status   3 max_event_ms
+#: A plain tuple, not a dataclass: PyFlink pickles module classes by reference to
+#: __main__, where the TaskManager cannot find them and the job restart-loops.
 Accumulator = tuple[float, int, str, int]
 
 
@@ -224,23 +182,9 @@ class _RevenueAggregate(AggregateFunction):
 class _OrdersWindowFunction(ProcessFunction):
     """Turns one aggregate result into the speed-layer row for its window.
 
-    The contract is the one PyFlink 1.18 actually invokes, read from the
-    image's own source rather than assumed:
-
-        # pyflink/datastream/data_stream.py:641
-        def process(self, func: ProcessFunction, output_type: TypeInformation = None) -> 'DataStream'
-
-        # pyflink/fn_execution/datastream/process/operations.py, PROCESS branch
-        process_element = user_defined_func.process_element
-        results = process_element(value[2], ctx)
-
-    So ``process_element`` takes (value, ctx) - TWO arguments, no Collector -
-    and RETURNS the values to emit. ``ProcessWindowFunction.process(key, ctx,
-    elements)`` is a different API on a different code path and is never called
-    here, which is why every window silently produced nothing.
-
-    The aggregate already ran the tumbling window, so this operator sees one
-    element per window and needs no window bookkeeping of its own.
+    PyFlink 1.18 calls ``process_element(value, ctx)`` with no Collector and
+    emits the returned values; ``ProcessWindowFunction`` is a different code
+    path. The aggregate already ran the window, so this sees one element.
     """
 
     def process_element(self, value: Row, ctx: Any) -> list[Row]:
@@ -253,11 +197,7 @@ class _OrdersWindowFunction(ProcessFunction):
 class _AssignEventTime:
     """Timestamp assigner: the event time carried by the payload, never wall clock.
 
-    A class, not a bare function, because PyFlink 1.18 reads
-    ``timestamp_assigner.extract_timestamp`` in
-    ``pyflink/datastream/data_stream.py:683`` and does not fall back to calling
-    the object. Measured in-cluster:
-      AttributeError: 'function' object has no attribute 'extract_timestamp'
+    A class, not a bare function: PyFlink 1.18 requires ``extract_timestamp``.
     """
 
     def extract_timestamp(self, event: OrderWindowEvent, record_timestamp: int) -> int:
@@ -276,10 +216,8 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
         .set_topics(config.topic)
         .set_group_id(config.group_id)
         .set_starting_offsets(offsets)
-        # Mandatory: without a deserialization schema KafkaSourceBuilder.build()
-        # fails job submission with "Deserialization schema is required but not
-        # provided". The value is the JSON payload decoded to str, which is
-        # exactly what window_logic.decode_payload expects.
+        # Mandatory: KafkaSourceBuilder.build() fails without a deserialization
+        # schema. SimpleStringSchema decodes the JSON payload to str.
         .set_value_only_deserializer(SimpleStringSchema())
         .build()
     )
@@ -291,10 +229,7 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
     )
 
     # PyFlink 1.18 has no POJO TypeInformation, so the parsed dataclass travels
-    # pickled (the default when output_type is omitted). output_type/key_type are
-    # left unset throughout for the same reason: the only Types factories that
-    # accept multiple arguments are the DataType ones from pyflink.common, which
-    # the DataStream API rejects.
+    # pickled and output_type/key_type stay unset.
     events = (
         env.from_source(source, WatermarkStrategy.no_watermarks(), "orders-kafka-source")
         .name("orders-kafka-source")
@@ -311,17 +246,14 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
         events.key_by(lambda event: event.status)
         .window(TumblingEventTimeWindows.of(Time.milliseconds(WINDOW_SIZE_MS)))
         # allowed_lateness takes MILLISECONDS as an int, unlike .window() which
-        # takes a Time. Passing Time.milliseconds(...) here crashes the window
-        # operator the first time a window is evaluated:
-        #   window_operator.py:514  time = window.max_timestamp() + self.allowed_lateness
-        #   TypeError: unsupported operand type(s) for +: 'int' and 'Time'
+        # takes a Time; passing a Time crashes the window operator.
         .allowed_lateness(ALLOWED_LATENESS_MS)
         .aggregate(_RevenueAggregate())
         .process(
             _OrdersWindowFunction(),
-            # Positional only: RowTypeInfo with named fields blows up in the JVM
-            # (TupleTypeInfoBase NPE) on PyFlink 1.18. Column names are attached
-            # when the stream is registered as a view, via an explicit Schema.
+            # Positional only: RowTypeInfo with named fields NPEs in the JVM on
+            # PyFlink 1.18. Names are attached via an explicit Schema at view
+            # registration.
             Types.ROW(
                 [
                     Types.SQL_TIMESTAMP(),  # window_start
@@ -329,27 +261,10 @@ def build_source_and_windows(env: StreamExecutionEnvironment, config: JobConfig)
                     Types.SQL_DATE(),  # order_date
                     Types.STRING(),  # status
                     Types.DOUBLE(),  # window_revenue
-                    # Types.INT(), not Types.BIG_INT().
-                    #
-                    # This is the actual root cause of the column-type failure,
-                    # and it is in THIS line, not in the SQL. In PyFlink 1.18
-                    # Types.BIG_INT() maps to BigIntTypeInfo, whose logical type
-                    # is java.math.BigInteger. Declaring it here makes PyFlink
-                    # convert the Python value into a BigInteger, from_data_stream
-                    # re-derives the RowType from that, and the Table API sees
-                    #   f5: RAW('java.math.BigInteger')
-                    # which then fails BOTH ways:
-                    #   * no cast  -> "Column types of query result and sink do
-                    #     not match. Incompatible types for sink column
-                    #     'window_orders' at position 5"
-                    #   * with CAST(f5 AS BIGINT) -> "Cast function cannot
-                    #     convert value of type RAW('java.math.BigInteger') to
-                    #     type BIGINT" - the cast refuses to unwrap a RAW payload
-                    #
-                    # Types.INT() maps to IntegerTypeInfo -> SQL INTEGER, which
-                    # the planner widens to BIGINT cleanly. A 4-second window
-                    # cannot overflow a 32-bit count, and the sink column is
-                    # still declared BIGINT in the Iceberg table.
+                    # Types.INT(), not Types.BIG_INT(): PyFlink 1.18 maps
+                    # BIG_INT to java.math.BigInteger (RAW), which the Table API
+                    # rejects at the sink. INTEGER widens to BIGINT cleanly and
+                    # a 4-second window cannot overflow 32 bits.
                     Types.INT(),  # window_orders
                     Types.DOUBLE(),  # avg_order_value
                     Types.STRING(),  # source_tier
@@ -378,16 +293,8 @@ WINDOW_COLUMNS = (
 def window_schema() -> Any:
     """Builds the Table schema that names the windowed stream's columns.
 
-    OBSERVED BEHAVIOUR: this schema is NOT applied. create_temporary_view()
-    accepts it without error, but the resulting view keeps the generic
-    positional RowType that from_data_stream() derived - f0..f7, with
-    f0: TIMESTAMP(9) rather than the TIMESTAMP(6) declared here. The INSERT
-    therefore has to project positionally (see main), and referencing
-    window_start/order_date fails with 'Column not found in any table'.
-
-    It is kept because it is the only written-down statement of the intended
-    column order and types, and it costs nothing. If a future PyFlink honours
-    it, the projection in main() should switch back to named columns.
+    PyFlink 1.18 does not apply it (the view keeps positional f0..f7), but it
+    documents the intended column order and types that main() projects.
     """
     from pyflink.table import DataTypes, Schema
 
@@ -413,10 +320,8 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
     Both statements are idempotent, so the job owns its own table definition and
     a restart never depends on out-of-band provisioning.
     """
-    # Flink 1.18's parser rejects "CREATE CATALOG IF NOT EXISTS" with
-    # ParseException: Encountered "NOT". The idempotency is therefore explicit:
-    # ask for the registered catalogs and only issue the statement when ours is
-    # missing. (CREATE TABLE IF NOT EXISTS below IS supported and stays.)
+    # Flink 1.18 rejects "CREATE CATALOG IF NOT EXISTS", so check the registered
+    # catalogs and only create ours when missing. (CREATE TABLE IF NOT EXISTS works.)
     if config.catalog_name not in table_env.list_catalogs():
         table_env.execute_sql(
             f"""
@@ -441,27 +346,9 @@ def register_iceberg_catalog(table_env: StreamTableEnvironment, config: JobConfi
             """
         )
 
-    # The job owns its table definition (see this function's docstring), so a
-    # property change must actually reach the table. CREATE TABLE IF NOT EXISTS
-    # silently KEEPS the existing definition, so adding 'io-impl' to the table
-    # below had no effect at all and the writer kept using HadoopFileIO:
-    #   RuntimeIOException: No FileSystem for scheme: s3
-    # Dropping first makes the definition below authoritative on every start.
-    # It is scoped to this one table, and the speed layer is its only writer.
-    #
-    # The drop is TOLERANT because Polaris refuses it for this principal:
-    #   TableException: Could not execute DropTable in path `polaris`.`sales`.`orders_windowed`
-    #   ForbiddenException: Principal 'root' ... is not authorized for op
-    #   DROP_TABLE_WITH_PURGE
-    # and the job died at startup, before a single row was written. The
-    # 'table.purge-on-drop' = 'false' property below is what makes a drop
-    # legal, but it is a property of the TABLE, so it only helps once the
-    # table has been created with it - and a table left behind by a previous
-    # incarnation may not have it.
-    #
-    # So: try to drop, and if Polaris says no, keep the existing definition and
-    # carry on. The table is written by this job alone, so its definition
-    # cannot drift between two writers.
+    # The job owns its table definition, so drop first: CREATE TABLE IF NOT
+    # EXISTS silently keeps an outdated definition. The drop is tolerant because
+    # Polaris may refuse it for this principal; carry on with the existing table.
     logger.info("dropping any previous %s.orders_windowed definition", config.catalog_name)
     try:
         table_env.execute_sql(f"DROP TABLE IF EXISTS `{config.catalog_name}`.`sales`.`orders_windowed`")
@@ -546,42 +433,14 @@ def main() -> None:
     # do not depend on the container clock.
     table_env.get_config().set("table.exec.timezone", "UTC")
     register_iceberg_catalog(table_env, config)
-    # from_data_stream WITHOUT a schema, and the Schema handed to
-    # create_temporary_view instead. PyFlink 1.18 derives a generic RowTypeInfo
-    # with positional fields (f0..f7), so passing named columns to
-    # from_data_stream is rejected with
-    #   ValidationException: Unable to find a field named 'window_start' ...
-    #   Currently available fields are: [f0, f1, f2, f3, f4, f5, f6, f7]
-    # Passing the Schema here names the columns positionally instead.
+    # from_data_stream without a schema; the Schema goes to create_temporary_view
+    # instead, because PyFlink 1.18 derives positional fields (f0..f7) and
+    # rejects named columns.
     table_env.create_temporary_view(TEMP_VIEW, table_env.from_data_stream(windowed), window_schema())
 
-    # Terminal submission. Its total absence is what produced the original
-    # "The application contains no execute() calls" failure.
-    #
-    # POSITIONAL references, deliberately. from_data_stream() derives a generic
-    # RowType whose fields are f0..f7, and create_temporary_view(..., schema) does
-    # NOT rename them - the view really has no window_start/order_date columns:
-    #
-    #   ValidationException: SQL validation failed. From line 4, column 13 to
-    #   line 4, column 24: Column 'window_start' not found in any table
-    #
-    # So the projection addresses f0..f7, whose order and types the planner
-    # reports are:
-    #   f0 TIMESTAMP(9)  f1 TIMESTAMP(9)  f2 DATE  f3 STRING
-    #   f4 DOUBLE        f5 RAW(java.math.BigInteger)  f6 DOUBLE  f7 STRING
-    # and WINDOW_COLUMNS pins that order to the Iceberg table below.
-    #
-    # The CAST on f5 is required, not cosmetic: PyFlink maps a Python int to
-    # BigInteger (arbitrary precision), so without it the write is rejected with
-    #   ValidationException: Column types of query result and sink for
-    #   'polaris.sales.orders_windowed' do not match.
-    #   Cause: Incompatible types for sink column 'window_orders' at position 5.
-    # Declaring Types.BIG_INT() in process() does not prevent this: that is the
-    # upstream StreamRecord type, and from_data_stream re-derives the RowType
-    # from the Python values.
-    #
-    # The TIMESTAMP(6) casts on f0/f1 are explicit for symmetry; the planner
-    # would narrow them implicitly, but relying on that hides the width.
+    # Terminal submission; without execute() Flink reports no execute() calls.
+    # The projection is positional (f0..f7) and CAST(f5 AS BIGINT) is required
+    # because PyFlink maps a Python int to BigInteger.
     result = table_env.execute_sql(
         f"""
         INSERT INTO `{config.catalog_name}`.`sales`.`orders_windowed`

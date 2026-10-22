@@ -1,14 +1,7 @@
-"""
-Modern Data Architecture POC - Quality Gate Runner Use Case.
-Evaluates data quality assertion suites against lakehouse datasets
-and enforces quality thresholds before promotion.
+"""Modern Data Architecture POC - Quality gate runner use case.
 
-Threshold policy is IDENTICAL to the Silver/Gold promotion gate
-(:func:`src.use_cases.gate_support.enforce_quality_gate`): contract-declared
-per-dimension thresholds govern, and the caller's ``threshold`` only applies
-when the governing contract declares none. The verdict comes from the shared
-domain policy (:func:`src.domain.quality_gate.assess_gate`), so a table can
-never PASS here and FAIL promotion (or vice versa) on the same records.
+Evaluates quality assertion suites against lakehouse datasets and enforces
+the same threshold policy as Silver/Gold promotion (fail-closed).
 """
 
 from __future__ import annotations
@@ -55,10 +48,8 @@ class RunQualityGateUseCase(RunQualityGatePort):
             threshold,
         )
 
-        # 1. Records override (file-input scenarios) or load from lakehouse storage.
-        #    An empty table is NOT short-circuited to passed=True: it is evaluated
-        #    as [] so the engine's fail-closed rule (RF-06) produces passed=False.
-        #    A missing suite propagates SuiteNotFoundError (fail-closed).
+        # 1. Use provided records or load from storage; an empty table is
+        #    still evaluated so the engine fails closed.
         if records is None:
             records = self._storage.read_table(table_name)
             if not records:
@@ -67,9 +58,7 @@ class RunQualityGateUseCase(RunQualityGatePort):
                     table_name,
                 )
 
-        # 2. Resolve the governing contract thresholds exactly like the promotion
-        #    gate: contract thresholds win per dimension; ``threshold`` is only
-        #    the fallback when no matching contract declares any.
+        # 2. Resolve contract thresholds exactly like the promotion gate.
         entity = contract_entity_for_table(table_name)
         contract_thresholds = find_contract_thresholds(self._catalog, entity)
         if contract_thresholds is not None:
@@ -80,8 +69,7 @@ class RunQualityGateUseCase(RunQualityGatePort):
                 threshold,
             )
 
-        # 3. Evaluate expectations against records (engine arithmetic uses the
-        #    fallback threshold; contract dimensions are applied by the policy).
+        # 3. Evaluate expectations (contract dimensions are applied by policy).
         result = self._quality.evaluate_suite(
             records=records,
             suite_path=suite_path,
@@ -101,13 +89,8 @@ class RunQualityGateUseCase(RunQualityGatePort):
             "PASS" if verdict.approved else "FAIL",
             verdict.reason,
         )
-        # 5. Fail closed (RF-06): a failing verdict raises with the evaluation
-        #    attached, so programmatic callers cannot ignore a breach and CLIs can
-        #    still render results, emit FAIL lineage and persist reports. The
-        #    attached evaluation is the FAILED verdict: ``passed`` is forced to
-        #    False so consumers (exit codes, panels, lineage status) never read
-        #    the engine's global-threshold arithmetic as a PASS while the
-        #    contract dimensions blocked the gate.
+        # 5. Fail closed: raise with the FAILED evaluation attached so callers
+        #    cannot ignore a breach.
         if not verdict.approved:
             raise QualityGateBreachError(
                 f"Quality gate breached for {table_name} ({verdict.reason})",
@@ -116,10 +99,7 @@ class RunQualityGateUseCase(RunQualityGatePort):
                 evaluation=replace(result, passed=False),
             )
         if not result.passed:
-            # Contract dimensions govern and all passed while the arithmetic
-            # against the fallback threshold failed: the gate is approved, so
-            # report a passing evaluation (the port promises callers only ever
-            # receive passing evaluations back).
+            # Contract dimensions approved despite the fallback arithmetic.
             logger.info(
                 "Contract thresholds govern '%s': pass rate %.2f below fallback threshold %.2f "
                 "but the contract dimensions approve (global threshold ignored).",

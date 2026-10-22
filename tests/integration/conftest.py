@@ -1,22 +1,7 @@
-"""
-Modern Data Architecture POC - Integration Test Fixtures (hermetic world).
+"""Hermetic integration-test fixtures.
 
-Builds a fully isolated hexagonal world under ``tmp_path``: lakehouse SQLite
-database, persistent event log and lineage audit JSONL all live inside the
-test's temporary directory, so nothing is ever written to the repository's
-``data/`` folder. Adapters and use cases are constructed DIRECTLY (mirroring
-``src/container.py`` wiring) - ``src.container`` is never imported here simply
-to keep this fixture fully self-contained and hermetic.
-
-Network is disabled at the seams:
-  * ``MarquezLineageAdapter`` points at an unroutable address AND its HTTP
-    POST is monkeypatched to raise instantly, so the audit-trail path is still
-    exercised on every emit without paying the 2s connection timeout.
-  * ``TRINO_HOST``/``PGPASSWORD`` are stripped from the environment so the
-    serving and source adapters can never attempt a connection.
-
-The OLTP source is an inline deterministic stub (fixed rows, no random) to
-keep every acceptance run reproducible.
+Builds an isolated hexagonal world under ``tmp_path`` (SQLite lakehouse,
+event log and lineage audit) with network access disabled.
 """
 
 from __future__ import annotations
@@ -56,7 +41,7 @@ def _demo_orders() -> list[dict[str, Any]]:
     """12 deterministic orders (>= the suites' min row count of 10).
 
     Two business dates with every ``status`` value covered on both days, so
-    Gold ``(order_date, status)`` keys are predictable for RF-11 assertions.
+    Gold ``(order_date, status)`` keys are predictable for the unified-serving assertions.
     """
     statuses = ["confirmed", "pending", "shipped", "cancelled"]
     rows: list[dict[str, Any]] = []
@@ -105,7 +90,7 @@ class DeterministicOltpSource:
     """OltpSourcePort stub serving fixed snapshots (no random, no network).
 
     Repeated extractions return byte-identical rows, which is what makes the
-    Bronze content-hash idempotency assertions (RNF-05 / RF-01) meaningful.
+    Bronze content-hash idempotency assertions meaningful.
     """
 
     def __init__(self, tables: dict[str, list[dict[str, Any]]]) -> None:

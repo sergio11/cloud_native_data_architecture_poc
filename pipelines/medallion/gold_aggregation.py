@@ -1,7 +1,8 @@
 """
-gold_aggregation.py - Gold layer analytical aggregation and PII pseudonymization pipeline.
-Driving Adapter invoking AggregateGoldUseCase via Hexagonal Architecture container.
-Computes daily sales rollups, enforces GDPR Art.25 pseudonymization, and emits OpenLineage events.
+gold_aggregation.py - Gold layer aggregation and PII pseudonymization.
+
+Driving adapter invoking AggregateGoldUseCase: daily sales rollups, GDPR Art.25
+pseudonymization and OpenLineage events.
 """
 
 from __future__ import annotations

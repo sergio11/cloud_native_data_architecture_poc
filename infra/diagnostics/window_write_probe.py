@@ -1,34 +1,8 @@
 """
-window_write_probe.py - executable proof that the speed-layer pipeline works.
+Executable proof (rake stream:probe) that the speed-layer pipeline works.
 
-WHY THIS EXISTS
-
-The FlinkDeployment on this cluster cannot be relied on to tell you whether the
-speed layer is correct: on a small machine the JobManager can spend minutes
-before it binds its REST port, the Operator restarts it, and the terminated
-container's log is gone. Two commits' worth of guesses were made against that
-signal. This probe removes the variable.
-
-It runs the REAL operators from pipelines/stream/flink_orders_stream.py inside a
-single pod with a LOCAL Flink cluster, feeds them synthetic orders, and writes
-the result through the REAL Iceberg sink to the REAL MinIO. No Kafka, no
-JobManager, no TaskManager, no Operator - so it runs on a machine that cannot
-host them, and it answers one question precisely: does the window function
-produce rows that reach Parquet?
-
-    rake stream:probe
-
-What it proves, and what it does not:
-
-  PROVES    _OrdersWindowFunction.process_element runs and returns rows
-  PROVES    the aggregate -> window -> Table API -> Iceberg -> Parquet chain
-  PROVES    the s3.* catalogue properties alone are NOT enough for the sink
-  PROVES    the checkpoint storage s3a:// really writes to MinIO
-  DOES NOT  prove the Kafka source, the FlinkDeployment, checkpointing of a
-            running job, or the serving layer. Those need the cluster.
-
-Every assertion here is written down from a failure that actually happened, so
-that a regression names itself instead of surfacing as an empty Job.
+Runs the real operators from pipelines/stream/flink_orders_stream.py in a single
+pod with a local Flink cluster, writing through the real Iceberg sink to MinIO.
 """
 
 from __future__ import annotations
@@ -61,13 +35,9 @@ REPORT: list[str] = []
 
 
 def emit(line: str) -> None:
-    """Writes straight to fd 1, bypassing every buffer in between.
+    """Writes straight to fd 1, bypassing buffers that PyFlink's local JVM can break.
 
-    PyFlink's local gateway starts a JVM that inherits and can re-point this
-    process's stdio, and the buffered Python logger then loses the lines that
-    matter most - the assertions themselves. A run could exit 0 with its own
-    proof discarded, which is exactly the failure mode this probe exists to
-    remove. os.write is unbuffered and unaffected by redirection.
+    The buffered logger can lose the assertions, so os.write keeps the report intact.
     """
     os.write(1, (line + "\n").encode())
 
@@ -87,12 +57,7 @@ def check(label: str, ok: bool, detail: str = "") -> bool:
 
 
 def _java_cause_chain(exc: BaseException) -> str:
-    """Unwraps a Py4J error down to the Java exception that actually failed.
-
-    `str(exc)` on a Py4JError is a truncated "Method create([class java.net.URI,
-    class jav)" with the useful part cut off, so the root cause has to be pulled
-    off the Java throwable instead.
-    """
+    """Unwraps a Py4J error down to the Java exception that actually failed."""
     seen: list[str] = []
     java_exc = getattr(exc, "java_exception", None)
     while java_exc is not None and len(seen) < 6:
@@ -117,36 +82,10 @@ def _java_cause_chain(exc: BaseException) -> str:
 
 
 def probe_checkpoint_storage() -> None:
-    """Can the checkpoint directory actually be written?
+    """Checks that the checkpoint directory can really be written.
 
-    This is the one remaining unknown in the logic layer. `IcebergStreamWriter`
-    commits its data files as part of each checkpoint, so if the checkpoint
-    storage is unreachable the job writes table metadata and no Parquet - which
-    is exactly the symptom that was observed before any of the fixes.
-
-    Two schemes are tried because the chart moved between them:
-
-    * `s3a://` - the configured one. Resolves to
-      org.apache.hadoop.fs.s3a.S3AFileSystem from hadoop-aws 2.8.3, which needs
-      UNSHADED Guava: Flink relocates its own Guava to
-      org.apache.flink.shaded.guava31, and hadoop-aws asks for the original
-      com.google.common.util.concurrent.ListeningExecutorService, so without it
-      the class cannot be loaded at all:
-
-          NoClassDefFoundError: com/google/common/util/concurrent/ListeningExecutorService
-
-      The image carries guava-28.2-jre for exactly this; the Job also fetches it
-      if the image is older, so the probe works against any image.
-
-    * `s3://` - the legacy block-based S3FileSystem, also from hadoop-aws 2.8.3.
-      It resolves the scheme and then IGNORES fs.s3.endpoint, so it talks to
-      real AWS:
-
-          403 InvalidAccessKeyId "The AWS Access Key Id you provided does not
-          exist in our records" for AWSAccessKeyId minioadmin
-
-      It is reported, never asserted: a failure is the expected state and a
-      success would be worth knowing about.
+    IcebergStreamWriter commits data files per checkpoint, so unreachable storage
+    means table metadata without Parquet. Tries s3a:// (required) and s3:// (reported).
     """
     from pyflink.java_gateway import get_gateway
 
@@ -158,10 +97,7 @@ def probe_checkpoint_storage() -> None:
     conf.set("fs.s3.awsAccessKeyId", ACCESS)
     conf.set("fs.s3.awsSecretAccessKey", SECRET)
     conf.set("fs.s3.path.style.access", "true")
-    # AND the fs.s3a.* namespace, because s3a:// resolves to
-    # org.apache.hadoop.fs.s3a.S3AFileSystem, which reads fs.s3a.* and nothing
-    # else. The fs.s3.* keys above belong to the legacy s3 filesystem and are
-    # simply invisible to it - which shows up as a 403 with no obvious cause.
+    # Also the fs.s3a.* namespace: s3a:// reads only these, not the legacy fs.s3.* keys.
     conf.set("fs.s3a.endpoint", ENDPOINT)
     conf.set("fs.s3a.access.key", ACCESS)
     conf.set("fs.s3a.secret.key", SECRET)
@@ -175,11 +111,7 @@ def probe_checkpoint_storage() -> None:
     def roundtrip(scheme: str) -> tuple[bool, str]:
         path = f"{scheme}://checkpoints/probe/roundtrip.txt"
         try:
-            # The STATIC get() takes a java.net.URI; the INSTANCE methods
-            # (create/exists/getFileStatus/delete) take org.apache.hadoop.fs.Path.
-            # Passing the wrong one of the two to either gives
-            #   Method <name>([class X, class Y]) does not exist
-            # because py4j resolves overloads by the type it is handed.
+            # Static get() takes a java.net.URI; instance methods take org.apache.hadoop.fs.Path.
             fs = fs_class.get(uri_class(f"{scheme}://checkpoints"), conf)
             target = path_class(path)
             out = fs.create(target, True)
@@ -188,8 +120,7 @@ def probe_checkpoint_storage() -> None:
             exists = bool(fs.exists(target))
             size = int(fs.getFileStatus(target).getLen())
             fs.delete(target, False)
-            # The class name comes from the Java object, not from type(): py4j
-            # hands back a JavaObject wrapper whose type has no getName().
+            # The class name comes from the Java object, not type().
             impl = str(fs.getClass().getName())
             return (exists and size == 5), f"{impl} escribe/lee/borra {size}B"
         except Exception as exc:  # noqa: BLE001 - the failure text is the point
@@ -199,10 +130,8 @@ def probe_checkpoint_storage() -> None:
     ok_s3a, detail_s3a = roundtrip("s3a")
     check("el almacenamiento de checkpoints s3a:// escribe en MinIO", ok_s3a, detail_s3a)
 
-    # s3:// is NOT usable and is not used: the legacy jets3t S3FileSystem resolves
-    # the scheme and then ignores fs.s3.endpoint, so it talks to real AWS.
-    # Reported, never asserted, because a failure here is the expected state and
-    # a success here would be worth knowing about.
+    # s3:// is not usable: the legacy S3FileSystem ignores fs.s3.endpoint and talks
+    # to real AWS. Reported, never asserted.
     ok_s3, detail_s3 = roundtrip("s3")
     if ok_s3:
         emit(f"INFO  s3:// tambien funciona ahora ({detail_s3}): el chart podria volver a ese esquema")
@@ -215,8 +144,7 @@ def main() -> int:
     log.info("=== PROBE: ventana de la speed layer -> Iceberg -> Parquet ===")
     log.info("repo=%s catalog=%s endpoint=%s", REPO_ROOT, CATALOG, ENDPOINT)
 
-    # Importing the real module is the point: a wrong operator signature fails
-    # HERE, loudly, instead of three layers down in a crash-looping pod.
+    # Importing the real module makes a wrong operator signature fail here, loudly.
     from pipelines.stream import flink_orders_stream as job
     from pipelines.stream.window_logic import (
         ALLOWED_LATENESS_MS,
@@ -262,8 +190,7 @@ def main() -> int:
         env.from_collection(events)
         .name("probe-source")
         .assign_timestamps_and_watermarks(
-            # A class, not a function: PyFlink 1.18 calls .extract_timestamp on
-            # the assigner (data_stream.py:683) with no callable fallback.
+            # A class, not a function: PyFlink 1.18 calls .extract_timestamp on the assigner.
             WatermarkStrategy.for_bounded_out_of_orderness(
                 Duration.of_millis(MAX_OUT_OF_ORDERNESS_MS)
             ).with_timestamp_assigner(job._AssignEventTime())
@@ -271,8 +198,7 @@ def main() -> int:
         .name("probe-watermarks")
         .key_by(lambda e: e.status)
         .window(TumblingEventTimeWindows.of(Time.milliseconds(WINDOW_SIZE_MS)))
-        # Milliseconds as an int. Time.milliseconds(...) here raises
-        #   window_operator.py:514 TypeError: unsupported operand +: 'int' and 'Time'
+        # Milliseconds as an int; Time.milliseconds(...) here raises TypeError.
         .allowed_lateness(ALLOWED_LATENESS_MS)
         .aggregate(aggregate_fn())
         .process(
@@ -318,9 +244,7 @@ def main() -> int:
     table_env.create_temporary_view("probe_window", table_env.from_data_stream(windowed))
 
     table = f"`{CATALOG}`.`sales`.`probe_orders_windowed`"
-    # Polaris issues DROP_TABLE_WITH_PURGE and catalog_admin is not authorised
-    # for it, so the probe cannot clean up. It appends instead, and reports the
-    # total row count, which is why the count only ever grows between runs.
+    # Polaris does not authorise purge, so the probe appends and the row count grows.
     try:
         table_env.execute_sql(f"DROP TABLE IF EXISTS {table}")
         log.info("tabla previa eliminada")
@@ -347,9 +271,7 @@ def main() -> int:
         """
     )
 
-    # StatementSet + wait(): a bare execute_sql("INSERT ...") on a streaming
-    # table only SUBMITS the job, so the pod used to exit before the sink ever
-    # flushed a data file.
+    # A bare execute_sql("INSERT ...") only submits; wait() lets the sink flush.
     result = table_env.execute_sql(
         f"""
         INSERT INTO {table}
@@ -361,9 +283,7 @@ def main() -> int:
     result.wait()
     log.info("INSERT confirmado en %.1fs", time.time() - t0)
 
-    # No ORDER BY: sorting a streaming table on a non-time-attribute column is
-    # rejected by the planner ("Sort on a non-time-attribute field is not
-    # supported"), which says nothing about the data.
+    # No ORDER BY: sorting a non-time-attribute column is rejected by the planner.
     rows = list(
         table_env.execute_sql(
             f"SELECT window_start, status, window_orders, window_revenue, source_tier FROM {table}"

@@ -1,9 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: Lakehouse Storage Time Travel.
+"""Unit tests: lakehouse storage time travel.
 
-Covers RF-01 (content-hash idempotent landing) and RF-07 (snapshot time travel,
-controlled schema evolution, legacy table compatibility) for
-``LakehouseStorageAdapter``. Every test owns its database path via ``tmp_path``.
+Covers content-hash idempotent landing, snapshot time travel, controlled schema
+evolution and legacy table compatibility for ``LakehouseStorageAdapter``.
 """
 
 from __future__ import annotations
@@ -90,7 +88,7 @@ def test_overwrite_supersedes_and_time_travel(storage: LakehouseStorageAdapter) 
 
 
 def test_overwrite_empty_set_clears_table_but_keeps_history(storage: LakehouseStorageAdapter) -> None:
-    """Overwrite with zero records reconciles the table to empty (RF-10):
+    """Overwrite with zero records reconciles the table to empty:
     live rows are superseded under a new row_count=0 snapshot, while prior
     versions stay readable. A missing table stays missing."""
     assert storage.write_table("silver.demo.orders", [{"id": 1}, {"id": 2}], mode="append") == 2
@@ -122,7 +120,7 @@ def test_invalid_table_names_rejected_before_sql(storage: LakehouseStorageAdapte
 
 
 def test_concurrent_writes_produce_unique_sequential_versions(tmp_path: Path) -> None:
-    """Regression (RF-07): two racing writers must never publish the same
+    """Regression: two racing writers must never publish the same
     snapshot version (TOCTOU on SELECT MAX). BEGIN IMMEDIATE serializes them."""
     db_path = str(tmp_path / "lakehouse.db")
     seed = LakehouseStorageAdapter(db_path=db_path)

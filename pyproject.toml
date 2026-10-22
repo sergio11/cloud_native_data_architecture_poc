@@ -1,9 +1,7 @@
-# Modern Data Architecture POC — project metadata and tooling configuration.
+# Modern Data Architecture POC - project metadata and tooling configuration.
 #
-# NOTE on packaging: the codebase uses the "repo-root on sys.path" layout
-# (`from src.x import y`, see pytest `pythonpath`), so this file is
-# CONFIG-ONLY: no [build-system] and no declared packages. `pip install`
-# is not required to run the POC — install only the runtime deps below.
+# Config-only: the code uses a repo-root-on-sys.path layout, so there is no
+# [build-system] and no declared packages. Install only the runtime deps below.
 
 [project]
 name = "poc-data-engineering"
@@ -37,17 +35,13 @@ select = ["E", "F", "W", "I", "B", "UP"]
 ignore = []
 
 [tool.ruff.lint.per-file-ignores]
-# UP017 rewrites `timezone.utc` to `datetime.UTC`, which only exists from
-# Python 3.11. The Flink job image runs Python 3.10 because PyFlink 1.18 depends
-# on pemja, which publishes no cp311 wheel (infra/docker/flink.Dockerfile), so
-# the streaming jobs must stay 3.10-compatible.
+# UP017 rewrites `timezone.utc`; the Flink job image runs Python 3.10
+# (PyFlink 1.18/pemja ships no cp311 wheel), so the streaming jobs stay 3.10.
 "pipelines/stream/*" = ["UP017"]
 
 [tool.ruff.format]
-# Formatter enabled with ruff's documented defaults (deliberately no overrides):
-# quote-style = "double", indent-style = "space", line-ending = "lf",
-# skip-magic-trailing-comma = false. Guarded locally by `rake format:check`;
-# `rake format` rewrites in place over the same directories as `rake lint`.
+# Formatter with ruff's defaults (no overrides). `rake format` rewrites in
+# place over the same directories as `rake lint`.
 
 
 [tool.mypy]
@@ -62,36 +56,27 @@ warn_return_any = true
 strict_equality = true
 exclude = "__pycache__"
 
-# Scoped `ignore_missing_imports`: the repo-root layout means a typo'd INTERNAL
-# import (e.g. `src.use_casesx`) must fail loudly, so the flag is never global.
-# Only third-party modules that mypy cannot type-check are listed below
-# (verified by running mypy with no global flag: exactly these 8 errors).
-# NOT listed because they ship types and pass as-is: requests, click, rich,
-# dagster. NOT listed because they are outside `files`: faker (data-generator).
+# Scoped `ignore_missing_imports`: the repo-root layout means a typo'd internal
+# import must still fail loudly, so the flag is never global. Modules that ship
+# types (requests, click, rich, dagster) are not listed.
 [[tool.mypy.overrides]]
 # Integrations extra — not installed in the dev environment (no stubs).
 module = ["trino", "confluent_kafka", "psycopg2", "psycopg2.extras"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# Installed but untyped (upstream ships no py.typed; stubs would come from
-# types-PyYAML / types-jsonschema, not added as deps).
+# Installed but untyped upstream.
 module = ["yaml", "jsonschema"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# PyIceberg and pyarrow are only needed by the Iceberg lakehouse adapter, which
-# runs inside the cluster images. The local profile and the unit tests use the
-# SQLite adapter, so neither is installed in the development environment.
+# Only needed inside the cluster images; the local profile and unit tests use
+# the SQLite adapter.
 module = ["pyiceberg.*", "pyarrow.*"]
 ignore_missing_imports = true
 [[tool.mypy.overrides]]
-# PyFlink ships no type information and only exists inside the Flink job image
-# (infra/docker/flink.Dockerfile). Scoped rather than global so a typo'd
-# INTERNAL import still fails. This override is also why the job modules do not
-# need inline `type: ignore[import-not-found]` markers: with
-# warn_unused_ignores those markers would themselves error once PyFlink is
-# actually installed.
+# PyFlink ships no types and exists only inside the Flink job image. Scoped
+# rather than global so a typo'd internal import still fails.
 module = ["pyflink.*"]
 ignore_missing_imports = true
 
@@ -99,8 +84,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-# Warnings are errors: resource leaks (unclosed SQLite handles) and
-# deprecations fail the suite instead of rotting silently.
+# Warnings are errors: resource leaks and deprecations fail the suite.
 filterwarnings = ["error"]
 
 [tool.coverage.run]
@@ -108,7 +92,6 @@ source = ["src", "lineage"]
 branch = true
 
 [tool.coverage.report]
-# Ratcheted 70 -> 85 (W8): measured 88.08% (src+lineage) at ratchet time, so
-# regressions of >3 points fail the gate instead of silently eroding it.
+# Coverage floor for src+lineage; regressions below it fail the gate.
 fail_under = 85
 show_missing = true

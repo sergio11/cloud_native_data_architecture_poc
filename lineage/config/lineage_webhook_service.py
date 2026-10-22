@@ -1,15 +1,7 @@
-"""
-lineage_webhook_service.py - Active Metadata & OpenLineage Webhook Microservice.
+"""OpenLineage webhook microservice with active metadata alert rules.
 
-FastAPI microservice that:
-1. Ingests OpenLineage RunEvents at /api/v1/lineage
-2. Evaluates active metadata rules from alert-rules.yaml (RF-20):
-   - Rule 1: Schema change alert on Silver/Gold tables
-   - Rule 2: Quality threshold breach alert
-   - Rule 3: Pipeline failure alert
-   - Rule 4: SLA freshness breach alert
-3. Persists events, datasets, schema history, and alerts in SQLite (with WAL mode).
-4. Exposes REST endpoints for querying active alerts, dataset lineage graphs, and health metrics.
+Ingests RunEvents at /api/v1/lineage, evaluates the rules in
+alert-rules.yaml, persists state in SQLite and exposes query endpoints.
 """
 
 from __future__ import annotations
@@ -41,9 +33,7 @@ try:
 except ImportError:
     yaml = None
 
-# -----------------------------------------------------------------------------
-# Logging Configuration
-# -----------------------------------------------------------------------------
+# Logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -51,9 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lineage_webhook_service")
 
-# -----------------------------------------------------------------------------
-# Configuration & Paths
-# -----------------------------------------------------------------------------
+# Configuration and paths
 DATABASE_PATH = os.getenv("LINEAGE_DB_PATH", "lineage_events.db")
 ALERT_RULES_PATH = os.getenv(
     "ALERT_RULES_PATH",
@@ -69,10 +57,8 @@ WEBHOOK_DELIVERY_ENABLED = os.getenv("LINEAGE_WEBHOOK_DELIVERY", "1").strip().lo
 }
 WEBHOOK_TIMEOUT_SECONDS = float(os.getenv("LINEAGE_WEBHOOK_TIMEOUT", "3"))
 
-# CORS: explicit origins (comma-separated) enable credentials; otherwise the
-# wildcard origin is used WITHOUT credentials (the CORS spec forbids
-# ``Access-Control-Allow-Origin: *`` together with
-# ``Access-Control-Allow-Credentials: true``).
+# CORS: explicit origins enable credentials; the wildcard does not (the spec
+# forbids "*" together with Access-Control-Allow-Credentials: true).
 CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()]
 
 
@@ -84,9 +70,7 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-# -----------------------------------------------------------------------------
-# Pydantic Schemas for OpenLineage Spec (Simplified & Extensible)
-# -----------------------------------------------------------------------------
+# Pydantic schemas for the OpenLineage spec
 class Job(BaseModel):
     namespace: str = "default"
     name: str
@@ -150,9 +134,7 @@ class IngestionResponse(BaseModel):
     alerts: list[dict[str, Any]]
 
 
-# -----------------------------------------------------------------------------
-# Database Manager (SQLite with WAL mode)
-# -----------------------------------------------------------------------------
+# Database manager (SQLite with WAL mode)
 class StorageManager:
     """Manages thread-safe SQLite persistence for OpenLineage events, datasets,
     schema history, and generated alerts."""
@@ -440,21 +422,12 @@ class StorageManager:
         return (datetime.now(UTC) - alert_time).total_seconds() < window_seconds
 
     def insert_alert_if_new(self, alert: AlertItem, window_seconds: int = 300) -> bool:
-        """Atomically persist ``alert`` unless a recent duplicate exists.
+        """Persist ``alert`` unless a recent duplicate exists.
 
-        The duplicate check and the INSERT share a single IMMEDIATE
-        transaction, so concurrent evaluators (threads or processes) cannot
-        both pass the check before either one writes (no check-then-insert
-        TOCTOU). Returns True only when the row was actually persisted.
-
-        Identity is the tuple (rule_id, dataset_name, job_name) compared per
-        column against the event's own fields: a job_name never matches
-        another alert's dataset_name. ``COALESCE(..., 'unknown')`` maps NULL
-        to the "unknown" sentinel per column because in SQLite NULL never
-        equals NULL, so without the mapping two alerts with NULL fields
-        would never deduplicate. Accepted limitation: two alerts with
-        neither dataset nor job share the "unknown/unknown" identity and
-        deduplicate against each other.
+        The duplicate check and INSERT share one IMMEDIATE transaction (no
+        TOCTOU); returns True only when the row was actually persisted.
+        Identity is the (rule_id, dataset_name, job_name) tuple, with NULL
+        fields mapped to the "unknown" sentinel per column.
         """
         dataset = alert.dataset_name or "unknown"
         job = alert.job_name or "unknown"
@@ -536,11 +509,10 @@ class StorageManager:
                 return cur.rowcount > 0
 
     def get_dataset_lineage(self, dataset_name: str) -> dict[str, Any]:
-        """Fetch lineage connections: all jobs consuming or producing this dataset.
+        """Fetch all jobs consuming or producing this dataset.
 
-        Dataset identity is matched EXACTLY (either the bare ``name`` or the
-        ``namespace.name`` key), never by substring, so ``silver.orders`` no
-        longer matches ``silver.orders_archive``.
+        Dataset identity is matched exactly (bare ``name`` or
+        ``namespace.name``), never by substring.
         """
         with self._connection() as conn:
             # Producers (where dataset in outputs)
@@ -627,16 +599,12 @@ class StorageManager:
             }
 
 
-# -----------------------------------------------------------------------------
-# Outbound Alert Webhook Delivery (best-effort, stdlib-only: urllib.request)
-# -----------------------------------------------------------------------------
+# Outbound alert webhook delivery (best-effort, stdlib urllib.request)
 def _post_alert_webhook(endpoint: str, payload: dict[str, Any], attempts: int = 1) -> bool:
     """POST ``payload`` as JSON to ``endpoint``. Never raises.
 
-    Gated by the ``LINEAGE_WEBHOOK_DELIVERY`` env switch (read at call time)
-    and bounded by ``LINEAGE_WEBHOOK_TIMEOUT`` per attempt. Every failure is
-    logged and swallowed so webhook delivery can never crash ingestion.
-    ``attempts`` is the total number of POSTs (1 + ``actions.webhook.retry_count``).
+    Gated by ``LINEAGE_WEBHOOK_DELIVERY`` and bounded by
+    ``LINEAGE_WEBHOOK_TIMEOUT``; failures are logged and swallowed.
     """
     if not WEBHOOK_DELIVERY_ENABLED:
         return False
@@ -675,9 +643,7 @@ def _post_alert_webhook(endpoint: str, payload: dict[str, Any], attempts: int = 
     return False
 
 
-# -----------------------------------------------------------------------------
-# Active Metadata Rule Evaluator (RF-20)
-# -----------------------------------------------------------------------------
+# Active metadata rule evaluator
 class RuleEngine:
     """Evaluates the four active metadata rules defined in alert-rules.yaml."""
 
@@ -696,10 +662,9 @@ class RuleEngine:
         return rule if isinstance(rule, dict) else {}
 
     def _rule_enabled(self, rule_id: str) -> bool:
-        """A rule fires only when its YAML `enabled` flag is true.
+        """A rule fires only when its YAML ``enabled`` flag is true.
 
-        Unknown rule ids default to True to preserve legacy behaviour
-        when alert-rules.yaml is missing/unparseable.
+        Unknown rule ids default to True when the config is missing.
         """
         rule = self._rule(rule_id)
         if not rule:
@@ -724,8 +689,7 @@ class RuleEngine:
     def _event_type_allowed(self, rule_id: str, event_type: Any, default: set[str] | None = None) -> bool:
         """Gate on YAML ``target.event_types`` (case-insensitive).
 
-        An absent/empty key (or ``default=None``) preserves the legacy
-        unfiltered behaviour of the rule.
+        An absent/empty key (or ``default=None``) allows every event type.
         """
         raw = self._target(rule_id).get("event_types")
         allowed = {str(s).upper() for s in raw} if isinstance(raw, list) and raw else default
@@ -899,8 +863,7 @@ class RuleEngine:
         removed_sev = str(sev_map.get("removed_column", "CRITICAL"))
         altered_sev = str(sev_map.get("type_altered", "CRITICAL"))
         added_sev = str(sev_map.get("added_column", "WARNING"))
-        # Nullability detection is opt-in: without the YAML key the legacy
-        # (pre-wiring) behaviour of ignoring nullability is preserved.
+        # Nullability detection is opt-in: without the YAML key it is ignored.
         detect_nullability = bool(criteria.get("detect_nullability_changes", False))
         nullability_sev = str(sev_map.get("nullability_changed", "WARNING"))
         detect_added = bool(criteria.get("detect_added_columns", True))
@@ -1190,8 +1153,7 @@ class RuleEngine:
     def _sla_lookup(self, dataset_name: str) -> tuple[float, str]:
         """Resolve (max_staleness_seconds, sla_tier) for a dataset.
 
-        Uses YAML criteria.sla_definitions when present; otherwise falls
-        back to the legacy hardcoded medallion table.
+        Uses YAML criteria.sla_definitions when present, else the built-in table.
         """
         rule = self._rule("RF20-RULE-004")
         criteria = rule.get("criteria", {})
@@ -1210,7 +1172,7 @@ class RuleEngine:
                 except re.error:
                     continue
             return 3600.0, "tier_2"
-        # Legacy fallback table (pre-RF-20-wiring behaviour)
+        # Fallback table
         if dataset_name.startswith("stream."):
             return 5.0, "real_time"
         elif dataset_name.startswith("bronze.") or dataset_name.startswith("silver."):
@@ -1225,7 +1187,7 @@ class RuleEngine:
         sev_map = rule.get("severity_mapping", {})
         if not isinstance(sev_map, dict):
             sev_map = {}
-        if not rule:  # no YAML loaded -> preserve legacy severity behaviour
+        if not rule:  # no YAML loaded: use default severity
             return "CRITICAL" if is_stream or max_staleness <= 3600 else "WARNING"
         defaults = {"tier_1": "CRITICAL", "tier_2": "WARNING", "real_time": "CRITICAL"}
         return str(sev_map.get(f"{sla_tier}_breach", defaults.get(sla_tier, "WARNING")))
@@ -1233,13 +1195,8 @@ class RuleEngine:
     def _check_sla_freshness(self, event: OpenLineageEvent) -> list[AlertItem]:
         """Rule 4: SLA freshness breach alert.
 
-        eventTime handling is FAIL-CLOSED: freshness is the whole contract of
-        this rule, so a timestamp we cannot parse cannot prove the SLA was met
-        and is treated as a breach candidate (details carry
-        ``event_time_error``) instead of the legacy fail-open ``lag=0`` that
-        silently swallowed corrupt timestamps. Naive (offset-less) timestamps
-        parse but violate the OpenLineage RFC3339 requirement; they are
-        interpreted as UTC so a missing offset alone never zeroes the lag.
+        eventTime handling is fail-closed: an unparsable timestamp is a breach
+        candidate. Offset-less timestamps are interpreted as UTC.
         """
         alerts: list[AlertItem] = []
         if not self._rule_enabled("RF20-RULE-004"):
@@ -1309,9 +1266,7 @@ class RuleEngine:
         return alerts
 
 
-# -----------------------------------------------------------------------------
-# FastAPI App Definition & Dependency Injection
-# -----------------------------------------------------------------------------
+# FastAPI app definition and dependency injection
 storage = StorageManager()
 rule_engine = RuleEngine(storage)
 
@@ -1342,9 +1297,7 @@ app.add_middleware(
 )
 
 
-# -----------------------------------------------------------------------------
 # Endpoints
-# -----------------------------------------------------------------------------
 @app.post(
     "/api/v1/lineage",
     status_code=status.HTTP_201_CREATED,

@@ -1,11 +1,5 @@
-# ==============================================================================
-# Modern Data Architecture POC - Startup Profile: Platform
-# File: infra/profiles/platform.yaml
-# CONTRACT (K-B): each `subsystems.<chart>` is a verbatim Helm values fragment
-# for infra/helm/<chart> (keys verified 1:1 against each chart's values.yaml).
-# Only charts this profile deploys have a section (s1, s2, s7).
-# Target RAM Footprint: ~3.0 GB RAM
-# ==============================================================================
+# Platform profile: storage, catalog, ingestion source and lineage services.
+# Each `subsystems.<chart>` is a verbatim Helm values fragment for infra/helm/<chart>.
 profile:
   name: "platform"
   description: "Base platform storage, catalog, messaging, and lineage services"
@@ -44,9 +38,7 @@ subsystems:
           memory: "384Mi"
         limits:
           cpu: "600m"
-          # Raised from 512Mi, which is exactly the floor s2-lakehouse documents
-          # as "spends its time in GC and never reaches ready". Limits do not
-          # affect scheduling (only requests do), so this costs nothing.
+          # Below ~1Gi the JVM spends its time in GC and never becomes ready.
           memory: "1024Mi"
 
   s7-fabric:

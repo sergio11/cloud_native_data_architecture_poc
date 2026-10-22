@@ -1,10 +1,7 @@
-"""
-RF-22 (W5) - Local dispatch for the Dagster orchestration resources.
+"""W5 - local dispatch for the Dagster orchestration resources.
 
-Covers ``pipelines/orchestration/local_dispatch.py`` (no dagster import
-required): subprocess execution of pipeline scripts, submit-path -> local
-script resolution, and a dagster-guarded smoke test that the repository
-definitions still load when the optional ``orchestration`` extra is installed.
+Covers ``pipelines/orchestration/local_dispatch.py``: subprocess execution,
+submit-path resolution and a dagster-guarded smoke test.
 """
 
 from __future__ import annotations
@@ -96,11 +93,8 @@ def test_submit_paths_resolve_to_existing_local_pipeline(submit_path: str, relat
 def test_flink_speed_layer_jobs_are_not_locally_dispatchable(job_path: str) -> None:
     """The speed layer must never be dispatched as a local Python script.
 
-    These files are Flink jobs: they import PyFlink (only present inside the job
-    image) and take their whole configuration from the environment. Running one
-    as a local subprocess is exactly the fake-streaming failure mode this repo
-    removed, so the dispatch map must not offer them and the docs must not
-    describe them as CLI entry points.
+    These are Flink jobs that import PyFlink and read configuration from the
+    environment; running one locally would fake streaming.
     """
     from pipelines.orchestration.local_dispatch import LOCAL_SCRIPT_MAP
 

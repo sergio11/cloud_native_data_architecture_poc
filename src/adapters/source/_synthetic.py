@@ -1,12 +1,7 @@
-"""
-Modern Data Architecture POC - Embedded synthetic OLTP records (demo profile).
+"""Modern Data Architecture POC - Embedded synthetic OLTP records (demo profile).
 
-Deterministic in-repo data generator used EXCLUSIVELY as the local-profile
-fallback when PostgreSQL is unconfigured or unreachable. Kept in its own
-module so ``OltpSourceAdapter`` stays a thin extraction adapter instead of
-also owning demo-data generation (SRP). Output is fully reproducible per
-(seed, table_name, count): wall-clock ``now`` would make two calls with the
-same seed differ in order_date/created_at timestamps.
+Deterministic in-repo generator used as the local fallback when PostgreSQL is
+unconfigured or unreachable.
 """
 
 from __future__ import annotations
@@ -17,9 +12,7 @@ from typing import Any
 
 DEFAULT_SEED = 42
 
-# Fixed reference clock for the synthetic fallback so output is fully
-# reproducible per (seed, table_name, count). Wall-clock `now` would make
-# two calls with the same seed differ in order_date/created_at timestamps.
+# Fixed reference clock so output is reproducible per (seed, table_name, count).
 SYNTHETIC_REFERENCE_TIME = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
 
 

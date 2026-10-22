@@ -1,17 +1,7 @@
-"""
-Parity contract between the Apache Flink speed layer and the reference
-aggregation used by the batch/serving tests (RF-09).
+"""Parity contract between the Flink speed layer and the batch aggregation.
 
-``pipelines/stream/window_logic.py`` holds the pure, PyFlink-free logic the two
-Flink jobs execute inside the cluster. These tests assert it produces exactly
-what ``src.domain.aggregations.BusinessAggregator.aggregate_tumbling_window``
-produces, so the two implementations cannot drift apart unnoticed.
-
-This is the guard against the class of defect the project hit before: results
-that looked fine because nothing ever compared the claimed computation against
-the real one. It needs no cluster - what it proves is the contract, not the
-runtime. Flink-side behaviour (watermarks, checkpointing, replay) still has to
-be verified on the cluster with `rake stream:deploy` / `rake stream:logs`.
+``pipelines/stream/window_logic.py`` must produce exactly what
+``BusinessAggregator.aggregate_tumbling_window`` produces.
 """
 
 from __future__ import annotations
@@ -24,7 +14,7 @@ import pytest
 from pipelines.stream import window_logic
 from src.domain.aggregations import BusinessAggregator
 
-#: RF-09 caps stream end-to-end latency at 5 s. A tumbling window cannot emit
+#: The stream end-to-end latency budget is 5 s. A tumbling window cannot emit
 #: before it closes, so the window remainder plus the watermark lag is the
 #: worst-case first-emission latency and must stay inside the budget.
 RF09_LATENCY_BUDGET_MS = 5_000

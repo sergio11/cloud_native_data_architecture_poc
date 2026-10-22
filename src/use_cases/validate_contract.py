@@ -1,15 +1,7 @@
-"""
-Modern Data Architecture POC - Data Contract Validation Use Case (RF-15).
-Validates DataProduct manifests and DataContracts discovered through the
-DomainCatalogPort: structure, governance JSON schemas, declared compatibility
-mode, and BACKWARD schema evolution against the sibling schema.json snapshot.
-Publication-blocking rules live here (and in src.domain.contracts) only - the
-governance CLI is a thin delegator to this use case.
+"""Modern Data Architecture POC - Data contract validation use case.
 
-All errors are aggregated (never early-return) and reported in deterministic
-path order. ``jsonschema`` is used opportunistically: when the library is not
-installed a warning is logged and the structural checks still run (dependency
-concern, no requirements files are managed here).
+Validates DataProduct manifests and DataContracts: structure, governance
+schemas, compatibility mode and BACKWARD evolution. All errors are aggregated.
 """
 
 from __future__ import annotations
@@ -42,13 +34,9 @@ def _parent_dir(path: str) -> str:
 
 
 class ValidateContractUseCase(ValidateContractPort):
-    """Orchestrates validation of Bitol ODCS contracts and data products.
+    """Orchestrates validation of ODCS contracts and data products.
 
-    ``catalog`` is the REQUIRED DomainCatalogPort used to discover manifests
-    and to load governance JSON schemas. Composition roots outside the core
-    (``src.container.Container``, the governance CLI delegator) inject
-    ``FsDomainCatalogAdapter(repo_root)``; the core never imports a concrete
-    adapter itself (DIP) and performs no filesystem I/O of its own.
+    ``catalog`` is required for manifest discovery and governance schemas.
     """
 
     def __init__(
@@ -125,9 +113,7 @@ class ValidateContractUseCase(ValidateContractPort):
 
         return results
 
-    # ------------------------------------------------------------------
     # Product manifest rules
-    # ------------------------------------------------------------------
     def _validate_product(
         self,
         data: dict[str, Any],
@@ -153,8 +139,7 @@ class ValidateContractUseCase(ValidateContractPort):
 
         contract_ref = spec.get("contract")
         parent = _parent_dir(path)
-        # A sibling that exists and parses is already in the catalog discovery
-        # set; otherwise the "missing or unreadable" message below covers it.
+        # A sibling contract in discovery is valid; otherwise report missing.
         sibling = _norm_path(str(PurePath(parent, "contract.yaml")))
         if not contract_ref and sibling not in contract_paths:
             errs.append("Missing spec.contract reference or sibling contract.yaml")
@@ -166,9 +151,7 @@ class ValidateContractUseCase(ValidateContractPort):
         errs.extend(self._jsonschema_errors(data, "product-schema.json", path))
         return errs
 
-    # ------------------------------------------------------------------
     # Contract rules (structure + mode + schema + backward compatibility)
-    # ------------------------------------------------------------------
     def _validate_contract(
         self,
         data: dict[str, Any],
@@ -213,7 +196,7 @@ class ValidateContractUseCase(ValidateContractPort):
         path: str,
         schemas_by_dir: dict[str, Any],
     ) -> list[str]:
-        """RF-15 key rule: contract fields vs the sibling schema.json snapshot."""
+        """Key rule: contract fields vs the sibling schema.json snapshot."""
         paired = schemas_by_dir.get(_norm_path(_parent_dir(path)))
         if paired is None:
             expected = str(PurePath(_parent_dir(path), "schema.json"))
@@ -231,9 +214,7 @@ class ValidateContractUseCase(ValidateContractPort):
         )
         return [f"Backward compatibility violation against {schema_path}: {message}" for message in violations]
 
-    # ------------------------------------------------------------------
     # Governance JSON schema validation (optional dependency)
-    # ------------------------------------------------------------------
     def _jsonschema_errors(
         self,
         data: dict[str, Any],
@@ -251,7 +232,7 @@ class ValidateContractUseCase(ValidateContractPort):
                 )
                 self._warned_jsonschema = True
             return []
-        # The governance schema dict comes from the catalog port: no file I/O here.
+        # Governance schema comes from the catalog port: no file I/O here.
         schema = self._catalog.load_governance_schema(schema_filename)
         if schema is None:
             return []
@@ -263,8 +244,7 @@ class ValidateContractUseCase(ValidateContractPort):
                 messages.append(f"JSON-schema violation at '{location}': {error.message}")
             return messages
         except jsonschema_exceptions.SchemaError as exc:
-            # The governance schema itself is broken: fail closed by reporting
-            # it as a validation error instead of silently passing (RF-15).
+            # Broken governance schema: fail closed by reporting it.
             logger.error(
                 "Governance JSON-schema '%s' is invalid; failing closed for %s: %s",
                 schema_filename,
@@ -273,14 +253,11 @@ class ValidateContractUseCase(ValidateContractPort):
             )
             return [f"Governance JSON-schema '{schema_filename}' is invalid: {exc}"]
         except Exception as exc:
-            # Any other validation-time failure (unresolvable $ref, library
-            # error, ...) must also block, never degrade to "no errors".
+            # Any other validation failure must also block.
             logger.error("JSON-schema validation could not run for %s: %s", file_path, exc)
             return [f"JSON-schema validation could not run for {file_path}: {exc}"]
 
-    # ------------------------------------------------------------------
     # Result bookkeeping
-    # ------------------------------------------------------------------
     @staticmethod
     def _record(
         results: ValidateContractResult,

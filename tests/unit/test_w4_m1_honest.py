@@ -1,8 +1,7 @@
-"""M1 honest measurement: unit coverage for lineage_webhook_service uncovered routes.
+"""M1 honest measurement: coverage for lineage_webhook_service routes.
 
-Follows tests/unit/test_w4_*.py patterns: hermetic (tmp_path DB + rules),
-module import deferred until after chdir so the module-level
-StorageManager() never touches the repo.
+Hermetic: tmp_path DB and rules, with the module import deferred until after
+chdir so the module-level StorageManager() never touches the repo.
 """
 
 from __future__ import annotations
@@ -367,7 +366,7 @@ rules:
 def test_m1_sla_lookup_and_severity(monkeypatch, tmp_path):
     svc = _load_service(monkeypatch, tmp_path)
     storage = svc.StorageManager(db_path=str(tmp_path / "sla.db"))
-    # No YAML -> legacy table
+    # No YAML -> built-in table
     engine = svc.RuleEngine(storage, rules_path=str(tmp_path / "missing.yaml"))
     assert engine._sla_lookup("stream.orders") == (5.0, "real_time")
     assert engine._sla_lookup("bronze.raw") == (3600.0, "tier_2")

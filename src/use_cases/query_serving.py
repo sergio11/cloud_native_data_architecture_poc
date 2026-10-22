@@ -1,7 +1,6 @@
-"""
-Modern Data Architecture POC - Unified Serving Layer Query Use Case.
-Implements RF-11: a single SQL statement transparently combining historical
-batch Gold data with real-time stream Speed buffers, with no double counting.
+"""Modern Data Architecture POC - Unified serving layer query use case.
+
+Combines historical batch Gold data with real-time stream data in one query.
 """
 
 from __future__ import annotations
@@ -17,16 +16,9 @@ logger = logging.getLogger("use_case.query_serving")
 
 
 class QueryServingUseCase(QueryServingPort):
-    """Orchestrates transparent unification of batch and streaming tiers at query time.
+    """Orchestrates transparent unification of batch and streaming tiers.
 
-    Lambda fusion semantics (RF-11):
-    - batch (gold.sales.daily_metrics) = exact historical aggregates;
-    - stream (stream.sales.orders_windowed) = recent tumbling-window aggregates;
-    - batch wins on (order_date, status) key collision: stream rows only fill
-      keys ABSENT from batch (NOT EXISTS anti-join inside the SQL), so no key
-      is ever counted twice;
-    - one SQL statement hides both storage paths from the caller; the outbound
-      QueryExecutorPort adapter picks the serving backend.
+    Batch wins on ``(order_date, status)``; stream rows fill absent keys only.
     """
 
     def __init__(self, query_executor: QueryExecutorPort) -> None:
@@ -37,11 +29,9 @@ class QueryServingUseCase(QueryServingPort):
         order_date_gte: str | None = None,
         limit: int = 20,
     ) -> list[UnifiedRevenueRow]:
-        """Executes one unified query over batch Gold + stream Speed tiers.
+        """Executes one unified query over batch Gold and stream Speed tiers.
 
-        Returns rows coerced to typed values (``total_orders`` int, revenues
-        float rounded to 2 decimals) with ``source_tier`` labels exactly
-        ``batch_historical`` / ``stream_speed``.
+        Returns typed rows with ``source_tier`` labels.
         """
         logger.info("Executing RF-11 Unified Serving Query (batch + stream)...")
         sql = self._build_unified_sql(order_date_gte=order_date_gte, limit=limit)
@@ -52,13 +42,7 @@ class QueryServingUseCase(QueryServingPort):
     def _build_unified_sql(order_date_gte: str | None, limit: int) -> str:
         """Builds the single no-double-count SQL statement.
 
-        QueryExecutorPort takes SQL only (no bind parameters), so the filter is
-        inlined with quote escaping and the limit is cast to int. Tier table
-        names are serving live-view names from ``src.domain.naming``
-        (``serving_view_name``, single source of truth), never dotted logical
-        names: the statement runs verbatim on every backend because the
-        serving adapter provisions each ``<physical>_live`` view idempotently
-        (live rows only) instead of rewriting the SQL text.
+        Table names are serving live-view names; the statement runs verbatim.
         """
         batch_table = serving_view_name(gold_table("daily_metrics"))
         stream_table_name = serving_view_name(stream_table())

@@ -1,21 +1,7 @@
-"""
-W8 CLI smoke tests: quality-gate exit codes 0 / 1 / 2 (RF-06).
+"""W8 CLI smoke tests: quality-gate exit codes 0 / 1 / 2.
 
-``quality/gates/run_quality_gate.py`` is invoked by the Rakefile ``quality:gate``
-task and the demo scripts, but coverage is scoped to ``src/`` and no other test
-executes this entry point, so its exit-code contract was untested:
-
-  0 - gate PASSED
-  1 - gate FAILED (incl. the fail-closed empty evaluation)
-  2 - execution error (missing suite, unreadable input file, ...)
-
-Hermeticity: every run feeds records through ``--input-file`` with a temp JSON
-array, so the use case NEVER reads ``data/*.db`` (the lakehouse storage is only
-touched when ``records is None``). The repository's ``data/`` directory is
-therefore not opened, created or modified. The suite file and the domains/
-catalog reads are read-only.
-
-Runtime budget: three subprocesses (warm ~2s each).
+Runs ``quality/gates/run_quality_gate.py`` with records through ``--input-file``
+so the lakehouse storage and repository ``data/`` are never touched.
 """
 
 from __future__ import annotations
@@ -84,7 +70,7 @@ def test_cli_exit_0_when_gate_passes(tmp_path: Path) -> None:
 
 
 def test_cli_exit_1_on_empty_records_fail_closed(tmp_path: Path) -> None:
-    """Empty array => fail-closed evaluation => gate FAILED => exit 1 (RF-06)."""
+    """Empty array => fail-closed evaluation => gate FAILED => exit 1."""
     input_file = _write_json(tmp_path / "empty.json", [])
 
     result = _run(input_file)

@@ -1,12 +1,6 @@
-"""
-Modern Data Architecture POC - Shared SQLite connection lifecycle helper.
+"""Modern Data Architecture POC - Shared SQLite connection lifecycle helper.
 
-``sqlite3`` connections used as context managers (``with conn:``) commit or
-roll back on exit but are NEVER closed by the context manager: relying on the
-garbage collector retains file handles, delays WAL checkpoints and risks
-"database is locked" errors under load. Every adapter must therefore acquire
-SQLite connections through :func:`sqlite_connection`, which guarantees
-commit-on-success, rollback-on-error and ``close()`` in all cases.
+``sqlite_connection`` guarantees commit-or-rollback and ``close()``.
 """
 
 from __future__ import annotations
@@ -27,11 +21,9 @@ def sqlite_connection(
     check_same_thread: bool = True,
     pragmas: tuple[str, ...] = (),
 ) -> Iterator[sqlite3.Connection]:
-    """Yields a SQLite connection that is always committed/rolled back and closed.
+    """Yields a connection committed on success, rolled back on error, always closed.
 
-    On clean exit the transaction commits; on exception it rolls back. The
-    connection is closed in a ``finally`` block either way. Optional
-    ``pragmas`` run once right after connecting (outside any transaction).
+    Optional ``pragmas`` run once right after connecting.
     """
     conn = sqlite3.connect(str(db_path), timeout=timeout, check_same_thread=check_same_thread)
     try:

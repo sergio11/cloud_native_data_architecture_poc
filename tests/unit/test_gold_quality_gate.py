@@ -1,12 +1,7 @@
-"""
-Modern Data Architecture POC - Unit Tests: Gold Quality Gate (RF-06 fail-closed).
+"""Unit tests: Gold quality gate (fail-closed).
 
-Verifies that AggregateGoldUseCase enforces a per-target quality gate mirroring
-the Silver pattern: a breaching target emits a FAIL lineage event and raises
-QualityGateBreachError BEFORE any write, while the independent target still
-publishes. Fully hermetic: lakehouse SQLite DB and lineage audit JSONL live
-under tmp_path, Marquez HTTP is stubbed out, and the use case is constructed
-directly (no src.container import needed).
+A breaching target emits a FAIL event and raises before any write, while the
+independent target still publishes.
 """
 
 from __future__ import annotations
@@ -170,7 +165,6 @@ def test_gold_gate_passes_happy_path(world):
     )
 
     assert result["status"] == "SUCCESS"
-    # (2026-09-25, confirmed), (2026-09-25, pending), (2026-09-26, shipped).
     assert result["daily_metrics_rows"] == 3
     assert result["customers_masked_rows"] == 2
 

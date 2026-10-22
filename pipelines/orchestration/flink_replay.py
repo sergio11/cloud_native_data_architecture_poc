@@ -1,13 +1,9 @@
 """
-Kappa replay environment for the Apache Flink speed layer (RF-10).
+Kappa replay environment for the Apache Flink speed layer.
 
-Pure functions (no Kubernetes, no subprocess) so the semantics are unit-testable
-without a cluster.
-
-``KAFKA_START_OFFSET=earliest`` only rewinds a consumer group with no committed
-offsets. A group that has already consumed resumes from its last commit, so
-flipping the flag alone would replay nothing and still report success. Every
-replay therefore rotates ``KAFKA_GROUP_ID`` too.
+Pure functions (no Kubernetes, no subprocess) so the semantics are testable
+without a cluster. ``KAFKA_START_OFFSET=earliest`` only rewinds a consumer
+group with no committed offsets, so every replay also rotates ``KAFKA_GROUP_ID``.
 """
 
 from __future__ import annotations

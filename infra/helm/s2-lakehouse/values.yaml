@@ -1,7 +1,4 @@
-# ==============================================================================
-# Subsystem S2: Lakehouse Storage & Catalog - Values Configuration
-# File: infra/helm/s2-lakehouse/values.yaml
-# ==============================================================================
+# Lakehouse storage and catalog: MinIO and the Polaris Iceberg REST catalog.
 
 global:
   namespace: platform
@@ -12,8 +9,8 @@ minio:
   enabled: true
   replicaCount: 1
   image:
-    # Upstream minio/minio was removed from Docker Hub and quay.io gates
-    # anonymous pulls, so the POC uses the archived Bitnami build.
+    # Upstream minio/minio is no longer published; this is the archived Bitnami
+    # build.
     repository: bitnamilegacy/minio
     tag: "2025.7.23"
     pullPolicy: IfNotPresent
@@ -24,14 +21,8 @@ minio:
 
   service:
     type: NodePort
-    # nodePort MUST equal the containerPort that infra/kind/cluster-config.yaml
-    # maps to the host, or nothing answers on the advertised URL: kind forwards
-    # host:9000 to node:9000, and kube-proxy on that node only intercepts the
-    # NodePort actually allocated. The 30900/30901/31818 values this used to
-    # carry were reachable only from inside the cluster, which is why
-    # http://localhost:9000 and http://localhost:8181 both refused connections.
-    # cluster-config.yaml widens service-node-port-range to 1-65535, so these
-    # are legal as NodePorts.
+    # nodePort must equal the host-mapped port in infra/kind/cluster-config.yaml,
+    # which widens service-node-port-range so these low ports are legal.
     apiPort: 9000
     apiNodePort: 9000
     consolePort: 9001
@@ -51,19 +42,17 @@ minio:
       cpu: 500m
       memory: 384Mi
 
-  # Empty by default so single-node clusters schedule anywhere; pin to
-  # storage nodes in multi-node setups, e.g.
-  # nodeSelector: {node-role.kubernetes.io/storage: "true"}.
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/storage).
   nodeSelector: {}
 
   tolerations: []
   affinity: {}
 
-# Automatic Lakehouse Buckets Provisioning
+# Buckets created at install time.
 bucketInit:
   enabled: true
   image:
-    # Client for the bucket-init job; upstream minio/mc is gone from Docker Hub.
+    # mc client for the bucket-init job; upstream minio/mc is gone.
     repository: bitnamilegacy/minio-client
     tag: "2025.7.21"
     pullPolicy: IfNotPresent
@@ -77,75 +66,46 @@ bucketInit:
     - contracts
     - checkpoints
 
-# Apache Polaris REST Iceberg Catalog
+# Apache Polaris REST Iceberg catalog.
 polaris:
   enabled: true
   replicaCount: 1
   image:
     repository: apache/polaris
-    # Pinned (RNF-09). "latest" silently moved to 1.8.0 and 2.x will break the
-    # configuration below, which is written against the 1.8 Quarkus runtime.
+    # Pinned: "latest" moved to 1.8.0, and 2.x breaks the 1.8 runtime config.
     tag: "1.8.0"
     pullPolicy: IfNotPresent
 
   service:
     type: NodePort
     port: 8181
-    # Must match the 8181 containerPort kind forwards to the host - see the
-    # MinIO service block above for why.
+    # Must match the 8181 port kind forwards to the host (see MinIO above).
     nodePort: 8181
 
-  # Realm and fixed root credentials handed to Polaris via
-  # POLARIS_BOOTSTRAP_CREDENTIALS. Without them Polaris generates a random pair
-  # on every boot, so Trino, Flink and Spark can never be pointed at it. These
-  # same values must be given to every Iceberg REST client.
+  # Fixed root credentials, passed via POLARIS_BOOTSTRAP_CREDENTIALS; without
+  # them Polaris generates a random pair on every boot. Every Iceberg REST client
+  # must use the same values.
   realm: "POLARIS"
   clientId: "poc-admin"
   clientSecret: "poc-admin-secret"
 
-  # Durable catalog metadata. Without it the catalog is wiped on every Polaris
-  # restart and the Iceberg tables in MinIO become invisible to every engine.
-  #
-  # type: "jdbc" is what actually turns persistence on (the deployment maps it to
-  # POLARIS_PERSISTENCE_TYPE). "in-memory" is the previous, broken behaviour.
-  #
-  # PostgreSQL is not a preference: the JDBC driver in apache/polaris:1.8.0 is
-  # org.postgresql + quarkus-jdbc-postgresql and the image ships no H2 driver.
-  # This reuses the Postgres the cluster already runs (s1-ingestion -> postgres-oltp)
-  # instead of adding a pod to a 6 GB node; the credentials must match its env.
+  # durable catalog metadata. type is mapped to POLARIS_PERSISTENCE_TYPE; jdbc
+  # is the durable option and the image only ships a PostgreSQL driver.
   persistence:
-    # "in-memory" for now, "relational-jdbc" is the durable target.
-    #
-    # relational-jdbc boots, connects and reads its schema (schema v6 from the
-    # polaris-relational-jdbc-1.8.0 jar, applied by polaris-db-schema-job.yaml,
-    # with ?currentSchema=public). It stops at one step: with a JDBC metastore
-    # Polaris does NOT bootstrap the realm on startup the way it does in-memory
-    # - it answers "Realm POLARIS is not bootstrapped... Please run Bootstrap
-    # command", and `java -jar quarkus-run.jar Bootstrap` is silently ignored,
-    # so it starts the server instead of bootstrapping. The command lives in the
-    # 424 MB binary distribution (polaris-bin-1.8.0.tgz); no admin-tool artifact
-    # is published to Maven Central. That download is the next step once the
-    # speed layer is verified end to end.
-    #
-    # Until then the catalog is recreated by polaris-bootstrap-job.yaml after
-    # every Polaris restart.
+    # in-memory for now: with a JDBC metastore Polaris does not bootstrap the realm
+    # on startup, so polaris-bootstrap-job.yaml recreates the catalog after every
+    # restart.
     type: "in-memory"
     driver: "org.postgresql.Driver"
-    # Reuses the PostgreSQL the cluster already runs (s1-ingestion ->
-    # postgres-oltp) instead of adding a pod to a 6 GB node. Plain literals:
-    # values.yaml is YAML, Helm does not evaluate templates inside it, and the
-    # host must follow a change of global.namespace by hand.
+    # Reuses the Postgres from s1-ingestion. Plain literals: Helm does not
+    # evaluate templates inside values.yaml.
     host: "postgres-oltp.platform.svc.cluster.local"
     database: "poc_oltp"
     username: "postgres"
     password: "oltp_password_secret"
-    # currentSchema pins the schema explicitly: Polaris reports
-    # `relation "entities" does not exist` even though the table is in public and
-    # the connection is to the right database, which is what an unset/foreign
-    # search_path looks like from the driver's side.
+    # currentSchema must be explicit, or the driver sees a foreign search_path.
     jdbcUrl: "jdbc:postgresql://postgres-oltp.platform.svc.cluster.local:5432/poc_oltp?currentSchema=public"
-    # Small on purpose: the node has 6 GB shared by everything and Polaris only
-    # issues a handful of metadata queries.
+    # Polaris only issues a few metadata queries.
     poolMaxSize: 10
 
   config:
@@ -159,23 +119,20 @@ polaris:
   resources:
     requests:
       cpu: 200m
-      # Quarkus runs with -XX:MaxRAMPercentage=80 + ExitOnOutOfMemoryError, so
-      # the limit IS the heap budget. At 512Mi the JVM spends its time in GC
-      # and the first boot against the JDBC metastore never reaches ready.
+      # Quarkus sizes its heap from the limit; below ~1Gi it never becomes
+      # ready.
       memory: 512Mi
     limits:
       cpu: 800m
       memory: 1024Mi
 
-  # Empty by default so single-node clusters schedule anywhere; pin to
-  # storage nodes in multi-node setups, e.g.
-  # nodeSelector: {node-role.kubernetes.io/storage: "true"}.
+  # Empty schedules anywhere (multi-node: node-role.kubernetes.io/storage).
   nodeSelector: {}
 
   tolerations: []
   affinity: {}
 
-# Shared Lakehouse Storage PVC (used across batch medallion, streaming, and serving jobs)
+# PVC shared by the medallion, streaming and serving jobs.
 lakehouseStorage:
   enabled: true
   name: "lakehouse-storage"
@@ -183,25 +140,16 @@ lakehouseStorage:
   storageClass: "standard"
   size: "2Gi"
 
-# Registers the Iceberg TABLES in the Polaris catalog.
-#
-# `pipelines/serving/catalog_registration.py` is the only thing in the repo
-# that creates the catalog's table entries, and nothing executed it: no chart,
-# no Dagster asset, no rake task. So `iceberg.sales.daily_metrics` had no
-# producer, and `unified_view.sql` references it - which made
-# `trino-views-bootstrap` fail on its first statement and take the stream
-# views down with it.
+# Registers the Iceberg tables in the catalog: catalog_registration.py produces
+# those entries and unified_view.sql needs them.
 catalogRegistration:
   enabled: true
-  # The image is built from the repository, so the script and the domains/
-  # manifests it patches are always the same revision.
+  # Built from this repository, so script and manifests share a revision.
   image:
     repository: docker.io/poc/ingest
     tag: "0.1.0"
     pullPolicy: IfNotPresent
-  # Optional. When set, the datasets and jobs are registered in Marquez too.
-  # Marquez lives in s7-fabric, and the serving layer must not depend on the
-  # lineage backend being deployed as well.
+  # Optional: also registers the datasets in Marquez, which lives in s7-fabric.
   marquezUrl: ""
-  # The manifests to patch with the physical table paths.
+  # Manifests patched with the physical table paths.
   manifestsDir: "/app/domains"

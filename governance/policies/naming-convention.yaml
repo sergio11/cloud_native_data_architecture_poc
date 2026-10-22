@@ -16,13 +16,8 @@ spec:
               kinds:
                 - DataProduct
       validate:
-        # Kyverno pattern wildcards (*, ?, ?*) have NO character classes and
-        # every other character is matched literally, so a pattern value such
-        # as "?*([a-z0-9-])" would only match names literally ending in
-        # "([a-z0-9-])" (i.e. nothing), while a bare "?*" would also accept
-        # "-leading", "UPPER" or dotted names. The rule is therefore expressed
-        # as a regex deny condition, which is the only place Kyverno accepts a
-        # real character class ([a-z0-9_-]).
+        # Kyverno patterns have no character classes, so enforce the naming rule
+        # with a regex deny condition (the only place Kyverno accepts [a-z0-9_-]).
         message: >-
           DataProduct name must start with a lowercase alphanumeric character and may
           then contain only lowercase alphanumeric characters, hyphens or underscores

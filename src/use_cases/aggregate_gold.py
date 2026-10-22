@@ -1,11 +1,7 @@
-"""
-Modern Data Architecture POC - Gold Layer Business Modeling & PII Masking Use Case.
-Executes business metric aggregations and enforces GDPR pseudonymization policies.
+"""Modern Data Architecture POC - Gold modeling and PII masking use case.
 
-Quality gates (RF-06) mirror the Silver pattern (CleanseSilverUseCase): each Gold
-target is evaluated via the shared domain gate BEFORE publication. On breach a FAIL
-lineage event is emitted and QualityGateBreachError is raised, blocking publication
-of that target (fail-closed per target - the other target proceeds independently).
+Aggregates business metrics, enforces GDPR pseudonymization and runs the
+shared quality gate before publishing each target (fail-closed per target).
 """
 
 from __future__ import annotations
@@ -36,10 +32,9 @@ _SILVER_CUSTOMERS_TABLE = silver_table("customers")
 
 
 class AggregateGoldUseCase(AggregateGoldPort):
-    """Orchestrates Silver-to-Gold dimensional modeling and GDPR PII masking.
+    """Orchestrates Silver-to-Gold modeling and GDPR PII masking.
 
-    Gold is a full recomputation from Silver on every run (Lambda batch layer),
-    which IS the replay/RF-08 behaviour - there is no incremental replay flag.
+    Gold is fully recomputed from Silver on every run.
     """
 
     def __init__(
@@ -82,10 +77,7 @@ class AggregateGoldUseCase(AggregateGoldPort):
         results: AggregateGoldResult = {"status": "SUCCESS"}
         breach: QualityGateBreachError | None = None
 
-        # Data-driven fan-out over GOLD_PRODUCTS (open for extension: a new
-        # product adds a descriptor plus its publisher, the loop is untouched).
-        # Fail-closed per target: a breach blocks only its target - the other
-        # proceeds independently.
+        # Data-driven fan-out over GOLD_PRODUCTS; a breach blocks only its target.
         for product in GOLD_PRODUCTS:
             if target not in ("all", product.name, gold_table(product.name)):
                 continue
@@ -96,9 +88,7 @@ class AggregateGoldUseCase(AggregateGoldPort):
                 if breach is None:
                     breach = exc
                 else:
-                    # Both targets breached concurrently: the first recorded
-                    # breach is the one re-raised (fail-closed either way), but
-                    # discarding this one without a trace would hide a real breach.
+                    # Keep the first breach; log any concurrent one.
                     logger.warning(
                         "Second concurrent QualityGateBreachError while one is already "
                         "recorded; keeping the first breach (both block publication): %s",

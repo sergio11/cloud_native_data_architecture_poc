@@ -1,10 +1,7 @@
-"""
-Modern Data Architecture POC - Integration Test: Governance CLI on the real repo.
+"""Integration test: governance CLI against the real repository.
 
-Guards the exact entry point the Rakefile (``governance:validate``) and
-``scripts/demo.sh`` invoke: ``python governance/contract_validator.py
---repo-root .`` run from the repository root. One subprocess, read-only against
-the checked-in domains/ tree (the repo's 6 data products must validate).
+Runs ``python governance/contract_validator.py --repo-root .`` as the Rakefile
+and demo scripts do, and expects every data product and contract to validate.
 """
 
 from __future__ import annotations

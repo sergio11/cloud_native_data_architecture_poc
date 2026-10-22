@@ -36,13 +36,7 @@ spec:
   selector:
     matchLabels:
       app: kafka
-  # RollingUpdate, and not the default OnDelete: a StatefulSet whose
-  # template changes (the broker's heap, its limits) keeps running the OLD
-  # pod until somebody deletes it by hand. That is how the broker ended up
-  # with a 192m heap after the chart was already asking for 256m, and it died
-  # at boot with:
-  #   java.lang.OutOfMemoryError: Java heap space
-  #   at org.apache.kafka.storage.internals.log.SkimpyOffsetMap.<init>
+  # RollingUpdate, not OnDelete: otherwise the old pod (and old heap) stays until deleted.
   updateStrategy:
     type: RollingUpdate
   template:
@@ -67,19 +61,8 @@ spec:
               containerPort: 9093
               protocol: TCP
           env:
-            # apache/kafka's bin/kafka-server-start.sh defaults to
-            #   KAFKA_HEAP_OPTS="-Xmx1G -Xms1G"
-            # when the variable is unset, and this chart caps the container at
-            # 768Mi (values.yaml kafka.resources.limits.memory). -Xms1G cannot
-            # be reserved inside that cgroup, so the broker died at boot with
-            # "Could not reserve enough space for object heap" and CrashLoopBackOff
-            # while the startupProbe masked it for 5 minutes.
-            #
-            # Sized to the container: 512m heap + 128m direct + metaspace/code
-            # cache in the remaining ~100Mi. Single broker, two topics, three
-            # partitions each, so the heap is generous for this workload.
-            # The value lives in values.yaml (kafka.heapOpts) because the
-            # stream profile lowers it together with the container limit.
+            # The image defaults to -Xmx1G -Xms1G when unset, which cannot be reserved inside
+            # this container's limit; sized alongside kafka.heapOpts.
             - name: KAFKA_HEAP_OPTS
               value: {{ .Values.kafka.heapOpts | quote }}
             - name: KAFKA_NODE_ID

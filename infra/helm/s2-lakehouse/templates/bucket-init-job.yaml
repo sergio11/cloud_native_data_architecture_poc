@@ -16,10 +16,7 @@ spec:
         app: minio-bucket-init
     spec:
       restartPolicy: OnFailure
-      # Without resources this pod is BestEffort QoS, and BestEffort pods are
-      # the FIRST thing the kubelet evicts under memory pressure. On a 6 GB
-      # node shared by Kafka, Flink and Trino that made the bucket creation -
-      # which every other component depends on - a coin flip.
+      # Without resources this pod is BestEffort and gets evicted first under memory pressure.
       resources:
         requests:
           cpu: "50m"
@@ -42,9 +39,8 @@ spec:
             - -c
             - |
               echo "Waiting for MinIO service to respond on port 9000..."
-              # Bounded: an unbounded `until nc` never exits, so the pod stays
-              # Running forever, backoffLimit never engages, and the Job looks
-              # healthy in `kubectl get jobs` while no bucket was ever created.
+              # Bounded: an unbounded wait never exits, so backoffLimit never engages and
+              # the Job looks healthy while no bucket was created.
               DEADLINE=$(($(date +%s) + 300))
               until nc -z -w 2 minio.{{ .Values.global.namespace | default "platform" }}.svc.cluster.local 9000; do
                 if [ "$(date +%s)" -ge "${DEADLINE}" ]; then

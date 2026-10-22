@@ -1,9 +1,9 @@
 """
-run_serving_query.py - Interactive Serving Layer Unified Query Execution (RF-11).
-Driving Adapter invoking QueryServingUseCase (via container.query_serving only)
-to run the single no-double-count query over merged Batch + Stream tiers.
-Backend visibility (Trino vs embedded SQLite) is reported by the serving
-adapter log line "Serving query executed by backend=...".
+run_serving_query.py - Interactive serving-layer unified query execution.
+
+Driving adapter invoking QueryServingUseCase to run the single no-double-count
+query over the merged Batch + Stream tiers. The backend used (Trino or embedded
+SQLite) is reported by the adapter as "Serving query executed by backend=...".
 """
 
 from __future__ import annotations

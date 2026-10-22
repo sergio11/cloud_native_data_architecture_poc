@@ -1,6 +1,6 @@
-# 🌐 Modern Data Architecture
+# 🧪 Cloud-Native Data Architecture POC
 
-> 🕸️ Open-source reference implementation of Data Mesh, Data Fabric, 🏔️ Medallion Lakehouse and ⚡ hybrid Lambda/Kappa on Kubernetes.
+> 🕸️ A local-first POC of Data Mesh, Data Fabric, 🏔️ Medallion Lakehouse and ⚡ Lambda/Kappa on Kubernetes.
 >
 > 🧊 Iceberg + Polaris + Spark + Flink + Kafka + Trino, with ✅ contract-driven quality gates and 🔗 OpenLineage/Marquez lineage.
 
@@ -19,7 +19,7 @@
 
 ## Introduction
 
-**Modern Data Architecture** is a local-first proof of concept and reference implementation of the architectural patterns that shape modern analytical platforms. It is built to be read, run and inspected: each paradigm is represented by code, a deployed workload and a verification path.
+**Cloud-Native Data Architecture POC** is a local-first proof of concept for the architectural patterns that shape modern analytical platforms. It is built to be read, run and inspected: each paradigm is represented by code, a deployed workload and a verification path. The goal is to make each pattern executable and observable, not to prescribe a production reference architecture.
 
 The platform combines a Medallion lakehouse on Apache Iceberg, a hybrid Lambda/Kappa pipeline, domain-oriented Data Mesh governance, active metadata with OpenLineage and Marquez, and a single Trino serving layer. The application core is a hexagonal Python codebase; the heavy engines run on Kubernetes.
 
@@ -29,7 +29,7 @@ Use this repository to study architecture decisions, to exercise a data contract
 
 ## Disclaimer
 
-This is an educational and architectural reference, not a production distribution. It uses demo credentials, a single-node object store and catalog, embedded SQLite in selected adapters, and a deliberately small resource envelope. A production deployment needs high availability, TLS, secret management, backups, multi-tenancy and a managed catalog.
+This is an educational and architectural POC, not a production distribution. It uses demo credentials, a single-node object store and catalog, embedded SQLite in selected adapters, and a deliberately small resource envelope. A production deployment needs high availability, TLS, secret management, backups, multi-tenancy and a managed catalog.
 
 ---
 

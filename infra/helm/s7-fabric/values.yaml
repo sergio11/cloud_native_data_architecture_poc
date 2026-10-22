@@ -23,6 +23,28 @@ marquez:
       cpu: "100m"
       memory: "256Mi"
 
+# The database Marquez keeps its catalogue in. The image's default
+# configuration points at a host called "postgres" and the server dies in the
+# Flyway migration when it cannot resolve it, so the database is deployed with
+# the chart (the upstream chart ships it as a subchart).
+marquezPostgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16.2-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: "500m"
+      memory: "384Mi"
+    requests:
+      cpu: "100m"
+      memory: "192Mi"
+  pvc:
+    name: marquez-postgresql-data
+    size: 1Gi
+    storageClass: "standard"
+
 alertService:
   enabled: true
   replicaCount: 1

@@ -1,0 +1,124 @@
+{{- if .Values.marquezPostgres.enabled }}
+# ==============================================================================
+# The database Marquez needs.
+#
+# Marquez 0.45 is a Dropwizard/Jetty server whose catalogue lives in
+# PostgreSQL: without a reachable database it dies in the Flyway migration
+# with
+#   java.net.UnknownHostException: postgres
+# because the image's default configuration points at a host called
+# "postgres" (the name the upstream chart's subchart gives it). The upstream
+# chart ships that subchart; this one does not, so the database is here:
+# one pod, one PVC, and the same POSTGRES_* variables the image reads.
+# ==============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: marquez-postgresql
+  namespace: platform
+  labels:
+    app: marquez-postgresql
+    subsystem: s7-fabric
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: marquez-postgresql
+---
+# The alias the IMAGE looks for.
+#
+# The Marquez image does not read POSTGRES_HOST: its configuration names
+# the host "postgres" literally, and the server dies in the Flyway migration
+# with "UnknownHostException: postgres" when that name does not resolve. The
+# upstream chart works around it by mounting a whole marquez.yml ConfigMap;
+# here the same name is simply given to the Service, which is one object
+# instead of a configuration file that has to be kept in sync with the image.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: platform
+  labels:
+    app: marquez-postgresql
+    subsystem: s7-fabric
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: marquez-postgresql
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marquez-postgresql
+  namespace: platform
+  labels:
+    app: marquez-postgresql
+    subsystem: s7-fabric
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: two pods would fight over the same
+    # volume, and the second one would fail to initialise the cluster.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: marquez-postgresql
+  template:
+    metadata:
+      labels:
+        app: marquez-postgresql
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.marquezPostgres.image.repository }}:{{ .Values.marquezPostgres.image.tag }}"
+          imagePullPolicy: {{ .Values.marquezPostgres.image.pullPolicy }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: "marquez"
+            - name: POSTGRES_USER
+              value: "marquez"
+            - name: POSTGRES_PASSWORD
+              value: "marquez"
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            {{- toYaml .Values.marquezPostgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "marquez", "-d", "marquez"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 12
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.marquezPostgres.pvc.name }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.marquezPostgres.pvc.name }}
+  namespace: platform
+  labels:
+    app: marquez-postgresql
+    subsystem: s7-fabric
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.marquezPostgres.pvc.size }}
+  {{- if .Values.marquezPostgres.pvc.storageClass }}
+  storageClassName: {{ .Values.marquezPostgres.pvc.storageClass }}
+  {{- end }}
+{{- end }}

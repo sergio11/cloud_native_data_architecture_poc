@@ -1,4 +1,4 @@
-# Cloud-Native Data Architecture POC — Data Mesh, Data Fabric and Medallion Lakehouse on Kubernetes
+# 🧪 Cloud-Native Data Architecture POC — Data Mesh, Data Fabric and Medallion Lakehouse on Kubernetes
 
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Kubernetes / kind](https://img.shields.io/badge/Kubernetes-kind-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kind.sigs.k8s.io/)
@@ -10,28 +10,29 @@
 [![Trino 455](https://img.shields.io/badge/Trino-455-DD00A1?style=for-the-badge&logo=trino&logoColor=white)](https://trino.io/)
 [![MinIO](https://img.shields.io/badge/MinIO-object_store-C72C48?style=for-the-badge&logo=minio&logoColor=white)](https://min.io/)
 [![OpenLineage and Marquez](https://img.shields.io/badge/OpenLineage_Marquez-0.45-00B4D8?style=for-the-badge)](https://openlineage.io/)
-[![pytest 326 passed](https://img.shields.io/badge/pytest-326_passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](#testing-and-evidence)
 [![License MIT](https://img.shields.io/badge/License-MIT-3DA639?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 
 ---
 
-A **Proof-of-Concept (POC)** demonstrating a **modern analytical data architecture**: domain-owned Data Mesh products, Data Fabric metadata, a Medallion lakehouse on Apache Iceberg, and a hybrid Lambda/Kappa pipeline fused into a single serving surface. Built with Iceberg, Polaris, Spark, Flink, Kafka, Trino, Kyverno and OpenLineage/Marquez, and validated by a 326-test suite plus reproducible cluster probes. It is intended for architectural evaluation and learning, **not as a production deployment**.
+A **Proof-of-Concept (POC)** demonstrating a **modern analytical data architecture**: domain-owned Data Mesh products, Data Fabric metadata, a Medallion lakehouse on Apache Iceberg, and a hybrid Lambda/Kappa pipeline fused into a single serving surface. Built with Iceberg, Polaris, Spark, Flink, Kafka, Trino, Kyverno and OpenLineage/Marquez. Intended for architectural evaluation and learning, **not as a production deployment**.
 
 > **In one paragraph:** A hexagonal Python core executes Bronze, Silver and Gold through a fail-closed contract gate, on either SQLite or Iceberg with Trino, without changing a line of business logic. A Flink job turns Kafka order events into 4-second event-time windows with watermarks, allowed lateness and dead-lettering, while the batch path recomputes Gold from Silver for deterministic corrections. Trino fuses both with a batch-wins anti-join, so no `(order_date, status)` key is counted twice. Products are governed as code — manifests, ODCS-style contracts, JSON-Schema validation and Kyverno admission policies — and every run emits OpenLineage events to Marquez and to a FastAPI alert service. The whole platform is pinned and runs on a three-node kind cluster on Podman, shrunk to a workstation through profiles and phases.
 
 ---
 
-[📋 Disclaimer](#disclaimer) · [🚀 Why This Architecture?](#why-this-architecture) · [🏗️ Architecture](#architecture-at-a-glance) · [🏔️ Medallion Lakehouse](#the-medallion-lakehouse) · [⚡ Lambda + Kappa](#hybrid-lambda--kappa) · [🔌 Serving Layer](#serving-layer) · [🕸️ Data Mesh](#data-mesh-products-and-contracts) · [🔗 Data Fabric](#data-fabric-and-active-metadata) · [🧩 Hexagonal Core](#hexagonal-architecture) · [☸️ Kubernetes](#kubernetes-deployment-topology) · [🧪 Testing](#testing-and-evidence) · [🏁 Quick Start](#quickstart) · [📁 Structure](#project-structure) · [⚠️ Limitations](#known-limitations-and-non-goals)
+[📋 Disclaimer](#-disclaimer) · [🚀 Why This Architecture?](#-why-this-architecture) · [🧱 Architecture](#-architecture-at-a-glance) · [🔄 Data Flow](#-end-to-end-data-flow) · [🏅 Medallion Lakehouse](#-medallion-lakehouse) · [⚡ Lambda + Kappa](#-lambda--kappa-hybrid) · [🔌 Serving Layer](#-serving-layer) · [🌐 Data Mesh](#-data-mesh-products-and-contracts) · [🔗 Data Fabric](#-data-fabric-and-active-metadata) · [🧩 Hexagonal Core](#-hexagonal-architecture) · [⚓ Kubernetes](#-kubernetes-deployment-topology)
+
+[🧰 Stack](#-technology-stack) · [✨ Features](#-features-and-capabilities) · [✅ Quality Gates](#-quality-gates) · [🧭 Design Decisions](#-design-decisions) · [📐 Architectural Invariants](#-architectural-invariants) · [💪 Strengths and Tradeoffs](#-strengths-and-tradeoffs) · [📄 License](#-license)
 
 ---
 
-## Disclaimer
+## 📋 Disclaimer
 
 This is an educational and architectural POC, not a production distribution. It uses demo credentials, a single-node object store and catalog, embedded SQLite in selected adapters, and a deliberately small resource envelope. A production deployment needs high availability, TLS, secret management, backups, multi-tenancy and a managed catalog.
 
 ---
 
-## Why This Architecture?
+## 🚀 Why This Architecture?
 
 ### Why a lakehouse?
 
@@ -87,7 +88,7 @@ The platform is intentionally profiled. Four focused profiles — `platform`, `b
 
 ---
 
-## Architecture at a Glance
+## 🧱 Architecture at a Glance
 
 ```mermaid
 graph TB
@@ -137,7 +138,7 @@ graph TB
 
 ---
 
-## End-to-End Data Flow
+## 🔄 End-to-End Data Flow
 
 ```mermaid
 graph LR
@@ -167,7 +168,7 @@ The batch path is intentionally complete: Gold is recomputed from Silver on ever
 
 ---
 
-## The Medallion Lakehouse
+## 🏅 The Medallion Lakehouse
 
 The lakehouse uses Iceberg as the table format, Polaris as the REST catalog and MinIO as the object store. The logical naming convention is `<tier>.<domain>.<table>`; the physical Iceberg identifier is derived by `src/domain/naming.py`.
 
@@ -219,7 +220,7 @@ Iceberg snapshots provide the historical view: an overwrite creates a new snapsh
 
 ---
 
-## Hybrid Lambda + Kappa
+## ⚡ Hybrid Lambda + Kappa
 
 The batch layer and the speed layer are deliberately asymmetric.
 
@@ -249,7 +250,7 @@ At query time, stream windows are aggregated to day grain before the anti-join. 
 
 ---
 
-## Serving Layer
+## 🔌 Serving Layer
 
 Trino is the single query surface over the lakehouse. The platform uses one catalog, `iceberg`, pointing at the Polaris REST catalog; batch and stream tables are namespaces inside it. The serving views hide the difference between the two paths.
 
@@ -272,7 +273,7 @@ The serving adapter executes SQL verbatim. When `TRINO_HOST` is set it tries Tri
 
 ---
 
-## Data Mesh, Products and Contracts
+## 🌐 Data Mesh, Products and Contracts
 
 The repository models three domains:
 
@@ -344,7 +345,7 @@ The cluster side is equally explicit. S6 renders `DataContract` and `DataProduct
 
 ---
 
-## Data Fabric and Active Metadata
+## 🔗 Data Fabric and Active Metadata
 
 Every use case can emit an OpenLineage run event. The Marquez adapter writes a local JSONL audit trail first and then posts the same event to the Marquez API. The local trail is the durable source of truth for the POC; the HTTP call is best-effort.
 
@@ -371,7 +372,7 @@ Four rules run on ingestion: schema changes on Silver and Gold, quality-threshol
 
 ---
 
-## Hexagonal Architecture
+## 🧩 Hexagonal Architecture
 
 The codebase is organized around a dependency rule: the domain and use cases do not know about Kubernetes, Spark, Trino, Marquez or the filesystem.
 
@@ -422,7 +423,7 @@ This is why the same aggregation code can be unit-tested locally, executed by a 
 
 ---
 
-## Kubernetes Deployment Topology
+## ⚓ Kubernetes Deployment Topology
 
 The local cluster is a three-node kind cluster: one control plane and two workers. Application workloads are split across the `platform`, `sales`, `marketing` and `finance` namespaces.
 
@@ -489,7 +490,7 @@ On a 6 GiB workstation the full set of subsystems does not fit simultaneously. `
 
 ---
 
-## Technology Stack
+## 🧰 Technology Stack
 
 | Layer | Technology | Version | Role |
 | :--- | :--- | :--- | :--- |
@@ -514,7 +515,7 @@ On a 6 GiB workstation the full set of subsystems does not fit simultaneously. `
 
 ---
 
-## Features and Capabilities
+## ✨ Features and Capabilities
 
 **Ingestion and storage**
 
@@ -561,7 +562,7 @@ On a 6 GiB workstation the full set of subsystems does not fit simultaneously. `
 
 ---
 
-## Quality Gates
+## ✅ Quality Gates
 
 Quality is a promotion policy, not a report. The engine evaluates Great Expectations-format suites without depending on the Great Expectations runtime, and the pure domain policy decides whether a table may be published.
 
@@ -602,189 +603,8 @@ sequenceDiagram
 
 The contract is the authority. An explicit `quality_threshold` argument is only a fallback when the contract is silent, which keeps promotion and the standalone quality CLI on the same policy.
 
----
 
-## Quickstart
-
-### Prerequisites
-
-- Podman with a machine sized for the profile you intend to run (8 GB recommended for the full demo).
-- `kind`, `kubectl` and `helm`.
-- Python 3.11+.
-- Ruby and Rake.
-- Python dependencies declared in `pyproject.toml`: the runtime set, the `dev` extra (`pytest`, `pytest-cov`, `ruff`, `mypy`) and the `contracts` extra (`jsonschema`). Without `jsonschema`, contract validation warns and checks structure only. The cluster seeder additionally needs `faker`, `numpy` and `psycopg2-binary`.
-- The code runs from the repository root on `sys.path`; there is no installed distribution, so run every command from the project directory.
-
-### Code verification
-
-The application core and the governance rules can be verified without a cluster:
-
-```bash
-rake preflight
-rake governance:validate
-rake lint
-rake typecheck
-rake test
-rake test:coverage
-```
-
-`rake` with no arguments runs governance validation, lint, type checking and the test suite.
-
-### Bring up the cluster
-
-```bash
-rake cluster:setup
-rake cluster:build
-rake cluster:seed
-rake cluster:up[platform]
-```
-
-`rake cluster:setup` creates or reuses the kind cluster, namespaces, storage and Helm repositories. `rake cluster:build` builds the `poc/ingest`, `poc/spark-medallion`, `poc/flink-stream` and `poc/lineage-webhook` images and loads them into every node. `rake cluster:seed` seeds the OLTP database through a port-forward.
-
-### Run the batch path
-
-```bash
-rake cluster:up[batch]
-rake batch:run
-rake lakehouse:rows
-```
-
-`rake batch:run` runs Bronze through the suspended ingestion CronJob and submits the Silver and Gold `ScheduledSparkApplication` specs as one-shot `SparkApplication`s. `rake lakehouse:rows` counts the rows through Polaris and through the storage adapter, so a divergence between the catalog and the lakehouse is visible.
-
-### Run the stream path
-
-```bash
-rake cluster:up[stream]
-rake stream:deploy
-rake stream:produce
-rake stream:status
-rake stream:logs
-```
-
-`rake stream:probe` proves the window, Iceberg and Parquet chain in a single pod without Kafka or the Flink Operator. `rake stream:replay:verify` checks that a full replay regenerates the same logical result.
-
-### Query both paths
-
-```bash
-rake cluster:up[serving]
-rake serving:verify
-```
-
-`rake serving:verify` reports the row count per `source_tier` and counts duplicated `(order_date, status)` keys; the expected duplicate count is `0`.
-
-### Run the phased demo
-
-```bash
-rake demo:phases
-```
-
-The phases run `platform -> batch -> stream -> serving -> fabric -> ops -> governance`. You can run a subset:
-
-```bash
-rake demo:phases[batch,stream]
-```
-
-### Kappa replay
-
-A replay requires both a fresh consumer group and `earliest`. The values live in `infra/helm/s4-stream/values.yaml` under `flinkJobs.ordersStream`, and `pipelines/orchestration/flink_replay.py` applies the same rule for orchestrated runs.
-
----
-
-## Testing and Evidence
-
-The repository contains **326 tests** collected by pytest at the release commit; the number is a snapshot of this version, not a promise. The suite is split into unit tests for the domain, ports, use cases and adapters, and integration tests for acceptance scenarios. `pytest` runs with warnings as errors to keep resource leaks and deprecations visible.
-
-| Check | Command | Gate |
-| :--- | :--- | :--- |
-| Unit and integration tests | `rake test` | All tests pass |
-| Coverage | `rake test:coverage` | `fail_under = 85` |
-| Lint | `rake lint` | Ruff rules |
-| Formatting | `rake format:check` | Ruff formatter |
-| Types | `rake typecheck` | mypy with typed definitions |
-| Contracts | `rake governance:validate` | Schema, compatibility and threshold checks |
-| Admission control | `rake governance:verify` | A product without an owner is rejected |
-| Lakehouse adapter | `rake lakehouse:probe` | Idempotent write and snapshot read |
-| Speed layer | `rake stream:probe` | Windows to Iceberg to Parquet |
-| Serving fusion | `rake serving:verify` | Both tiers reported and `claves_duplicadas = 0` |
-
-Unit tests prove the code; the cluster probes prove the wiring. Both are part of the evidence, and neither is a substitute for the other.
-
----
-
-## Web Interfaces and Ports
-
-Only interfaces that are actually rendered by the charts are listed. The kind configuration forwards these NodePorts to the host.
-
-| Service | URL | Credentials | Purpose |
-| :--- | :--- | :--- | :--- |
-| Trino | `http://localhost:8080` | user `trino`, no password | Interactive SQL over Iceberg |
-| MinIO Console | `http://localhost:9001` | `minioadmin` / `minioadmin` | Object store browser |
-| MinIO S3 API | `http://localhost:9000` | `minioadmin` / `minioadmin` | S3-compatible endpoint |
-| Apache Polaris | `http://localhost:8181` | OAuth2 client credentials | Iceberg REST catalog |
-| Marquez | `http://localhost:3002` | public | Lineage and dataset UI |
-| Grafana | `http://localhost:3000` | `admin` / `prom-operator` | Platform dashboards |
-| Kafka UI | `http://localhost:8090` | public | Topic browser, enabled per profile |
-
-The Marquez API listens on port `5000` inside the cluster. The alert service listens on port `8000` inside the cluster and exposes `/health` and `/metrics`.
-
----
-
-## Project Structure
-
-```text
-poc_data_engineering/
-├── README.md
-├── Rakefile
-├── pyproject.toml
-├── LICENSE
-├── data-generator/
-│   ├── oltp_seed.py
-│   └── event_producer.py
-├── domains/
-│   ├── sales/data-products/{orders,customers}/
-│   ├── marketing/data-products/{campaigns,leads}/
-│   └── finance/data-products/{budgets,financial_closings}/
-├── governance/
-│   ├── contract_validator.py
-│   ├── federation/
-│   ├── policies/
-│   └── schemas/
-├── quality/
-│   ├── expectations/
-│   └── gates/
-├── lineage/
-│   └── config/
-│       ├── lineage_webhook_service.py
-│       ├── alert-rules.yaml
-│       ├── openlineage.yml
-│       └── Dockerfile
-├── src/
-│   ├── domain/
-│   ├── ports/
-│   ├── use_cases/
-│   ├── adapters/
-│   └── container.py
-├── pipelines/
-│   ├── medallion/
-│   ├── stream/
-│   ├── serving/
-│   └── orchestration/
-├── infra/
-│   ├── helm/s1-ingestion ... s8-ops/
-│   ├── docker/
-│   ├── diagnostics/
-│   ├── kind/
-│   └── profiles/
-└── tests/
-    ├── unit/
-    └── integration/
-```
-
-Each directory maps to an architectural concern: `src/` is the hexagonal core, `pipelines/` contains the drivers and engine jobs, `domains/` holds the Data Mesh products, `governance/` and `quality/` implement the guardrails, and `infra/` is the deployment target.
-
----
-
-## Design Decisions
+## 🧭 Design Decisions
 
 The repository has no separate ADR folder on purpose: the decisions that matter are short enough to live here, and each one points at the code that owns it.
 
@@ -802,7 +622,7 @@ The repository has no separate ADR folder on purpose: the decisions that matter 
 
 ---
 
-## Architectural Invariants
+## 📐 Architectural Invariants
 
 These are the rules the code and tests are expected to preserve. If a change breaks one of them, it is an architectural change, not a refactor.
 
@@ -817,7 +637,7 @@ These are the rules the code and tests are expected to preserve. If a change bre
 
 ---
 
-## Strengths and Tradeoffs
+## 💪 Strengths and Tradeoffs
 
 | Area | Strength | Deliberate tradeoff |
 | :--- | :--- | :--- |
@@ -835,46 +655,6 @@ These are architectural choices, not accidental gaps. Each one can be revisited 
 
 ---
 
-## Known Limitations and Non-Goals
+## 📄 License
 
-A finished POC is one whose limits are written down. These are deliberate:
-
-| Area | Limitation | Consequence | Mitigation in the repository |
-| :--- | :--- | :--- | :--- |
-| Catalog | Polaris keeps its catalog in memory | A Polaris restart can lose table registrations | The S2 bootstrap job re-creates the catalog and the registration job re-registers the tables after every restart |
-| Alerting | No Alertmanager is deployed; most Prometheus alert rules are commented out | Alerts stay in the alert service and SQLite, not in a pager | Four active rules in `alert-rules.yaml` and `GET /api/v1/alerts` |
-| Stream freshness | Flink checkpoints every 30 s | A window is queryable only after the next checkpoint | `rake stream:status` reports job state; the replay check waits for the checkpoint |
-| Window sizes | The reference use case aggregates 300 s windows; the deployed Flink job uses 4 s | The two paths are not the same granularity | Serving aggregates stream windows to day grain before the anti-join |
-| Replay | The sink is an UPSERT, so row counts can grow on replay | `total-records` is not a replay-equality signal | `rake stream:replay:verify` compares a logical digest instead |
-| Serving fallback | With `TRINO_HOST` set, the adapter falls back to embedded SQLite if Trino fails | A local query can succeed while the cluster view is broken | `rake serving:verify` queries the deployed Trino directly |
-| Security | Demo credentials, no TLS, no authentication on Trino, no secret manager | Not safe outside a local workstation | Stated in the disclaimer and repeated here |
-| Portability | Image build and load assume Podman and kind | Docker-only environments need adaptation | The Dockerfiles under `infra/docker/` are standard |
-| Resources | The full topology needs about 8 GB; the clickstream job is disabled by default | Not every laptop can run everything at once | Profiles, phases and `rake ramp:*` |
-| Process | No CI service | Evidence is only as fresh as the last local run | Every gate is a single Rake command |
-
-**Non-goals.** This POC does not attempt high availability, backups or disaster recovery, multi-tenancy or end-user authentication, a bundled BI front end, cost optimisation, CDC or a schema registry, or production SLOs. Those are platform concerns that belong to the deployment around it, not to the architectural demonstration.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Action |
-| :--- | :--- | :--- |
-| `ValueError: Unknown LAKEHOUSE_BACKEND` | Typo or unsupported value | Use `sqlite` or `iceberg`; the container refuses to guess |
-| A Trino query fails but the local query passes | The serving adapter fell back to SQLite | Check `TRINO_HOST`, then run `rake serving:verify` |
-| A replay does not rewrite the windows | The consumer group has committed offsets, so `earliest` is ignored | Rotate `kafkaGroupId` and redeploy the job |
-| Polaris answers `401` | Missing OAuth client or scope | Check the S2 values; Trino 455 is pinned for the Polaris 1.8 scope |
-| Spark pods stay `Pending` | The kind VM has no room left | Run the demo as phases or use `rake ramp:*` |
-| Pods run stale code | Images were rebuilt but not reloaded into the nodes | `rake cluster:build` loads them into every node |
-| The unified view is missing | The S5 views init job did not run | Redeploy the `serving` profile, then `rake serving:verify` |
-
----
-
-## Contributing, Security and License
-
-This is a finished POC, not a product with a support contract. Issues and pull requests that fix a defect, correct documentation or add a reproducible probe are welcome; feature requests may be closed as out of scope.
-
-- **Security.** Do not open a public issue containing a vulnerability or a credential. The credentials in the charts (`minioadmin`, `admin/prom-operator`, the passwordless Trino user) are intentional and must be replaced before any non-local use.
-- **Data.** Every dataset is synthetic or generated at runtime. No personal data is shipped, and the PII masking rules are demonstrated on generated records.
-- **Scope.** The requirements specification is not part of this repository by design. The public contract is this README plus the contracts under `domains/`.
-- **License.** MIT. See [LICENSE](LICENSE). Copyright (c) 2026 Sergio Sánchez.
+MIT. See [LICENSE](LICENSE). Copyright (c) 2026 Sergio Sánchez.

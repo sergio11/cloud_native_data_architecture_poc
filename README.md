@@ -21,52 +21,13 @@ A **Proof-of-Concept (POC)** demonstrating a **modern analytical data architectu
 
 ---
 
-[📌 Status](#project-status) · [📋 Disclaimer](#disclaimer) · [🚀 Why This Architecture?](#why-this-architecture) · [🏗️ Architecture](#architecture-at-a-glance) · [🏔️ Medallion Lakehouse](#the-medallion-lakehouse) · [⚡ Lambda + Kappa](#hybrid-lambda--kappa) · [🔌 Serving Layer](#serving-layer) · [🕸️ Data Mesh](#data-mesh-products-and-contracts) · [🔗 Data Fabric](#data-fabric-and-active-metadata) · [🧩 Hexagonal Core](#hexagonal-architecture) · [☸️ Kubernetes](#kubernetes-deployment-topology) · [🧪 Testing](#testing-and-evidence) · [🏁 Quick Start](#quickstart) · [📁 Structure](#project-structure) · [⚠️ Limitations](#known-limitations-and-non-goals)
-
----
-
-## Project Status
-
-| Item | Value |
-| :--- | :--- |
-| Status | **POC complete** — the scope is closed and no roadmap is promised |
-| Maturity | Educational and architectural reference; not a production distribution |
-| Verification | Local by design: every gate is a Rake command, no hosted CI is required |
-| Public artifact | This repository, its Helm charts and its synthetic data generators |
-| Private artifact | The detailed requirements specification is maintained outside the published tree |
-
-The POC is considered done when the following holds, and it does today:
-
-- the core is executable and testable without a cluster;
-- every architectural claim maps to a test or a cluster probe;
-- the full topology is reproducible on a workstation within the documented memory budget;
-- the limitations are written down instead of discovered by the reader.
-
-No CI service is configured on purpose: this is a local experiment, and its evidence is produced by the commands in [Testing and evidence](#testing-and-evidence). A fork intended for production work should start by replacing the demo credentials and adding TLS and secret management.
+[📋 Disclaimer](#disclaimer) · [🚀 Why This Architecture?](#why-this-architecture) · [🏗️ Architecture](#architecture-at-a-glance) · [🏔️ Medallion Lakehouse](#the-medallion-lakehouse) · [⚡ Lambda + Kappa](#hybrid-lambda--kappa) · [🔌 Serving Layer](#serving-layer) · [🕸️ Data Mesh](#data-mesh-products-and-contracts) · [🔗 Data Fabric](#data-fabric-and-active-metadata) · [🧩 Hexagonal Core](#hexagonal-architecture) · [☸️ Kubernetes](#kubernetes-deployment-topology) · [🧪 Testing](#testing-and-evidence) · [🏁 Quick Start](#quickstart) · [📁 Structure](#project-structure) · [⚠️ Limitations](#known-limitations-and-non-goals)
 
 ---
 
 ## Disclaimer
 
 This is an educational and architectural POC, not a production distribution. It uses demo credentials, a single-node object store and catalog, embedded SQLite in selected adapters, and a deliberately small resource envelope. A production deployment needs high availability, TLS, secret management, backups, multi-tenancy and a managed catalog.
-
----
-
-## How to Read This Repository
-
-The code is layered on purpose, so it can be read in the same order the runtime executes it. A first pass takes about ten minutes and needs no cluster:
-
-| Step | Read | Why |
-| :--- | :--- | :--- |
-| 1 | `src/domain/naming.py` | The naming contract every other module depends on |
-| 2 | `src/ports/outbound.py` | The seams that make the engines swappable |
-| 3 | `src/domain/quality_gate.py` | The promotion policy: fail-closed, contract-first |
-| 4 | `src/use_cases/ingest_bronze.py`, `src/use_cases/aggregate_gold.py` | The batch flow end to end |
-| 5 | `pipelines/serving/unified_view.sql` | The batch-wins fusion rule as a single query |
-| 6 | `src/container.py` | The only file that chooses infrastructure |
-| 7 | `domains/sales/data-products/orders/contract.yaml` | A product contract as an executable interface |
-
-If you only read three files, read `naming.py`, `quality_gate.py` and `unified_view.sql`: they encode the three decisions that keep the rest of the repository coherent.
 
 ---
 

@@ -1,31 +1,29 @@
-# 🧪 Cloud-Native Data Architecture POC
+# Cloud-Native Data Architecture POC — Data Mesh, Data Fabric and Medallion Lakehouse on Kubernetes
 
-> 🕸️ A local-first POC of Data Mesh, Data Fabric, 🏔️ Medallion Lakehouse and ⚡ Lambda/Kappa on Kubernetes.
->
-> 🧊 Iceberg + Polaris + Spark + Flink + Kafka + Trino, with ✅ contract-driven quality gates and 🔗 OpenLineage/Marquez lineage.
-
-[![100% Open Source](https://img.shields.io/badge/Open%20Source-100%25-brightgreen.svg?style=flat-square)](#)
-[![Kubernetes / kind](https://img.shields.io/badge/Runtime-Kubernetes%20%2F%20kind-blue.svg?style=flat-square)](#)
-[![Apache Iceberg](https://img.shields.io/badge/Lakehouse-Apache%20Iceberg-blueviolet.svg?style=flat-square)](#)
-[![Apache Spark](https://img.shields.io/badge/Batch-Apache%20Spark%203.5-E25A1C.svg?style=flat-square)](#)
-[![Apache Flink](https://img.shields.io/badge/Streaming-Apache%20Flink%201.18-E6526F.svg?style=flat-square)](#)
-[![Trino](https://img.shields.io/badge/Serving-Trino%20455-DD00A1.svg?style=flat-square)](#)
-[![OpenLineage](https://img.shields.io/badge/Metadata-OpenLineage%20%2F%20Marquez-00B4D8.svg?style=flat-square)](#)
-[![Kyverno](https://img.shields.io/badge/Governance-Kyverno-blue.svg?style=flat-square)](#)
-[![Dagster](https://img.shields.io/badge/Orchestration-Dagster%20SDA-4F46E5.svg?style=flat-square)](#)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Kubernetes / kind](https://img.shields.io/badge/Kubernetes-kind-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kind.sigs.k8s.io/)
+[![Apache Iceberg 1.6.1](https://img.shields.io/badge/Apache_Iceberg-1.6.1-1B4F72?style=for-the-badge&logo=apache&logoColor=white)](https://iceberg.apache.org/)
+[![Apache Polaris 1.8.0](https://img.shields.io/badge/Apache_Polaris-1.8.0-1F4E79?style=for-the-badge&logo=apache&logoColor=white)](https://polaris.apache.org/)
+[![Apache Spark 3.5](https://img.shields.io/badge/Apache_Spark-3.5-E25A1C?style=for-the-badge&logo=apachespark&logoColor=white)](https://spark.apache.org/)
+[![Apache Flink 1.18](https://img.shields.io/badge/Apache_Flink-1.18-E6526F?style=for-the-badge&logo=apacheflink&logoColor=white)](https://flink.apache.org/)
+[![Apache Kafka 3.7](https://img.shields.io/badge/Apache_Kafka-3.7-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+[![Trino 455](https://img.shields.io/badge/Trino-455-DD00A1?style=for-the-badge&logo=trino&logoColor=white)](https://trino.io/)
+[![MinIO](https://img.shields.io/badge/MinIO-object_store-C72C48?style=for-the-badge&logo=minio&logoColor=white)](https://min.io/)
+[![OpenLineage and Marquez](https://img.shields.io/badge/OpenLineage_Marquez-0.45-00B4D8?style=for-the-badge)](https://openlineage.io/)
+[![pytest 326 passed](https://img.shields.io/badge/pytest-326_passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](#testing-and-evidence)
+[![License MIT](https://img.shields.io/badge/License-MIT-3DA639?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 
 ---
 
-## Introduction
+A **Proof-of-Concept (POC)** demonstrating a **modern analytical data architecture**: domain-owned Data Mesh products, Data Fabric metadata, a Medallion lakehouse on Apache Iceberg, and a hybrid Lambda/Kappa pipeline fused into a single serving surface. Built with Iceberg, Polaris, Spark, Flink, Kafka, Trino, Kyverno and OpenLineage/Marquez, and validated by a 326-test suite plus reproducible cluster probes. It is intended for architectural evaluation and learning, **not as a production deployment**.
 
-**Cloud-Native Data Architecture POC** is a local-first proof of concept for the architectural patterns that shape modern analytical platforms. It is built to be read, run and inspected: each paradigm is represented by code, a deployed workload and a verification path. The goal is to make each pattern executable and observable, not to prescribe a production reference architecture.
+> **In one paragraph:** A hexagonal Python core executes Bronze, Silver and Gold through a fail-closed contract gate, on either SQLite or Iceberg with Trino, without changing a line of business logic. A Flink job turns Kafka order events into 4-second event-time windows with watermarks, allowed lateness and dead-lettering, while the batch path recomputes Gold from Silver for deterministic corrections. Trino fuses both with a batch-wins anti-join, so no `(order_date, status)` key is counted twice. Products are governed as code — manifests, ODCS-style contracts, JSON-Schema validation and Kyverno admission policies — and every run emits OpenLineage events to Marquez and to a FastAPI alert service. The whole platform is pinned and runs on a three-node kind cluster on Podman, shrunk to a workstation through profiles and phases.
 
-The platform combines a Medallion lakehouse on Apache Iceberg, a hybrid Lambda/Kappa pipeline, domain-oriented Data Mesh governance, active metadata with OpenLineage and Marquez, and a single Trino serving layer. The application core is a hexagonal Python codebase; the heavy engines run on Kubernetes.
+---
 
-Everything is open source and pinned. The cluster is [kind](https://kind.sigs.k8s.io/) on Podman, so the system is reproducible on a workstation without a cloud account. The local machine is used for code verification and cluster operations; the data plane lives in Kubernetes.
+[📌 Status](#project-status) · [📋 Disclaimer](#disclaimer) · [🚀 Why This Architecture?](#why-this-architecture) · [🏗️ Architecture](#architecture-at-a-glance) · [🏔️ Medallion Lakehouse](#the-medallion-lakehouse) · [⚡ Lambda + Kappa](#hybrid-lambda--kappa) · [🔌 Serving Layer](#serving-layer) · [🕸️ Data Mesh](#data-mesh-products-and-contracts) · [🔗 Data Fabric](#data-fabric-and-active-metadata) · [🧩 Hexagonal Core](#hexagonal-architecture) · [☸️ Kubernetes](#kubernetes-deployment-topology) · [🧪 Testing](#testing-and-evidence) · [🏁 Quick Start](#quickstart) · [📁 Structure](#project-structure) · [⚠️ Limitations](#known-limitations-and-non-goals)
 
-Use this repository to study architecture decisions, to exercise a data contract or a quality policy, or as a starting point for a larger platform.
+---
 
 ## Project Status
 
@@ -45,19 +43,6 @@ The POC is considered done when the following holds, and it does today:
 - the limitations are written down instead of discovered by the reader.
 
 No CI service is configured on purpose: this is a local experiment, and its evidence is produced by the commands in [Testing and evidence](#testing-and-evidence). A fork intended for production work should start by replacing the demo credentials and adding TLS and secret management.
-
----
-
-## Table of Contents
-
-- [Project status](#project-status) · [Disclaimer](#disclaimer) · [How to read this repository](#how-to-read-this-repository)
-- [Why this architecture?](#why-this-architecture) · [Architecture at a glance](#architecture-at-a-glance) · [End-to-end data flow](#end-to-end-data-flow)
-- [Medallion lakehouse](#the-medallion-lakehouse) · [Hybrid Lambda + Kappa](#hybrid-lambda--kappa) · [Serving layer](#serving-layer)
-- [Data Mesh](#data-mesh-products-and-contracts) · [Data Fabric](#data-fabric-and-active-metadata) · [Hexagonal architecture](#hexagonal-architecture)
-- [Kubernetes topology](#kubernetes-deployment-topology) · [Technology stack](#technology-stack) · [Features](#features-and-capabilities)
-- [Quality gates](#quality-gates) · [Quickstart](#quickstart) · [Testing and evidence](#testing-and-evidence)
-- [Ports](#web-interfaces-and-ports) · [Project structure](#project-structure) · [Design decisions](#design-decisions)
-- [Invariants](#architectural-invariants) · [Limitations](#known-limitations-and-non-goals) · [Troubleshooting](#troubleshooting) · [License](#contributing-security-and-license)
 
 ---
 

@@ -27,9 +27,61 @@ Everything is open source and pinned. The cluster is [kind](https://kind.sigs.k8
 
 Use this repository to study architecture decisions, to exercise a data contract or a quality policy, or as a starting point for a larger platform.
 
+## Project Status
+
+| Item | Value |
+| :--- | :--- |
+| Status | **POC complete** — the scope is closed and no roadmap is promised |
+| Maturity | Educational and architectural reference; not a production distribution |
+| Verification | Local by design: every gate is a Rake command, no hosted CI is required |
+| Public artifact | This repository, its Helm charts and its synthetic data generators |
+| Private artifact | The detailed requirements specification is maintained outside the published tree |
+
+The POC is considered done when the following holds, and it does today:
+
+- the core is executable and testable without a cluster;
+- every architectural claim maps to a test or a cluster probe;
+- the full topology is reproducible on a workstation within the documented memory budget;
+- the limitations are written down instead of discovered by the reader.
+
+No CI service is configured on purpose: this is a local experiment, and its evidence is produced by the commands in [Testing and evidence](#testing-and-evidence). A fork intended for production work should start by replacing the demo credentials and adding TLS and secret management.
+
+---
+
+## Table of Contents
+
+- [Project status](#project-status) · [Disclaimer](#disclaimer) · [How to read this repository](#how-to-read-this-repository)
+- [Why this architecture?](#why-this-architecture) · [Architecture at a glance](#architecture-at-a-glance) · [End-to-end data flow](#end-to-end-data-flow)
+- [Medallion lakehouse](#the-medallion-lakehouse) · [Hybrid Lambda + Kappa](#hybrid-lambda--kappa) · [Serving layer](#serving-layer)
+- [Data Mesh](#data-mesh-products-and-contracts) · [Data Fabric](#data-fabric-and-active-metadata) · [Hexagonal architecture](#hexagonal-architecture)
+- [Kubernetes topology](#kubernetes-deployment-topology) · [Technology stack](#technology-stack) · [Features](#features-and-capabilities)
+- [Quality gates](#quality-gates) · [Quickstart](#quickstart) · [Testing and evidence](#testing-and-evidence)
+- [Ports](#web-interfaces-and-ports) · [Project structure](#project-structure) · [Design decisions](#design-decisions)
+- [Invariants](#architectural-invariants) · [Limitations](#known-limitations-and-non-goals) · [Troubleshooting](#troubleshooting) · [License](#contributing-security-and-license)
+
+---
+
 ## Disclaimer
 
 This is an educational and architectural POC, not a production distribution. It uses demo credentials, a single-node object store and catalog, embedded SQLite in selected adapters, and a deliberately small resource envelope. A production deployment needs high availability, TLS, secret management, backups, multi-tenancy and a managed catalog.
+
+---
+
+## How to Read This Repository
+
+The code is layered on purpose, so it can be read in the same order the runtime executes it. A first pass takes about ten minutes and needs no cluster:
+
+| Step | Read | Why |
+| :--- | :--- | :--- |
+| 1 | `src/domain/naming.py` | The naming contract every other module depends on |
+| 2 | `src/ports/outbound.py` | The seams that make the engines swappable |
+| 3 | `src/domain/quality_gate.py` | The promotion policy: fail-closed, contract-first |
+| 4 | `src/use_cases/ingest_bronze.py`, `src/use_cases/aggregate_gold.py` | The batch flow end to end |
+| 5 | `pipelines/serving/unified_view.sql` | The batch-wins fusion rule as a single query |
+| 6 | `src/container.py` | The only file that chooses infrastructure |
+| 7 | `domains/sales/data-products/orders/contract.yaml` | A product contract as an executable interface |
+
+If you only read three files, read `naming.py`, `quality_gate.py` and `unified_view.sql`: they encode the three decisions that keep the rest of the repository coherent.
 
 ---
 
@@ -85,7 +137,7 @@ The same use case runs against SQLite or Iceberg, against Trino or embedded SQL,
 
 Every subsystem is a Helm chart, and every operational action is a Rake task. Kubernetes provides the scheduling, restart policies and resource isolation that make the pipeline topology explicit. kind keeps the cluster local.
 
-The platform is intentionally profiled. A full demo needs roughly 8 GB of container limits, so smaller machines run the same topology as a sequence of phases: platform, batch, stream, serving, fabric, ops and governance. The lakehouse is the state that crosses phases; pods are disposable.
+The platform is intentionally profiled. Four focused profiles — `platform`, `batch`, `stream` and `serving` — cover individual workloads, while the `demo` profile describes the complete platform. A full demo needs roughly 8 GB of container limits, so smaller machines run the same topology as a sequence of exclusive phases: `platform`, `batch`, `stream`, `serving`, `fabric`, `ops` and `governance`. The lakehouse is the state that crosses phases; pods are disposable, data is not.
 
 ---
 
@@ -270,7 +322,7 @@ LIMIT 20;
 
 `source_tier` tells the consumer whether a row came from `batch_historical` or `stream_speed`. The view is deployed by the `trino-views` init job from `pipelines/serving/unified_view.sql`. Trino 455 is pinned because it exposes the OAuth2 scope required by Polaris 1.8.
 
-The serving adapter executes SQL verbatim. When `TRINO_HOST` is set it tries Trino and falls back to embedded SQLite if the query fails; otherwise it uses embedded SQLite directly. Both backends expose the same `<physical>_live` views, so local tests stay honest without rewriting queries.
+The serving adapter executes SQL verbatim. When `TRINO_HOST` is set it tries Trino and falls back to embedded SQLite if the query fails; otherwise it uses embedded SQLite directly. Both backends expose the same `<physical>_live` views, so local tests stay honest without rewriting queries. In the cluster, prefer `rake serving:verify`: it runs the query through the deployed Trino, so the local fallback cannot hide a missing view.
 
 ---
 
@@ -614,7 +666,8 @@ The contract is the authority. An explicit `quality_threshold` argument is only 
 - `kind`, `kubectl` and `helm`.
 - Python 3.11+.
 - Ruby and Rake.
-- Development tools from the `dev` extra: `pytest`, `pytest-cov`, `ruff` and `mypy`.
+- Python dependencies declared in `pyproject.toml`: the runtime set, the `dev` extra (`pytest`, `pytest-cov`, `ruff`, `mypy`) and the `contracts` extra (`jsonschema`). Without `jsonschema`, contract validation warns and checks structure only. The cluster seeder additionally needs `faker`, `numpy` and `psycopg2-binary`.
+- The code runs from the repository root on `sys.path`; there is no installed distribution, so run every command from the project directory.
 
 ### Code verification
 
@@ -671,7 +724,7 @@ rake cluster:up[serving]
 rake serving:verify
 ```
 
-`rake serving:verify` confirms that the unified view contains both tiers and no duplicated `(order_date, status)` keys.
+`rake serving:verify` reports the row count per `source_tier` and counts duplicated `(order_date, status)` keys; the expected duplicate count is `0`.
 
 ### Run the phased demo
 
@@ -693,7 +746,7 @@ A replay requires both a fresh consumer group and `earliest`. The values live in
 
 ## Testing and Evidence
 
-The repository contains **326 tests** collected by pytest. The suite is split into unit tests for the domain, ports, use cases and adapters, and integration tests for acceptance scenarios. `pytest` runs with warnings as errors to keep resource leaks and deprecations visible.
+The repository contains **326 tests** collected by pytest at the release commit; the number is a snapshot of this version, not a promise. The suite is split into unit tests for the domain, ports, use cases and adapters, and integration tests for acceptance scenarios. `pytest` runs with warnings as errors to keep resource leaks and deprecations visible.
 
 | Check | Command | Gate |
 | :--- | :--- | :--- |
@@ -706,7 +759,7 @@ The repository contains **326 tests** collected by pytest. The suite is split in
 | Admission control | `rake governance:verify` | A product without an owner is rejected |
 | Lakehouse adapter | `rake lakehouse:probe` | Idempotent write and snapshot read |
 | Speed layer | `rake stream:probe` | Windows to Iceberg to Parquet |
-| Serving fusion | `rake serving:verify` | Both tiers, no duplicate keys |
+| Serving fusion | `rake serving:verify` | Both tiers reported and `claves_duplicadas = 0` |
 
 Unit tests prove the code; the cluster probes prove the wiring. Both are part of the evidence, and neither is a substitute for the other.
 
@@ -785,6 +838,39 @@ Each directory maps to an architectural concern: `src/` is the hexagonal core, `
 
 ---
 
+## Design Decisions
+
+The repository has no separate ADR folder on purpose: the decisions that matter are short enough to live here, and each one points at the code that owns it.
+
+| # | Decision | Rationale | Lives in |
+| :--- | :--- | :--- | :--- |
+| D1 | Hexagonal core with a single composition root | The business logic is testable without a cluster, and the engine choice is one line | `src/container.py` |
+| D2 | Logical names `<tier>.<domain>.<table>`; published tiers drop the tier | One name per concept, mapped once instead of guessed per query | `src/domain/naming.py` |
+| D3 | Content-hash idempotency in Bronze | Re-running a batch is safe without a truncate step | `src/adapters/storage/` |
+| D4 | Fail-closed gate; contract thresholds win over the global default | A bad batch must stop, not be published with a warning | `src/domain/quality_gate.py` |
+| D5 | Gold overwrites as supersede | A retry must not double count revenue | `src/use_cases/aggregate_gold.py` |
+| D6 | Batch wins at serving time, stream fills the gaps | One number per key, stable history, low-latency novelty | `pipelines/serving/unified_view.sql` |
+| D7 | Kappa replay by rotating the consumer group | A group with committed offsets ignores `earliest` | `pipelines/stream/`, `Rakefile` |
+| D8 | Lineage is best-effort; the local audit trail is durable | Marquez must never block a pipeline | `src/adapters/lineage/` |
+| D9 | Profiles and phases instead of one monolithic deploy | The same topology fits in 6–8 GB and stays inspectable | `infra/profiles/`, `Rakefile` |
+
+---
+
+## Architectural Invariants
+
+These are the rules the code and tests are expected to preserve. If a change breaks one of them, it is an architectural change, not a refactor.
+
+1. **The core does not import an engine.** `src/` contains no `pyspark` or `pyflink` import; Spark and Flink are deployment mechanisms.
+2. **The domain does no I/O.** It has no filesystem, network or environment access; the salt, thresholds and names are injected.
+3. **Every table name resolves through `naming.py`.** Drivers, adapters and serving SQL do not invent physical names.
+4. **No write happens before the gate passes.** Missing suite, empty data or an unsupported assertion blocks promotion.
+5. **The contract outranks the global threshold.** `0.95` is a fallback, not the policy.
+6. **Batch keys shadow stream keys.** The unified view never returns two rows for the same `(order_date, status)`.
+7. **An unknown backend fails at startup.** `LAKEHOUSE_BACKEND` accepts only `sqlite` or `iceberg`.
+8. **A product without an owner is rejected at admission.** Governance is enforced by the API server, not only by a script.
+
+---
+
 ## Strengths and Tradeoffs
 
 | Area | Strength | Deliberate tradeoff |
@@ -803,8 +889,46 @@ These are architectural choices, not accidental gaps. Each one can be revisited 
 
 ---
 
-## License
+## Known Limitations and Non-Goals
 
-MIT. See [LICENSE](LICENSE).
+A finished POC is one whose limits are written down. These are deliberate:
 
-Copyright (c) 2026 Sergio Sánchez.
+| Area | Limitation | Consequence | Mitigation in the repository |
+| :--- | :--- | :--- | :--- |
+| Catalog | Polaris keeps its catalog in memory | A Polaris restart can lose table registrations | The S2 bootstrap job re-creates the catalog and the registration job re-registers the tables after every restart |
+| Alerting | No Alertmanager is deployed; most Prometheus alert rules are commented out | Alerts stay in the alert service and SQLite, not in a pager | Four active rules in `alert-rules.yaml` and `GET /api/v1/alerts` |
+| Stream freshness | Flink checkpoints every 30 s | A window is queryable only after the next checkpoint | `rake stream:status` reports job state; the replay check waits for the checkpoint |
+| Window sizes | The reference use case aggregates 300 s windows; the deployed Flink job uses 4 s | The two paths are not the same granularity | Serving aggregates stream windows to day grain before the anti-join |
+| Replay | The sink is an UPSERT, so row counts can grow on replay | `total-records` is not a replay-equality signal | `rake stream:replay:verify` compares a logical digest instead |
+| Serving fallback | With `TRINO_HOST` set, the adapter falls back to embedded SQLite if Trino fails | A local query can succeed while the cluster view is broken | `rake serving:verify` queries the deployed Trino directly |
+| Security | Demo credentials, no TLS, no authentication on Trino, no secret manager | Not safe outside a local workstation | Stated in the disclaimer and repeated here |
+| Portability | Image build and load assume Podman and kind | Docker-only environments need adaptation | The Dockerfiles under `infra/docker/` are standard |
+| Resources | The full topology needs about 8 GB; the clickstream job is disabled by default | Not every laptop can run everything at once | Profiles, phases and `rake ramp:*` |
+| Process | No CI service | Evidence is only as fresh as the last local run | Every gate is a single Rake command |
+
+**Non-goals.** This POC does not attempt high availability, backups or disaster recovery, multi-tenancy or end-user authentication, a bundled BI front end, cost optimisation, CDC or a schema registry, or production SLOs. Those are platform concerns that belong to the deployment around it, not to the architectural demonstration.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Action |
+| :--- | :--- | :--- |
+| `ValueError: Unknown LAKEHOUSE_BACKEND` | Typo or unsupported value | Use `sqlite` or `iceberg`; the container refuses to guess |
+| A Trino query fails but the local query passes | The serving adapter fell back to SQLite | Check `TRINO_HOST`, then run `rake serving:verify` |
+| A replay does not rewrite the windows | The consumer group has committed offsets, so `earliest` is ignored | Rotate `kafkaGroupId` and redeploy the job |
+| Polaris answers `401` | Missing OAuth client or scope | Check the S2 values; Trino 455 is pinned for the Polaris 1.8 scope |
+| Spark pods stay `Pending` | The kind VM has no room left | Run the demo as phases or use `rake ramp:*` |
+| Pods run stale code | Images were rebuilt but not reloaded into the nodes | `rake cluster:build` loads them into every node |
+| The unified view is missing | The S5 views init job did not run | Redeploy the `serving` profile, then `rake serving:verify` |
+
+---
+
+## Contributing, Security and License
+
+This is a finished POC, not a product with a support contract. Issues and pull requests that fix a defect, correct documentation or add a reproducible probe are welcome; feature requests may be closed as out of scope.
+
+- **Security.** Do not open a public issue containing a vulnerability or a credential. The credentials in the charts (`minioadmin`, `admin/prom-operator`, the passwordless Trino user) are intentional and must be replaced before any non-local use.
+- **Data.** Every dataset is synthetic or generated at runtime. No personal data is shipped, and the PII masking rules are demonstrated on generated records.
+- **Scope.** The requirements specification is not part of this repository by design. The public contract is this README plus the contracts under `domains/`.
+- **License.** MIT. See [LICENSE](LICENSE). Copyright (c) 2026 Sergio Sánchez.
